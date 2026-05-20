@@ -1,23 +1,20 @@
 # DataSAXS Template
 
-Prototype propre pour recommencer le logiciel DataSAXS avec une structure modulaire.
+Prototype interface for SAXS data processing from ID13, ID02, and XENOCS beamlines.
 
-Contact : piaget.nathan@icloud.com
-
-## Lancer l'application
+## Launching the application
 
 ```bash
 cd DataSAXS_Template
 python3 main.py
-```
 
-Sur ton Mac avec Python 3.14 :
+On macOS with Python 3.14:
 
 ```bash
 /Library/Frameworks/Python.framework/Versions/3.14/bin/python3 main.py
 ```
 
-## Installer les dépendances
+## Installing dependencies
 
 ```bash
 /Library/Frameworks/Python.framework/Versions/3.14/bin/python3 -m pip install -r requirements.txt
@@ -39,5 +36,3 @@ DataSAXS_Template/
 │   └── __init__.py
 └── assets/
 ```
-
-Chaque onglet est dans son propre fichier Python.
