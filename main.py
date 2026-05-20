@@ -203,6 +203,53 @@ class MainWindow(QMainWindow):
     def save_local_commit(self, commit_sha):
         LOCAL_VERSION_FILE.write_text(str(commit_sha).strip(), encoding="utf-8")
 
+    def current_sources_match_github(self):
+        """
+        Avoid false update alerts when LRPhoton was freshly downloaded as a GitHub ZIP,
+        or when only the local .lrphoton_commit marker is stale.
+        """
+        app_dir = Path(__file__).resolve().parent
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            zip_path = temporary_path / "lrphoton_compare.zip"
+
+            response = requests.get(SOURCE_ZIP_URL, timeout=20)
+            response.raise_for_status()
+            zip_path.write_bytes(response.content)
+
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                archive.extractall(temporary_path)
+
+            extracted_roots = [path for path in temporary_path.iterdir() if path.is_dir()]
+            if not extracted_roots:
+                return False
+
+            source_root = extracted_roots[0]
+
+            files_to_compare = [
+                "main.py",
+                "tabs/view_tab.py",
+                "tabs/datplot_tab.py",
+                "tabs/centre_tab.py",
+                "tabs/cave_tab.py",
+                "tabs/radial_tab.py",
+                "tabs/azimuthal_tab.py",
+                "tabs/hermans_tab.py",
+            ]
+
+            for relative_name in files_to_compare:
+                local_file = app_dir / relative_name
+                remote_file = source_root / relative_name
+
+                if not local_file.exists() or not remote_file.exists():
+                    return False
+
+                if local_file.read_bytes() != remote_file.read_bytes():
+                    return False
+
+        return True
+
     def install_update_from_github(self, remote_sha):
         app_dir = Path(__file__).resolve().parent
 
@@ -280,14 +327,14 @@ class MainWindow(QMainWindow):
 
             local_sha = self.get_local_commit()
 
-            # First launch after a manual GitHub ZIP download:
-            # no local commit file exists yet, so this copy is the current GitHub state.
-            if not local_sha:
-                self.save_local_commit(remote_sha)
+            if local_sha == remote_sha:
                 self.version_label.setText("Up to date")
                 return
 
-            if local_sha == remote_sha:
+            # If the source files already match GitHub, only the local marker is stale.
+            # This happens easily after manually downloading/extracting a ZIP over an old folder.
+            if self.current_sources_match_github():
+                self.save_local_commit(remote_sha)
                 self.version_label.setText("Up to date")
                 return
 
