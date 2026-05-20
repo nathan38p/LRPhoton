@@ -352,12 +352,16 @@ class MainWindow(QMainWindow):
 
             self.version_label.setText("Updated")
 
-            QMessageBox.information(
-                self,
-                "LRPhoton updated",
-                "The update has been installed.\n\n"
-                "Please close and reopen LRPhoton to apply the new files."
-            )
+            close_box = QMessageBox(self)
+            close_box.setWindowTitle("LRPhoton updated")
+            close_box.setIcon(QMessageBox.Information)
+            close_box.setText("The update has been installed.")
+            close_box.setInformativeText("LRPhoton will now close to apply the new files.")
+            close_box.setStandardButtons(QMessageBox.Ok)
+            close_box.button(QMessageBox.Ok).setText("Close")
+            close_box.exec()
+
+            QApplication.quit()
 
         except Exception as error:
             self.version_label.setText("Update status unavailable")
