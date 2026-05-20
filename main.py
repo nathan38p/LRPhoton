@@ -357,11 +357,19 @@ class MainWindow(QMainWindow):
             self.install_update_from_github(remote_sha)
 
             self.version_label.setText("Updated")
-            QMessageBox.information(
+
+            result = QMessageBox.question(
                 self,
                 "LRPhoton updated",
-                "The update has been installed.\n\nClose LRPhoton and open it again to use the new version."
+                "The update has been installed.\n\n"
+                "LRPhoton must now close to apply the new files.\n\n"
+                "Close LRPhoton now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
             )
+
+            if result == QMessageBox.Yes:
+                QApplication.quit()
 
         except Exception as error:
             self.version_label.setText("Update status unavailable")
