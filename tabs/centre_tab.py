@@ -98,6 +98,28 @@ def read_edf_file(filename: str):
     return img, header, raw_header_text, byte_order, data_type_str
 
 
+def add_matching_edf_center(header: dict, filename: str):
+    edf_path = Path(filename).with_suffix(".edf")
+    if not edf_path.exists():
+        return header
+
+    try:
+        _, edf_header, *_ = read_edf_file(edf_path)
+    except Exception:
+        return header
+
+    copied = False
+    for key in ["Center_1", "Center_2", "center_1", "center_2"]:
+        if key in edf_header and key not in header:
+            header[key] = edf_header[key]
+            copied = True
+
+    if copied:
+        header["Center source"] = edf_path.name
+
+    return header
+
+
 def read_h5_first_image(filename: str):
     filename = Path(filename)
     datasets = []
@@ -130,6 +152,8 @@ def read_h5_first_image(filename: str):
 
         for key, value in dataset.attrs.items():
             header[key] = str(value)
+
+        add_matching_edf_center(header, filename)
 
         if dataset.ndim == 2:
             img = np.asarray(dataset[...], dtype=np.float64)
@@ -230,6 +254,7 @@ class ImageCanvas(FigureCanvas):
         self.im = None
         self.cbar = None
         self.coordinate_label = None
+        self.reset_view_on_next_show = False
 
         self._dragging = False
         self._drag_start = None
@@ -441,8 +466,8 @@ class ImageCanvas(FigureCanvas):
     def show_image(self, img, xc, yc, title, clim_min=None, clim_max=None):
         self.raw_image = img
 
-        old_xlim = self.ax.get_xlim() if self.im is not None else None
-        old_ylim = self.ax.get_ylim() if self.im is not None else None
+        old_xlim = self.ax.get_xlim() if self.im is not None and not self.reset_view_on_next_show else None
+        old_ylim = self.ax.get_ylim() if self.im is not None and not self.reset_view_on_next_show else None
 
         self.ax.clear()
 
@@ -458,8 +483,6 @@ class ImageCanvas(FigureCanvas):
         if clim_min is not None and clim_max is not None and clim_min < clim_max:
             self.im.set_clim(clim_min, clim_max)
 
-        self.ax.axvline(xc - 1, color="red", linewidth=1.2)
-        self.ax.axhline(yc - 1, color="red", linewidth=1.2)
         if title:
             self.ax.set_title(title)
         self.ax.set_aspect("equal")
@@ -479,6 +502,7 @@ class ImageCanvas(FigureCanvas):
             self.ax.set_xlim(old_xlim)
             self.ax.set_ylim(old_ylim)
 
+        self.reset_view_on_next_show = False
         self.draw_idle()
 
 
@@ -487,6 +511,144 @@ class PlotCanvas(FigureCanvas):
         self.fig = Figure(figsize=(5, 3), tight_layout=True)
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        try:
+            self.grabGesture(Qt.PinchGesture)
+        except Exception:
+            pass
+
+    def event(self, event):
+        try:
+            if event.type() == QEvent.NativeGesture:
+                gesture_type = event.gestureType()
+                value = event.value()
+                if gesture_type == Qt.ZoomNativeGesture and value != 0:
+                    scale = 1.0 / (1.0 + value) if value > -0.95 else 1.25
+                    self.zoom_at_qpoint(self._event_center_point(event), scale)
+                    event.accept()
+                    return True
+
+                if gesture_type == Qt.SmartZoomNativeGesture:
+                    self.reset_view()
+                    event.accept()
+                    return True
+
+            if event.type() == QEvent.Gesture:
+                pinch = event.gesture(Qt.PinchGesture)
+                if pinch is not None:
+                    factor = pinch.scaleFactor()
+                    if factor and factor > 0:
+                        self.zoom_at_qpoint(self._event_center_point(event), 1.0 / factor)
+                        event.accept()
+                        return True
+        except Exception:
+            pass
+
+        return super().event(event)
+
+    def wheelEvent(self, event):
+        delta = event.pixelDelta()
+        if delta.isNull():
+            delta = event.angleDelta()
+            dx = delta.x() / 120.0
+            dy = delta.y() / 120.0
+        else:
+            dx = delta.x() / 80.0
+            dy = delta.y() / 80.0
+
+        if event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+            if dy != 0:
+                scale = 0.88 if dy > 0 else 1.14
+                self.zoom_at_qpoint(event.position(), scale)
+        else:
+            self.pan_by_trackpad(dx, dy)
+
+        event.accept()
+
+    def _event_center_point(self, event):
+        try:
+            position = event.position()
+            if position is not None:
+                return position
+        except Exception:
+            pass
+
+        return self.rect().center()
+
+    def _qpoint_to_data_pos(self, qpoint):
+        try:
+            x_widget = float(qpoint.x())
+            y_widget = float(qpoint.y())
+        except Exception:
+            x_widget = self.width() / 2
+            y_widget = self.height() / 2
+
+        bbox = self.ax.get_window_extent()
+        x_fig = bbox.x0 + (x_widget / max(self.width(), 1)) * bbox.width
+        y_fig = bbox.y1 - (y_widget / max(self.height(), 1)) * bbox.height
+        xdata, ydata = self.ax.transData.inverted().transform((x_fig, y_fig))
+
+        if not np.isfinite(xdata) or not np.isfinite(ydata):
+            xlim = self.ax.get_xlim()
+            ylim = self.ax.get_ylim()
+            xdata = (xlim[0] + xlim[1]) / 2
+            ydata = (ylim[0] + ylim[1]) / 2
+
+        return xdata, ydata
+
+    def _scaled_limits(self, limits, center, scale, is_log):
+        left, right = limits
+        if is_log and left > 0 and right > 0 and center > 0:
+            left_l, right_l, center_l = np.log10([left, right, center])
+            return (
+                10 ** (center_l + (left_l - center_l) * scale),
+                10 ** (center_l + (right_l - center_l) * scale),
+            )
+
+        return (
+            center + (left - center) * scale,
+            center + (right - center) * scale,
+        )
+
+    def zoom_at_qpoint(self, qpoint, scale):
+        if scale <= 0:
+            return
+
+        xdata, ydata = self._qpoint_to_data_pos(qpoint)
+        self.ax.set_xlim(
+            self._scaled_limits(self.ax.get_xlim(), xdata, scale, self.ax.get_xscale() == "log")
+        )
+        self.ax.set_ylim(
+            self._scaled_limits(self.ax.get_ylim(), ydata, scale, self.ax.get_yscale() == "log")
+        )
+        self.draw_idle()
+
+    def _panned_limits(self, limits, delta, is_log):
+        left, right = limits
+        if is_log and left > 0 and right > 0:
+            left_l, right_l = np.log10([left, right])
+            span = right_l - left_l
+            shift = -delta * span * 0.08
+            return 10 ** (left_l + shift), 10 ** (right_l + shift)
+
+        span = right - left
+        shift = -delta * span * 0.08
+        return left + shift, right + shift
+
+    def pan_by_trackpad(self, dx, dy):
+        self.ax.set_xlim(
+            self._panned_limits(self.ax.get_xlim(), dx, self.ax.get_xscale() == "log")
+        )
+        self.ax.set_ylim(
+            self._panned_limits(self.ax.get_ylim(), -dy, self.ax.get_yscale() == "log")
+        )
+        self.draw_idle()
+
+    def reset_view(self):
+        self.ax.relim()
+        self.ax.autoscale_view()
+        self.draw_idle()
 
 
 # ============================================================
@@ -519,14 +681,15 @@ class CentreTab(QWidget):
         image_box = QGroupBox("Scattering pattern")
         control_box = QGroupBox("Centre tools")
         graph_box = QGroupBox("I(q) directions, log-log")
+        image_box.setMaximumWidth(700)
 
         main.addWidget(image_box, 0, 0)
         main.addWidget(control_box, 0, 1)
         main.addWidget(graph_box, 0, 2)
 
-        main.setColumnStretch(0, 2)
+        main.setColumnStretch(0, 1)
         main.setColumnStretch(1, 0)
-        main.setColumnStretch(2, 1)
+        main.setColumnStretch(2, 2)
 
         image_layout = QVBoxLayout(image_box)
         image_layout.setContentsMargins(6, 18, 6, 6)
@@ -550,7 +713,8 @@ class CentreTab(QWidget):
         image_layout.addWidget(self.coordinate_label, stretch=0)
 
         adjust = QHBoxLayout()
-        adjust.setSpacing(12)
+        adjust.setContentsMargins(0, 0, 0, 0)
+        adjust.setSpacing(10)
         image_layout.addLayout(adjust)
 
         move_box = QGroupBox("Centre position")
@@ -570,33 +734,46 @@ class CentreTab(QWidget):
         self.btn_rot_left = QPushButton("⟲")
         self.btn_rot_right = QPushButton("⟳")
 
+        for button in [self.btn_up, self.btn_down, self.btn_left, self.btn_right]:
+            button.setFixedSize(42, 32)
+
+        for button in [self.btn_rot_left, self.btn_rot_right]:
+            button.setFixedSize(42, 30)
+
         self.label_theta = QLabel("θ = 0.00°")
 
         self.step_px = QDoubleSpinBox()
         self.step_px.setRange(0.01, 1e9)
         self.step_px.setDecimals(2)
         self.step_px.setValue(1)
+        self.step_px.setFixedWidth(110)
 
         self.step_deg = QDoubleSpinBox()
         self.step_deg.setRange(0.01, 360)
         self.step_deg.setDecimals(2)
         self.step_deg.setValue(0.2)
+        self.step_deg.setFixedWidth(82)
 
         move_layout.addWidget(self.btn_up, 0, 1)
         move_layout.addWidget(self.btn_left, 1, 0)
         move_layout.addWidget(self.btn_down, 1, 1)
         move_layout.addWidget(self.btn_right, 1, 2)
-        move_layout.addWidget(QLabel("Step px"), 0, 3)
+        step_px_label = QLabel("Step px")
+        step_px_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        move_layout.addWidget(step_px_label, 0, 3)
         move_layout.addWidget(self.step_px, 0, 4)
+        move_layout.setColumnStretch(5, 1)
 
         rotate_layout.addWidget(self.btn_rot_left, 0, 0)
         rotate_layout.addWidget(self.btn_rot_right, 1, 0)
         rotate_layout.addWidget(self.label_theta, 0, 1, 1, 2)
-        rotate_layout.addWidget(QLabel("Step deg"), 1, 1)
+        step_deg_label = QLabel("Step deg")
+        step_deg_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        rotate_layout.addWidget(step_deg_label, 1, 1)
         rotate_layout.addWidget(self.step_deg, 1, 2)
+        rotate_layout.setColumnStretch(3, 1)
 
-        adjust.addWidget(move_box, stretch=1)
-        adjust.addStretch(1)
+        adjust.addWidget(move_box, stretch=2)
         adjust.addWidget(rotate_box, stretch=1)
 
         control = QVBoxLayout(control_box)
@@ -604,7 +781,6 @@ class CentreTab(QWidget):
         control.setSpacing(6)
 
         self.btn_open = QPushButton("Open EDF / H5")
-        self.btn_plot = QPushButton("Plot I(q) directions")
 
         preset_layout = QHBoxLayout()
         preset_layout.setSpacing(4)
@@ -646,7 +822,6 @@ class CentreTab(QWidget):
         self._add_control(control, "Pixel Y (mm):", self.edit_px_y)
         self._add_control(control, "Wavelength (Å):", self.edit_lambda)
         self._add_control(control, "Beamstop radius (px):", self.edit_beamstop_radius)
-        control.addWidget(self.btn_plot)
         control.addWidget(self.status)
 
         graph_layout = QVBoxLayout(graph_box)
@@ -657,7 +832,6 @@ class CentreTab(QWidget):
         graph_layout.addWidget(self.canvas_v)
 
         self.btn_open.clicked.connect(self.open_image_file)
-        self.btn_plot.clicked.connect(self.update_plots)
 
         self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
         self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
@@ -676,6 +850,10 @@ class CentreTab(QWidget):
 
         self.edit_xc.valueChanged.connect(self.manual_params_changed)
         self.edit_yc.valueChanged.connect(self.manual_params_changed)
+        self.edit_distance.valueChanged.connect(self.manual_params_changed)
+        self.edit_px_x.valueChanged.connect(self.manual_params_changed)
+        self.edit_px_y.valueChanged.connect(self.manual_params_changed)
+        self.edit_lambda.valueChanged.connect(self.manual_params_changed)
         self.edit_beamstop_radius.valueChanged.connect(self.manual_params_changed)
 
         self.set_controls_enabled(False)
@@ -696,8 +874,6 @@ class CentreTab(QWidget):
         layout.addWidget(widget)
 
     def set_controls_enabled(self, enabled):
-        self.btn_plot.setEnabled(enabled)
-
         self.btn_xenocs.setEnabled(enabled)
         self.btn_id02.setEnabled(enabled)
         self.btn_id13.setEnabled(enabled)
@@ -750,9 +926,8 @@ class CentreTab(QWidget):
         self.edit_px_y.setEnabled(False)
 
     def update_centre_warning_labels(self):
-        warning = " ⚠️" if self.instrument_mode in ["ID02", "ID13", "Custom"] else ""
-        self.centre_x_label.setText(f"Centre X:{warning}")
-        self.centre_y_label.setText(f"Centre Y:{warning}")
+        self.centre_x_label.setText("Centre X:")
+        self.centre_y_label.setText("Centre Y:")
 
     def refresh_after_preset_change(self):
         if self.img_raw is None:
@@ -892,6 +1067,7 @@ class CentreTab(QWidget):
             self.label_theta.setText(f"θ = {self.theta_deg:.2f}°")
 
             self.update_masked_image()
+            self.canvas_img.reset_view_on_next_show = True
             self.show_center_image()
             self.update_plots()
 

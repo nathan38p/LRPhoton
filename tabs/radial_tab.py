@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QComboBox,
+    QSlider,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -111,7 +112,30 @@ def read_edf_file(filename: str):
     return image, header
 
 
-def read_h5_first_image(filename: str):
+def add_matching_edf_center(header: dict, filename: str):
+    edf_path = Path(filename).with_suffix(".edf")
+    if not edf_path.exists():
+        return header
+
+    try:
+        _, edf_header = read_edf_file(edf_path)
+    except Exception:
+        return header
+
+    copied = False
+    for key in ["Center_1", "Center_2", "center_1", "center_2"]:
+        if key in edf_header and key not in header:
+            header[key] = edf_header[key]
+            copied = True
+
+    if copied:
+        header["Center source"] = edf_path.name
+
+    return header
+
+
+
+def inspect_h5_image_dataset(filename: str):
     filename = Path(filename)
     datasets = []
 
@@ -134,42 +158,84 @@ def read_h5_first_image(filename: str):
 
         dataset_name = preferred or datasets[0]
         dataset = h5[dataset_name]
+        shape = tuple(dataset.shape)
 
         header = {
             "Dataset": dataset_name,
-            "Shape": str(dataset.shape),
+            "Shape": str(shape),
             "Dtype": str(dataset.dtype),
         }
 
         for key, value in dataset.attrs.items():
             header[key] = str(value)
 
+        add_matching_edf_center(header, filename)
+
+        if dataset.ndim == 2:
+            frame_axis = None
+            n_frames = 1
+        elif dataset.ndim == 3:
+            frame_axis = int(np.argmin(shape))
+            n_frames = int(shape[frame_axis])
+            header["Frame axis"] = str(frame_axis)
+            header["Number of frames"] = str(n_frames)
+        else:
+            raise ValueError("Only 2D and 3D H5 datasets are supported here.")
+
+    return dataset_name, shape, frame_axis, n_frames, header
+
+
+def read_h5_frame(filename: str, dataset_name: str = None, frame_index: int = 0):
+    filename = Path(filename)
+
+    if dataset_name is None:
+        dataset_name, _, _, _, _ = inspect_h5_image_dataset(filename)
+
+    with h5py.File(filename, "r") as h5:
+        dataset = h5[dataset_name]
+
+        header = {
+            "Dataset": dataset_name,
+            "Shape": str(tuple(dataset.shape)),
+            "Dtype": str(dataset.dtype),
+        }
+
+        for key, value in dataset.attrs.items():
+            header[key] = str(value)
+
+        add_matching_edf_center(header, filename)
+
         if dataset.ndim == 2:
             image = np.asarray(dataset[...], dtype=np.float64)
+            header["Displayed frame"] = "single 2D image"
         elif dataset.ndim == 3:
             shape = dataset.shape
             frame_axis = int(np.argmin(shape))
+            n_frames = int(shape[frame_axis])
+            frame_index = max(0, min(int(frame_index), n_frames - 1))
+
             if frame_axis == 0:
-                image = np.asarray(dataset[0, :, :], dtype=np.float64)
-                header["Displayed frame"] = "0 from axis 0"
+                image = np.asarray(dataset[frame_index, :, :], dtype=np.float64)
             elif frame_axis == 1:
-                image = np.asarray(dataset[:, 0, :], dtype=np.float64)
-                header["Displayed frame"] = "0 from axis 1"
+                image = np.asarray(dataset[:, frame_index, :], dtype=np.float64)
             else:
-                image = np.asarray(dataset[:, :, 0], dtype=np.float64)
-                header["Displayed frame"] = "0 from axis 2"
+                image = np.asarray(dataset[:, :, frame_index], dtype=np.float64)
+
+            header["Frame axis"] = str(frame_axis)
+            header["Displayed frame"] = f"{frame_index} from axis {frame_axis}"
+            header["Number of frames"] = str(n_frames)
         else:
             raise ValueError("Only 2D and 3D H5 datasets are supported here.")
 
     return image, header
 
 
-def read_image_file(file_path):
+def read_image_file(file_path, h5_dataset_name=None, h5_frame_index=0):
     suffix = Path(file_path).suffix.lower()
     if suffix == ".edf":
         return read_edf_file(file_path)
     if suffix in [".h5", ".hdf5"]:
-        return read_h5_first_image(file_path)
+        return read_h5_frame(file_path, h5_dataset_name, h5_frame_index)
     raise ValueError("Unsupported file format. Please select EDF, H5 or HDF5.")
 
 
@@ -184,10 +250,122 @@ def get_header_float(header: dict, *names):
 
 
 # ============================================================
+# ==================== WAVELENGTH UTILS ======================
+# ============================================================
+
+def wavelength_to_nm(value: float):
+    """
+    Convert wavelength to nm with automatic unit detection.
+
+    Typical cases:
+    - EDF/H5 header in meters: 8.26563e-11 m -> 0.0826563 nm
+    - Interface value in Å: 0.826563 Å -> 0.0826563 nm
+    - Already in nm: 0.0826563 nm -> 0.0826563 nm
+    """
+    value = float(value)
+
+    if value <= 0:
+        raise ValueError("Wavelength must be > 0.")
+
+    if value < 1e-6:
+        return value * 1e9
+
+    if value >= 0.5:
+        return value * 0.1
+
+    return value
+
+# ------------------------------------------------------------
+# q in nm⁻¹ to 2θ in degrees
+# ------------------------------------------------------------
+def q_nm_to_two_theta_deg(q_nm, wavelength_value):
+    """Convert q in nm⁻¹ to 2θ in degrees using the wavelength field value."""
+    wavelength_nm = wavelength_to_nm(wavelength_value)
+    argument = np.asarray(q_nm, dtype=np.float64) * wavelength_nm / (4.0 * np.pi)
+    argument = np.clip(argument, -1.0, 1.0)
+    return np.degrees(2.0 * np.arcsin(argument))
+
+# ------------------------------------------------------------
+# q geometry diagnostics
+# ------------------------------------------------------------
+
+def q_geometry_diagnostics(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_value):
+    """Return useful geometry diagnostics for q calibration checks."""
+    ny, nx = image.shape
+    wavelength_angstrom = float(wavelength_value)
+    wavelength_nm = wavelength_angstrom * 0.1
+
+    corners = np.array([
+        [0, 0],
+        [nx - 1, 0],
+        [0, ny - 1],
+        [nx - 1, ny - 1],
+    ], dtype=float)
+
+    dx_px = corners[:, 0] - xc
+    dy_px = corners[:, 1] - yc
+    dx_m = dx_px * pixel_x_mm * 1e-3
+    dy_m = dy_px * pixel_y_mm * 1e-3
+    r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+    two_theta = np.arctan2(r_m, distance_m)
+    q_corners_angstrom = (4.0 * np.pi / wavelength_angstrom) * np.sin(two_theta / 2.0)
+    q_corners = q_corners_angstrom * 10.0
+
+    q_per_pixel_x = (
+        (4.0 * np.pi / wavelength_angstrom)
+        * np.sin(np.arctan2(pixel_x_mm * 1e-3, distance_m) / 2.0)
+        * 10.0
+    )
+
+    q_per_pixel_y = (
+        (4.0 * np.pi / wavelength_angstrom)
+        * np.sin(np.arctan2(pixel_y_mm * 1e-3, distance_m) / 2.0)
+        * 10.0
+    )
+
+    return {
+        "image_shape": f"{ny} x {nx}",
+        "center": f"({xc:.6g}, {yc:.6g}) px",
+        "distance_m": distance_m,
+        "pixel_x_mm": pixel_x_mm,
+        "pixel_y_mm": pixel_y_mm,
+        "wavelength_input": wavelength_value,
+        "wavelength_nm": wavelength_nm,
+        "q_per_pixel_x": q_per_pixel_x,
+        "q_per_pixel_y": q_per_pixel_y,
+        "q_corner_min": float(np.nanmin(q_corners)),
+        "q_corner_max": float(np.nanmax(q_corners)),
+    }
+
+
+# ============================================================
 # ======================= RADIAL TOOLS ========================
 # ============================================================
 
-def radial_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_a, q_min, q_max, n_bins, log_bins, sector_min=0, sector_max=360):
+def radial_average(
+    image,
+    xc,
+    yc,
+    distance_m,
+    pixel_x_mm,
+    pixel_y_mm,
+    wavelength_a,
+    q_min,
+    q_max,
+    n_bins,
+    log_bins,
+    sector_min=0,
+    sector_max=360,
+):
+    """
+    Clean radial integration I(q).
+
+    Principle:
+    - q = 0 at the beam centre.
+    - q is calculated from detector geometry.
+    - The intensity is the arithmetic mean of valid finite pixels inside each q bin.
+    - NaN, Inf, negative values and detector-gap values >= 4e9 are excluded.
+    """
     if distance_m <= 0:
         raise ValueError("Detector distance must be > 0.")
     if pixel_x_mm <= 0 or pixel_y_mm <= 0:
@@ -199,32 +377,33 @@ def radial_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength
 
     img = image.astype(np.float64)
     ny, nx = img.shape
-
     y, x = np.indices(img.shape)
-    dx_px = x + 1 - xc
-    dy_px = y + 1 - yc
-    dx_m = dx_px * pixel_x_mm * 1e-3
-    dy_m = dy_px * pixel_y_mm * 1e-3
+
+    dx_px = x - float(xc)
+    dy_px = y - float(yc)
+
+    dx_m = dx_px * float(pixel_x_mm) * 1e-3
+    dy_m = dy_px * float(pixel_y_mm) * 1e-3
     r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+    two_theta = np.arctan2(r_m, float(distance_m))
+    wavelength_nm = wavelength_to_nm(float(wavelength_a))
+    q = (4.0 * np.pi / wavelength_nm) * np.sin(two_theta / 2.0)
 
-    two_theta = np.arctan2(r_m, distance_m)
-    theta = two_theta / 2
-    wavelength_nm = wavelength_a * 0.1
-    q = (4 * np.pi / wavelength_nm) * np.sin(theta)
+    psi = (np.degrees(np.arctan2(dy_px, dx_px)) + 360.0) % 360.0
+    sector_min = sector_min % 360.0
+    sector_max = sector_max % 360.0
 
-    psi = (np.degrees(np.arctan2(dy_px, dx_px)) + 360) % 360
-    sector_min = sector_min % 360
-    sector_max = sector_max % 360
-
-    if abs((sector_max - sector_min) % 360) < 1e-9:
+    if abs((sector_max - sector_min) % 360.0) < 1e-9:
         sector_mask = np.ones_like(psi, dtype=bool)
     elif sector_min <= sector_max:
         sector_mask = (psi >= sector_min) & (psi <= sector_max)
     else:
         sector_mask = (psi >= sector_min) | (psi <= sector_max)
 
-    valid = np.isfinite(img) & np.isfinite(q) & sector_mask
-    valid &= img < 4e9
+    intensity_valid = np.isfinite(img) & (img < 4e9) & (img > 0)
+    geometry_valid = np.isfinite(q) & (q > 0) & sector_mask
+    valid = geometry_valid & intensity_valid
+    weights = img
 
     if q_min > 0:
         valid &= q >= q_min
@@ -232,33 +411,25 @@ def radial_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength
         valid &= q <= q_max
 
     q_values = q[valid]
-    i_values = img[valid]
+    i_values = weights[valid]
 
     if q_values.size == 0:
         raise ValueError("No valid pixel found in the selected q range / sector.")
 
-    if q_min <= 0:
-        q_min_eff = float(np.nanmin(q_values[q_values > 0]))
-    else:
-        q_min_eff = q_min
-
-    if q_max <= 0:
-        q_max_eff = float(np.nanmax(q_values))
-    else:
-        q_max_eff = q_max
+    q_min_eff = float(q_min) if q_min > 0 else float(np.nanmin(q_values))
+    q_max_eff = float(q_max) if q_max > 0 else float(np.nanmax(q_values))
 
     if q_max_eff <= q_min_eff:
         raise ValueError("q max must be greater than q min.")
 
-    # Match SAXSutilities-style radial profiles more closely:
-    # use a very fine internal binning, then reduce to the requested number of points.
-    # This avoids under-sampling the steep low-q rise when the final curve is displayed in log scale.
-    internal_bins = max(int(n_bins) * 8, 4000)
-
     if log_bins:
-        edges = np.logspace(np.log10(q_min_eff), np.log10(q_max_eff), internal_bins + 1)
+        if q_min_eff <= 0:
+            q_min_eff = float(np.nanmin(q_values[q_values > 0]))
+        edges = np.logspace(np.log10(q_min_eff), np.log10(q_max_eff), int(n_bins) + 1)
+        q_axis = np.sqrt(edges[:-1] * edges[1:])
     else:
-        edges = np.linspace(q_min_eff, q_max_eff, internal_bins + 1)
+        edges = np.linspace(q_min_eff, q_max_eff, int(n_bins) + 1)
+        q_axis = 0.5 * (edges[:-1] + edges[1:])
 
     sums, _ = np.histogram(q_values, bins=edges, weights=i_values)
     counts, _ = np.histogram(q_values, bins=edges)
@@ -266,25 +437,12 @@ def radial_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength
     with np.errstate(invalid="ignore", divide="ignore"):
         intensity = sums / counts
 
-    if log_bins:
-        q_axis = np.sqrt(edges[:-1] * edges[1:])
-    else:
-        q_axis = 0.5 * (edges[:-1] + edges[1:])
-
-    valid_bins = counts > 0
+    valid_bins = (counts > 0) & np.isfinite(intensity) & (intensity > 0)
     q_axis = q_axis[valid_bins]
     intensity = intensity[valid_bins]
     counts = counts[valid_bins]
 
-    if q_axis.size > n_bins:
-        index = np.linspace(0, q_axis.size - 1, int(n_bins))
-        index = np.unique(np.round(index).astype(int))
-        q_axis = q_axis[index]
-        intensity = intensity[index]
-        counts = counts[index]
-
     return q_axis, intensity, counts, valid
-
 
 # ============================================================
 # =========================== CANVAS ==========================
@@ -316,6 +474,8 @@ class ImageCanvas(FigureCanvas):
         self._base_scale = 1.18
         self.raw_image = None
         self.coordinate_label = None
+        self.display_vmin = None
+        self.display_vmax = None
 
         self.mpl_connect("scroll_event", self._on_scroll)
         self.mpl_connect("button_press_event", self._on_press)
@@ -324,6 +484,10 @@ class ImageCanvas(FigureCanvas):
 
     def set_coordinate_label(self, label):
         self.coordinate_label = label
+
+    def reset_display_limits(self):
+        self.display_vmin = None
+        self.display_vmax = None
 
     def _on_scroll(self, event):
         if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
@@ -423,7 +587,23 @@ class ImageCanvas(FigureCanvas):
         with np.errstate(invalid="ignore", divide="ignore"):
             display = np.log10(display + 1)
 
-        self.ax.imshow(display, origin="upper", cmap="jet", interpolation="nearest")
+        if self.display_vmin is None or self.display_vmax is None:
+            finite_display = display[np.isfinite(display)]
+            if finite_display.size > 0:
+                self.display_vmin = float(np.nanpercentile(finite_display, 1))
+                self.display_vmax = float(np.nanpercentile(finite_display, 99))
+            else:
+                self.display_vmin = None
+                self.display_vmax = None
+
+        self.ax.imshow(
+            display,
+            origin="upper",
+            cmap="jet",
+            interpolation="nearest",
+            vmin=self.display_vmin,
+            vmax=self.display_vmax,
+        )
 
         if mask is not None:
             overlay = np.zeros((*mask.shape, 4), dtype=float)
@@ -431,17 +611,17 @@ class ImageCanvas(FigureCanvas):
             self.ax.imshow(overlay, origin="upper", interpolation="nearest")
 
         if xc is not None and yc is not None:
-            self.ax.axvline(xc - 1, color="red", linewidth=1.0)
-            self.ax.axhline(yc - 1, color="red", linewidth=1.0)
-            self.ax.plot(xc - 1, yc - 1, "wo", markersize=4)
+            self.ax.axvline(xc, color="red", linewidth=1.0)
+            self.ax.axhline(yc, color="red", linewidth=1.0)
+            self.ax.plot(xc, yc, "wo", markersize=4)
 
             ny, nx = image.shape
             radius = min(nx, ny) * 0.35
             angle_marks = [0, 90, 180, 270]
             for angle in angle_marks:
                 rad = np.deg2rad(angle)
-                x_text = (xc - 1) + radius * np.cos(rad)
-                y_text = (yc - 1) + radius * np.sin(rad)
+                x_text = xc + radius * np.cos(rad)
+                y_text = yc + radius * np.sin(rad)
                 self.ax.text(
                     x_text,
                     y_text,
@@ -461,6 +641,10 @@ class ImageCanvas(FigureCanvas):
         if had_image:
             self.ax.set_xlim(current_xlim)
             self.ax.set_ylim(current_ylim)
+        else:
+            ny, nx = image.shape
+            self.ax.set_xlim(-0.5, nx - 0.5)
+            self.ax.set_ylim(ny - 0.5, -0.5)
 
         self.draw_idle()
 
@@ -481,7 +665,12 @@ class RadialTab(QWidget):
         self.current_files = []
         self.instrument_mode = "XENOCS"
         self.last_results = {}
+        self.h5_dataset_name = None
+        self.h5_frame_axis = None
+        self.h5_n_frames = 1
         self._syncing_folder = False
+        self._changing_h5_frame = False
+        self._syncing_frame_controls = False
 
         self.build_ui()
         self.refresh_files()
@@ -510,16 +699,22 @@ class RadialTab(QWidget):
         right_layout.setSpacing(6)
         main_layout.addWidget(right_panel, stretch=1)
 
+        view_row = QHBoxLayout()
+        view_row.setContentsMargins(0, 0, 0, 0)
+        view_row.setSpacing(8)
+        right_layout.addLayout(view_row, stretch=1)
+
         graph_box = QGroupBox("I(q) graph")
         graph_layout = QVBoxLayout(graph_box)
         graph_layout.setContentsMargins(6, 18, 6, 6)
-        right_layout.addWidget(graph_box, stretch=2)
+        view_row.addWidget(graph_box, stretch=3)
 
         image_box = QGroupBox("Image / selected integration area")
         image_layout = QVBoxLayout(image_box)
         image_layout.setContentsMargins(6, 18, 6, 6)
-        right_layout.addWidget(image_box, stretch=1)
-        image_box.setMaximumHeight(260)
+        image_box.setMinimumWidth(320)
+        image_box.setMaximumWidth(430)
+        view_row.addWidget(image_box, stretch=1)
 
         file_box = QGroupBox("File browser")
         file_layout = QVBoxLayout(file_box)
@@ -582,24 +777,18 @@ class RadialTab(QWidget):
         self.pixel_x = self.double_spin(0.075000, decimals=6, minimum=0)
         self.pixel_y = self.double_spin(0.075000, decimals=6, minimum=0)
         self.wavelength = self.double_spin(0, decimals=6, minimum=0)
-        self.use_q_crown = QCheckBox("Use q crown")
-        self.use_q_crown.setChecked(False)
-        self.use_q_crown.stateChanged.connect(self.update_mask_parameter_state)
-
-        self.q_min = self.double_spin(0, decimals=6, minimum=0)
-        self.q_max = self.double_spin(0, decimals=6, minimum=0)
 
         self.use_sector = QCheckBox("Use azimuthal sector")
         self.use_sector.setChecked(False)
         self.use_sector.stateChanged.connect(self.update_mask_parameter_state)
-
         self.sector_min = self.double_spin(0, decimals=3, minimum=-360)
         self.sector_max = self.double_spin(360, decimals=3, minimum=-360)
         self.n_bins = QSpinBox()
         self.n_bins.setRange(10, 10000)
-        self.n_bins.setValue(1500)
+        self.n_bins.setValue(300)
         self.plot_mode = QComboBox()
-        self.plot_mode.addItems(["linear linear", "linear log", "log log", "log linear", "Kratky"])
+        self.plot_mode.addItems(["linear linear", "linear log", "log log", "log linear", "Kratky", "2θ linear", "2θ log"])
+        self.plot_mode.setCurrentText("log log")
         self.plot_mode.currentTextChanged.connect(self.update_plot_mode)
 
         form.addWidget(QLabel("Centre X:"), 0, 0)
@@ -615,20 +804,22 @@ class RadialTab(QWidget):
         form.addWidget(QLabel("Wavelength (Å):"), 5, 0)
         form.addWidget(self.wavelength, 5, 1)
 
-        form.addWidget(self.use_q_crown, 6, 0, 1, 2)
-        form.addWidget(QLabel("q min (nm⁻¹):"), 7, 0)
-        form.addWidget(self.q_min, 7, 1)
-        form.addWidget(QLabel("q max (nm⁻¹):"), 8, 0)
-        form.addWidget(self.q_max, 8, 1)
+        self.frame_label = QLabel("H5 frame:")
+        self.frame_spin = QSpinBox()
+        self.frame_spin.setRange(1, 1)
+        self.frame_spin.setValue(1)
+        self.frame_spin.setEnabled(False)
+        self.frame_label.hide()
+        self.frame_spin.hide()
+        self.frame_spin.valueChanged.connect(self.update_selected_h5_frame)
+        form.addWidget(self.use_sector, 7, 0, 1, 2)
+        form.addWidget(QLabel("Sector min ψ (°):"), 8, 0)
+        form.addWidget(self.sector_min, 8, 1)
+        form.addWidget(QLabel("Sector max ψ (°):"), 9, 0)
+        form.addWidget(self.sector_max, 9, 1)
 
-        form.addWidget(self.use_sector, 9, 0, 1, 2)
-        form.addWidget(QLabel("Sector min ψ (°):"), 10, 0)
-        form.addWidget(self.sector_min, 10, 1)
-        form.addWidget(QLabel("Sector max ψ (°):"), 11, 0)
-        form.addWidget(self.sector_max, 11, 1)
-
-        form.addWidget(QLabel("Bins:"), 12, 0)
-        form.addWidget(self.n_bins, 12, 1)
+        form.addWidget(QLabel("Bins:"), 10, 0)
+        form.addWidget(self.n_bins, 10, 1)
         params_layout.addLayout(form)
 
         button_layout = QHBoxLayout()
@@ -666,7 +857,7 @@ class RadialTab(QWidget):
         toolbar_row.addWidget(self.toolbar, stretch=1)
         toolbar_row.addWidget(self.plot_mode, stretch=0)
         graph_layout.addLayout(toolbar_row)
-        graph_layout.addWidget(self.canvas)
+        graph_layout.addWidget(self.canvas, stretch=1)
 
         self.image_canvas = ImageCanvas()
         self.image_coordinate_label = QLabel("x = - | y = - | I = -")
@@ -692,11 +883,42 @@ class RadialTab(QWidget):
         self.btn_id13.clicked.connect(lambda: self.set_instrument_mode("ID13"))
         self.btn_custom.clicked.connect(lambda: self.set_instrument_mode("Custom"))
         self.update_mask_parameter_state()
-    def update_mask_parameter_state(self):
-        use_q = self.use_q_crown.isChecked()
-        self.q_min.setEnabled(use_q)
-        self.q_max.setEnabled(use_q)
 
+        frame_nav = QHBoxLayout()
+        frame_nav.setContentsMargins(0, 0, 0, 0)
+        frame_nav.setSpacing(6)
+        self.frame_start_spin = QSpinBox()
+        self.frame_start_spin.setRange(1, 1)
+        self.frame_start_spin.setValue(1)
+        self.frame_end_spin = QSpinBox()
+        self.frame_end_spin.setRange(1, 1)
+        self.frame_end_spin.setValue(1)
+        self.prev_frame_button = QPushButton("<")
+        self.next_frame_button = QPushButton(">")
+        self.prev_frame_button.setFixedWidth(44)
+        self.next_frame_button.setFixedWidth(44)
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setRange(1, 1)
+        self.frame_slider.setValue(1)
+        self.frame_counter_label = QLabel("1 / 1")
+
+        frame_nav.addWidget(QLabel("From:"))
+        frame_nav.addWidget(self.frame_start_spin)
+        frame_nav.addWidget(self.prev_frame_button)
+        frame_nav.addWidget(self.frame_slider, stretch=1)
+        frame_nav.addWidget(self.next_frame_button)
+        frame_nav.addWidget(QLabel("To:"))
+        frame_nav.addWidget(self.frame_end_spin)
+        frame_nav.addWidget(self.frame_counter_label)
+        right_layout.addLayout(frame_nav)
+
+        self.frame_start_spin.valueChanged.connect(self.update_frame_bounds)
+        self.frame_end_spin.valueChanged.connect(self.update_frame_bounds)
+        self.frame_slider.valueChanged.connect(self.frame_slider_changed)
+        self.prev_frame_button.clicked.connect(self.previous_frame)
+        self.next_frame_button.clicked.connect(self.next_frame)
+
+    def update_mask_parameter_state(self):
         use_sector = self.use_sector.isChecked()
         self.sector_min.setEnabled(use_sector)
         self.sector_max.setEnabled(use_sector)
@@ -713,16 +935,120 @@ class RadialTab(QWidget):
         for widget in [
             self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom,
             self.center_x, self.center_y, self.distance, self.pixel_x, self.pixel_y,
-            self.wavelength, self.use_q_crown, self.use_sector,
+            self.wavelength, self.frame_spin, self.frame_start_spin, self.frame_end_spin,
+            self.frame_slider, self.prev_frame_button, self.next_frame_button,
+            self.use_sector,
             self.n_bins, self.plot_mode, self.integrate_button, self.save_button,
         ]:
             widget.setEnabled(enabled)
+        self.plot_mode.setCurrentText("log log")
+        self.update_frame_selector_visibility()
         self.update_mask_parameter_state()
+
+    def update_frame_selector_visibility(self):
+        is_multiframe_h5 = self.h5_n_frames > 1
+        self.frame_label.setVisible(False)
+        self.frame_spin.setVisible(False)
+        self.frame_spin.setEnabled(is_multiframe_h5)
+        self.frame_start_spin.setVisible(is_multiframe_h5)
+        self.frame_end_spin.setVisible(is_multiframe_h5)
+        self.frame_slider.setVisible(is_multiframe_h5)
+        self.prev_frame_button.setVisible(is_multiframe_h5)
+        self.next_frame_button.setVisible(is_multiframe_h5)
+        self.frame_counter_label.setVisible(is_multiframe_h5)
+        self.update_frame_counter()
+
+    def configure_frame_navigation(self, n_frames):
+        n_frames = max(1, int(n_frames))
+        self._syncing_frame_controls = True
+
+        for widget in [self.frame_spin, self.frame_start_spin, self.frame_end_spin, self.frame_slider]:
+            widget.blockSignals(True)
+
+        self.frame_spin.setRange(1, n_frames)
+        self.frame_spin.setValue(1)
+        self.frame_start_spin.setRange(1, n_frames)
+        self.frame_start_spin.setValue(1)
+        self.frame_end_spin.setRange(1, n_frames)
+        self.frame_end_spin.setValue(n_frames)
+        self.frame_slider.setRange(1, n_frames)
+        self.frame_slider.setValue(1)
+
+        for widget in [self.frame_spin, self.frame_start_spin, self.frame_end_spin, self.frame_slider]:
+            widget.blockSignals(False)
+
+        self._syncing_frame_controls = False
+        self.update_frame_counter()
+
+    def frame_slider_changed(self, value):
+        if self._syncing_frame_controls:
+            return
+
+        value = max(self.frame_start_spin.value(), min(int(value), self.frame_end_spin.value()))
+        if value != self.frame_slider.value():
+            self.frame_slider.blockSignals(True)
+            self.frame_slider.setValue(value)
+            self.frame_slider.blockSignals(False)
+
+        self.frame_spin.setValue(value)
+
+    def update_frame_bounds(self):
+        if self._syncing_frame_controls:
+            return
+
+        start = self.frame_start_spin.value()
+        end = self.frame_end_spin.value()
+        if start > end:
+            sender = self.sender()
+            if sender is self.frame_start_spin:
+                self.frame_end_spin.setValue(start)
+                end = start
+            else:
+                self.frame_start_spin.setValue(end)
+                start = end
+
+        current = self.frame_spin.value()
+        if current < start:
+            self.frame_spin.setValue(start)
+        elif current > end:
+            self.frame_spin.setValue(end)
+        else:
+            self.update_frame_counter()
+
+    def update_frame_counter(self):
+        current = self.frame_spin.value()
+        total = max(1, self.h5_n_frames)
+        self.frame_counter_label.setText(f"{current} / {total}")
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setValue(current)
+        self.frame_slider.blockSignals(False)
+        self.prev_frame_button.setEnabled(self.h5_n_frames > 1 and current > self.frame_start_spin.value())
+        self.next_frame_button.setEnabled(self.h5_n_frames > 1 and current < self.frame_end_spin.value())
+
+    def previous_frame(self):
+        self.frame_spin.setValue(max(self.frame_start_spin.value(), self.frame_spin.value() - 1))
+
+    def next_frame(self):
+        self.frame_spin.setValue(min(self.frame_end_spin.value(), self.frame_spin.value() + 1))
+
+    def update_selected_h5_frame(self):
+        self.update_frame_counter()
+        if self.h5_n_frames <= 1:
+            return
+        if not self.selected_files():
+            return
+
+        self._changing_h5_frame = True
+        try:
+            self.integrate_selected_files()
+        finally:
+            self._changing_h5_frame = False
 
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose folder", str(self.current_folder))
         if folder:
             self.current_folder = Path(folder)
+            self.image_canvas.reset_display_limits()
             self.folder_path.setText(str(self.current_folder))
             self.refresh_files()
 
@@ -769,15 +1095,40 @@ class RadialTab(QWidget):
 
     def selection_changed(self):
         selected = self.selected_files()
+        self.image_canvas.reset_display_limits()
         self.set_controls_enabled(bool(selected))
+
+        self.h5_dataset_name = None
+        self.h5_frame_axis = None
+        self.h5_n_frames = 1
+
         if selected:
+            first_file = selected[0]
+            if first_file.suffix.lower() in [".h5", ".hdf5"]:
+                try:
+                    dataset_name, dataset_shape, frame_axis, n_frames, header = inspect_h5_image_dataset(first_file)
+                    self.h5_dataset_name = dataset_name
+                    self.h5_frame_axis = frame_axis
+                    self.h5_n_frames = n_frames
+
+                    self.configure_frame_navigation(n_frames)
+                except Exception as error:
+                    QMessageBox.warning(self, "H5 inspection error", str(error))
+
+            else:
+                self.configure_frame_navigation(1)
+
+            self.update_frame_selector_visibility()
             self.apply_preset_from_file(selected[0])
+        else:
+            self.update_frame_selector_visibility()
 
     def selected_files(self):
         return [self.current_folder / item.text() for item in self.file_list.selectedItems()]
 
     def set_instrument_mode(self, mode):
         self.instrument_mode = mode
+        self.image_canvas.reset_display_limits()
         buttons = {
             "XENOCS": self.btn_xenocs,
             "ID02": self.btn_id02,
@@ -813,7 +1164,15 @@ class RadialTab(QWidget):
             self.distance.setValue(dist if dist is not None else 0)
             self.pixel_x.setValue(px * 1000 if px is not None else 0.075000)
             self.pixel_y.setValue(py * 1000 if py is not None else 0.075000)
-            self.wavelength.setValue(wav * 1e10 if wav is not None else 0)
+            if wav is not None:
+                if wav < 1e-6:
+                    self.wavelength.setValue(wav * 1e10)  # m -> Å for display
+                elif wav < 0.5:
+                    self.wavelength.setValue(wav * 10.0)  # nm -> Å for display
+                else:
+                    self.wavelength.setValue(wav)  # already Å
+            else:
+                self.wavelength.setValue(0)
             return
 
         if self.instrument_mode == "ID02":
@@ -839,19 +1198,39 @@ class RadialTab(QWidget):
         if not files:
             return
 
-        self.last_results = {}
+        preserve_view = self._changing_h5_frame
         ax = self.canvas.ax
+
+        previous_xlim = tuple(ax.get_xlim()) if preserve_view else None
+        previous_ylim = tuple(ax.get_ylim()) if preserve_view else None
+        previous_xscale = ax.get_xscale() if preserve_view else None
+        previous_yscale = ax.get_yscale() if preserve_view else None
+
+        self.last_results = {}
         ax.clear()
 
         messages = []
         for file_path in files:
             try:
-                image, _ = read_image_file(file_path)
-                q_min = self.q_min.value() if self.use_q_crown.isChecked() else 0
-                q_max = self.q_max.value() if self.use_q_crown.isChecked() else 0
+                h5_dataset_name = self.h5_dataset_name if file_path.suffix.lower() in [".h5", ".hdf5"] else None
+                h5_frame_index = self.frame_spin.value() - 1 if file_path.suffix.lower() in [".h5", ".hdf5"] else 0
+                image, _ = read_image_file(file_path, h5_dataset_name, h5_frame_index)
+                q_min = 0
+                q_max = 0
                 sector_min = self.sector_min.value() if self.use_sector.isChecked() else 0
                 sector_max = self.sector_max.value() if self.use_sector.isChecked() else 360
-                use_log_bins = self.plot_mode.currentText() in ["log log", "log linear"]
+                use_log_bins = self.plot_mode.currentText() in ["log log", "log linear", "Kratky"]
+                wavelength_nm = wavelength_to_nm(self.wavelength.value())
+
+                diagnostics = q_geometry_diagnostics(
+                    image,
+                    self.center_x.value(),
+                    self.center_y.value(),
+                    self.distance.value(),
+                    self.pixel_x.value(),
+                    self.pixel_y.value(),
+                    self.wavelength.value(),
+                )
 
                 q, intensity, counts, mask = radial_average(
                     image,
@@ -870,22 +1249,49 @@ class RadialTab(QWidget):
                 )
 
                 y = self.make_plot_y(q, intensity)
-                line, = ax.plot(q, y, linewidth=1.2, label=file_path.stem)
+                x = self.make_plot_x(q)
+                line, = ax.plot(x, y, linewidth=1.2, label=file_path.stem)
                 self.last_results[file_path.stem] = (q, intensity, counts)
 
                 if file_path == files[0]:
                     self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
-                messages.append(f"Integrated: {file_path.name} ({q.size} bins)")
+                frame_text = f" | H5 frame {self.frame_spin.value()} / {self.h5_n_frames}" if file_path.suffix.lower() in [".h5", ".hdf5"] and self.h5_n_frames > 1 else ""
+                messages.append(
+                    f"Integrated: {file_path.name}{frame_text} ({q.size} bins)\n"
+                    f"  λ input/display = {diagnostics['wavelength_input']:.8g} Å ; λ used = {diagnostics['wavelength_nm']:.8g} nm\n"
+                    f"  distance = {diagnostics['distance_m']:.8g} m ; pixel = {diagnostics['pixel_x_mm']:.8g} x {diagnostics['pixel_y_mm']:.8g} mm\n"
+                    f"  centre = {diagnostics['center']} ; image = {diagnostics['image_shape']} px\n"
+                    f"  q per pixel ≈ {diagnostics['q_per_pixel_x']:.8g} nm⁻¹/px ; q corner max ≈ {diagnostics['q_corner_max']:.8g} nm⁻¹\n"
+                    f"  exported q range = {np.nanmin(q):.10g} -> {np.nanmax(q):.10g} nm⁻¹"
+                    f" ; arithmetic mean ; invalid pixels excluded ; no smoothing"
+                )
 
             except Exception as error:
                 messages.append(f"Error: {file_path.name}: {error}")
 
         self.apply_plot_axes()
+
+        if preserve_view and previous_xlim is not None and previous_ylim is not None:
+            ax.set_autoscale_on(False)
+            ax.set_xscale(previous_xscale)
+            ax.set_yscale(previous_yscale)
+            ax.set_xlim(previous_xlim[0], previous_xlim[1], auto=False)
+            ax.set_ylim(previous_ylim[0], previous_ylim[1], auto=False)
+        else:
+            ax.set_autoscale_on(True)
+
         ax.grid(True)
         if self.last_results:
             self.legend = ax.legend(loc="best")
         self.canvas.draw_idle()
         self.log_box.setPlainText("\n".join(messages))
+
+
+    def make_plot_x(self, q):
+        mode = self.plot_mode.currentText()
+        if mode in ["2θ linear", "2θ log"]:
+            return q_nm_to_two_theta_deg(q, self.wavelength.value())
+        return q
 
 
     def make_plot_y(self, q, intensity):
@@ -897,7 +1303,11 @@ class RadialTab(QWidget):
         ax = self.canvas.ax
         mode = self.plot_mode.currentText()
 
-        ax.set_xlabel("q / nm⁻¹")
+        if mode in ["2θ linear", "2θ log"]:
+            ax.set_xlabel("2θ / °")
+        else:
+            ax.set_xlabel("q / nm⁻¹")
+
         ax.xaxis.labelpad = 10
         ax.tick_params(axis="x", labelsize=9, pad=6)
         ax.set_ylabel("q²I(q)" if mode == "Kratky" else "I(q)")
@@ -915,20 +1325,34 @@ class RadialTab(QWidget):
             ax.set_xscale("log")
             ax.set_yscale("linear")
         elif mode == "Kratky":
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+        elif mode == "2θ linear":
             ax.set_xscale("linear")
             ax.set_yscale("linear")
+        elif mode == "2θ log":
+            ax.set_xscale("linear")
+            ax.set_yscale("log")
 
     def update_plot_mode(self):
-        ax = self.canvas.ax
-        mode = self.plot_mode.currentText()
+        # Kratky must be recomputed with logarithmic q bins, not only redrawn.
+        # Otherwise the log-log display is based on linearly spaced bins and does not
+        # match the expected SAXSutilities-style Kratky plot.
+        if self.last_results and self.selected_files():
+            self.integrate_selected_files()
+            return
 
+        ax = self.canvas.ax
         for line in ax.get_lines():
             label = line.get_label()
             if label in self.last_results:
                 q, intensity, counts = self.last_results[label]
+                line.set_xdata(self.make_plot_x(q))
                 line.set_ydata(self.make_plot_y(q, intensity))
 
         self.apply_plot_axes()
+        self.canvas.ax.relim()
+        self.canvas.ax.autoscale_view()
         self.canvas.draw_idle()
 
 
@@ -968,12 +1392,7 @@ class RadialTab(QWidget):
             QMessageBox.warning(self, "No results", "No radial integration result to save.")
             return
 
-        range_parts = []
-
-        if self.use_q_crown.isChecked():
-            range_parts.append(f"q{self.q_min.value():.4g}-{self.q_max.value():.4g}nm-1")
-        else:
-            range_parts.append("qfull")
+        range_parts = ["qfull"]
 
         if self.use_sector.isChecked():
             range_parts.append(f"psi{self.sector_min.value():.3g}-{self.sector_max.value():.3g}deg")
@@ -984,10 +1403,14 @@ class RadialTab(QWidget):
 
         for filename, (q, intensity, counts) in self.last_results.items():
             source_stem = Path(filename).stem
-            out_file = self.current_folder / f"{source_stem}{range_suffix}_azimAvg.dat"
+            frame_suffix = f"_frame{self.frame_spin.value():04d}" if self.h5_n_frames > 1 else ""
+            out_file = self.current_folder / f"{source_stem}{frame_suffix}{range_suffix}_azimAvg.dat"
             data = np.column_stack([q, intensity, counts])
             with open(out_file, "w", encoding="utf-8") as file:
                 file.write("# q_nm-1 I_q pixel_count\n")
+                file.write("# averaging arithmetic_mean\n")
+                file.write("# invalid_pixel_handling excluded\n")
+                file.write("# smoothing none\n")
                 np.savetxt(file, data, fmt="%.8e %.8e %d")
 
         QMessageBox.information(self, "Saved", "Radial profiles saved in the current folder.")

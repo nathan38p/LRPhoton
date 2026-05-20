@@ -111,6 +111,28 @@ def read_edf_file(filename: str):
     return image, header
 
 
+def add_matching_edf_center(header: dict, filename: str):
+    edf_path = Path(filename).with_suffix(".edf")
+    if not edf_path.exists():
+        return header
+
+    try:
+        _, edf_header = read_edf_file(edf_path)
+    except Exception:
+        return header
+
+    copied = False
+    for key in ["Center_1", "Center_2", "center_1", "center_2"]:
+        if key in edf_header and key not in header:
+            header[key] = edf_header[key]
+            copied = True
+
+    if copied:
+        header["Center source"] = edf_path.name
+
+    return header
+
+
 def read_h5_first_image(filename: str):
     filename = Path(filename)
     datasets = []
@@ -143,6 +165,8 @@ def read_h5_first_image(filename: str):
 
         for key, value in dataset.attrs.items():
             header[key] = str(value)
+
+        add_matching_edf_center(header, filename)
 
         if dataset.ndim == 2:
             image = np.asarray(dataset[...], dtype=np.float64)
@@ -187,7 +211,7 @@ def get_header_float(header: dict, *names):
 # AZIMUTHAL INTEGRATION TOOLS
 # ============================================================
 
-def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_a, q_min, q_max, psi_points):
+def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_a, q_min, q_max, psi_points, calibrated_q_max=None):
     if distance_m <= 0:
         raise ValueError("Detector distance must be > 0.")
     if pixel_x_mm <= 0 or pixel_y_mm <= 0:
@@ -204,14 +228,30 @@ def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelen
 
     dx_px = x + 1 - xc
     dy_px = y + 1 - yc
-    dx_m = dx_px * pixel_x_mm * 1e-3
-    dy_m = dy_px * pixel_y_mm * 1e-3
-    r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+    r_px = np.sqrt(dx_px ** 2 + dy_px ** 2)
 
-    two_theta = np.arctan2(r_m, distance_m)
-    theta = two_theta / 2
-    wavelength_nm = wavelength_a * 0.1
-    q = (4 * np.pi / wavelength_nm) * np.sin(theta)
+    if calibrated_q_max is not None:
+        # ID13 calibrated q scale:
+        # the beam centre corresponds to q = 0, and the largest distance from
+        # the centre to the detector image corresponds to calibrated_q_max.
+        corners_x = np.array([1, img.shape[1], 1, img.shape[1]], dtype=np.float64)
+        corners_y = np.array([1, 1, img.shape[0], img.shape[0]], dtype=np.float64)
+        corner_r_px = np.sqrt((corners_x - xc) ** 2 + (corners_y - yc) ** 2)
+        r_px_max = float(np.nanmax(corner_r_px))
+
+        if r_px_max <= 0:
+            raise ValueError("Invalid calibrated q scale: maximum detector radius is zero.")
+
+        q = r_px / r_px_max * float(calibrated_q_max)
+    else:
+        dx_m = dx_px * pixel_x_mm * 1e-3
+        dy_m = dy_px * pixel_y_mm * 1e-3
+        r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+
+        two_theta = np.arctan2(r_m, distance_m)
+        theta = two_theta / 2
+        wavelength_nm = wavelength_a * 0.1
+        q = (4 * np.pi / wavelength_nm) * np.sin(theta)
 
     psi = (np.degrees(np.arctan2(dy_px, dx_px)) + 360) % 360
 
@@ -526,8 +566,8 @@ class AzimuthalTab(QWidget):
         self.pixel_x = self.double_spin(0.075000, decimals=6, minimum=0)
         self.pixel_y = self.double_spin(0.075000, decimals=6, minimum=0)
         self.wavelength = self.double_spin(0, decimals=6, minimum=0)
-        self.q_min = self.double_spin(0, decimals=6, minimum=0)
-        self.q_max = self.double_spin(0, decimals=6, minimum=0)
+        self.q_min = self.double_spin(0, decimals=8, minimum=0)
+        self.q_max = self.double_spin(0, decimals=8, minimum=0)
         self.n_points = QSpinBox()
         self.n_points.setRange(10, 10000)
         self.n_points.setValue(360)
@@ -749,6 +789,8 @@ class AzimuthalTab(QWidget):
             self.pixel_x.setValue(0.075000)
             self.pixel_y.setValue(0.075000)
             self.wavelength.setValue(0.826563)
+            self.q_min.setValue(0.08987301)
+            self.q_max.setValue(46.69102)
             return
 
     def integrate_selected_files(self):
@@ -764,6 +806,8 @@ class AzimuthalTab(QWidget):
         for file_path in files:
             try:
                 image, _ = read_image_file(file_path)
+                calibrated_q_max = 46.69102 if self.instrument_mode == "ID13" else None
+
                 psi, intensity, counts, mask = azimuthal_average(
                     image,
                     self.center_x.value(),
@@ -775,6 +819,7 @@ class AzimuthalTab(QWidget):
                     self.q_min.value(),
                     self.q_max.value(),
                     self.n_points.value(),
+                    calibrated_q_max,
                 )
 
                 ax.plot(psi, intensity, linewidth=1.2, label=file_path.stem)
@@ -783,7 +828,10 @@ class AzimuthalTab(QWidget):
                 if file_path == files[0]:
                     self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
 
-                messages.append(f"Integrated: {file_path.name} ({psi.size} ψ points)")
+                calibration_text = " | ID13 calibrated q: centre = 0, image edge = 46.69102 nm⁻¹" if self.instrument_mode == "ID13" else ""
+                messages.append(
+                    f"Integrated: {file_path.name} ({psi.size} ψ points) | q crown = {self.q_min.value():.8g} -> {self.q_max.value():.8g} nm⁻¹{calibration_text}"
+                )
 
             except Exception as error:
                 messages.append(f"Error: {file_path.name}: {error}")
@@ -851,7 +899,7 @@ class AzimuthalTab(QWidget):
             QMessageBox.warning(self, "No results", "No azimuthal integration result to save.")
             return
 
-        range_suffix = f"_q{self.q_min.value():.4g}-{self.q_max.value():.4g}nm-1"
+        range_suffix = f"_q{self.q_min.value():.8g}-{self.q_max.value():.8g}nm-1"
 
         for filename, (psi, intensity, counts) in self.last_results.items():
             source_stem = Path(filename).stem

@@ -1,11 +1,18 @@
 import sys
+import json
+import platform
+import webbrowser
 from pathlib import Path
 
+import requests
+
 from PySide6.QtSvgWidgets import QSvgWidget
+from PySide6.QtCore import Qt, QTimer
 
 from PySide6.QtWidgets import (
     QApplication,
     QLabel,
+    QMessageBox,
     QFrame,
     QHBoxLayout,
     QMainWindow,
@@ -25,6 +32,8 @@ from tabs.datplot_tab import DatPlotTab
 
 
 APP_NAME = "LRPhoton 1"
+APP_VERSION = "1.0.1"
+UPDATE_INFO_URL = "https://raw.githubusercontent.com/nathan38p/LRPhoton-releases/main/version.json"
 
 
 class MainWindow(QMainWindow):
@@ -92,13 +101,29 @@ class MainWindow(QMainWindow):
         self.tab_bar.addTab("Plot")
         self.tab_bar.addTab("Centre")
         self.tab_bar.addTab("Cave")
-        self.tab_bar.addTab("Radial")
+        self.radial_tab_index = self.tab_bar.addTab("Radial")
+        self.tab_bar.setTabEnabled(self.radial_tab_index, False)
+        self.tab_bar.setTabToolTip(self.radial_tab_index, "Right-click to unlock radial integration.")
         self.tab_bar.addTab("Azimuthal")
         self.tab_bar.addTab("Anisotropy")
+        self.tab_bar.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tab_bar.customContextMenuRequested.connect(self.unlock_radial_from_right_click)
 
         header_layout.addStretch()
         header_layout.addWidget(self.tab_bar)
         header_layout.addStretch()
+
+        self.version_label = QLabel(f"Version {APP_VERSION} · Checking for updates…")
+        self.version_label.setStyleSheet("""
+            QLabel {
+                font-size: 11px;
+                color: #777777;
+                padding: 4px 8px;
+                border-radius: 8px;
+                background: #f2f2f2;
+            }
+        """)
+        header_layout.addWidget(self.version_label)
 
         main_layout.addWidget(header)
 
@@ -115,6 +140,7 @@ class MainWindow(QMainWindow):
         self.radial_tab = RadialTab()
         self.azimuthal_tab = AzimuthalTab()
         self.hermans_tab = HermansTab()
+        self.view_tab.set_q_geometry_source_tab(self.azimuthal_tab)
 
         self.pages.addWidget(self.view_tab)
         self.pages.addWidget(self.datplot_tab)
@@ -151,6 +177,74 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(container)
 
+    def unlock_radial_from_right_click(self, position):
+        if self.tab_bar.tabAt(position) != self.radial_tab_index:
+            return
+
+        self.tab_bar.setTabEnabled(self.radial_tab_index, True)
+        self.tab_bar.setTabText(self.radial_tab_index, "Radial")
+        self.tab_bar.setTabToolTip(self.radial_tab_index, "")
+        self.tab_bar.setCurrentIndex(self.radial_tab_index)
+
+    def _version_tuple(self, version: str) -> tuple:
+        parts = []
+        for item in version.strip().replace("v", "").split("."):
+            try:
+                parts.append(int(item))
+            except ValueError:
+                parts.append(0)
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts[:3])
+
+    def check_for_updates(self):
+        try:
+            response = requests.get(UPDATE_INFO_URL, timeout=3)
+            data = response.json()
+
+            latest_version = str(data.get("version", "")).strip()
+            message = str(data.get("message", "A new version of LRPhoton is available.")).strip()
+
+            system_name = platform.system()
+            if system_name == "Darwin":
+                download_url = str(data.get("macos_download", "")).strip()
+            elif system_name == "Windows":
+                download_url = str(data.get("windows_download", "")).strip()
+            else:
+                download_url = str(data.get("download_url", "")).strip()
+
+            if not download_url:
+                download_url = str(data.get("download_url", "https://github.com/nathan38p/LRPhoton-releases/releases/latest")).strip()
+
+            if not latest_version:
+                self.version_label.setText(f"Version {APP_VERSION} · Update status unavailable")
+                return
+
+            if self._version_tuple(latest_version) <= self._version_tuple(APP_VERSION):
+                self.version_label.setText(f"Version {APP_VERSION} · Up to date")
+                return
+
+            self.version_label.setText(f"Version {APP_VERSION} · Update available: {latest_version}")
+
+            box = QMessageBox(self)
+            box.setWindowTitle("Update available")
+            box.setIcon(QMessageBox.Information)
+            box.setText("A new version of LRPhoton is available.")
+            box.setInformativeText(
+                f"Installed version: {APP_VERSION}\n"
+                f"Available version: {latest_version}\n\n"
+                f"{message}"
+            )
+            box.setStandardButtons(QMessageBox.Open | QMessageBox.Cancel)
+            box.setDefaultButton(QMessageBox.Open)
+
+            if box.exec() == QMessageBox.Open:
+                webbrowser.open(download_url)
+
+        except Exception:
+            # Update checking must never prevent the application from starting.
+            self.version_label.setText(f"Version {APP_VERSION} · Update status unavailable")
+
 
 def main():
     app = QApplication(sys.argv)
@@ -183,6 +277,11 @@ def main():
             font-size: 13px;
         }
 
+        QTabBar::tab:disabled {
+            background: #f5f5f5;
+            color: #9a9a9a;
+        }
+
         QTabBar::tab:selected {
             background: #007aff;
             color: white;
@@ -195,6 +294,7 @@ def main():
 
     window = MainWindow()
     window.show()
+    QTimer.singleShot(1200, window.check_for_updates)
 
     sys.exit(app.exec())
 

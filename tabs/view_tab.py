@@ -6,7 +6,7 @@ import hdf5plugin
 import numpy as np
 import matplotlib.pyplot as plt
 
-from PySide6.QtCore import Qt, QSettings, QSize, Signal
+from PySide6.QtCore import Qt, QEvent, QSettings, QSize, Signal
 
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMessageBox
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QGridLayout,
+    QFormLayout,
     QLabel,
     QPushButton,
     QLineEdit,
@@ -29,7 +30,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QGroupBox,
     QSpinBox,
-    QStyle
+    QStyle,
+    QDialog,
+    QDialogButtonBox,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -65,6 +68,82 @@ class ImageOnlyToolbar(NavigationToolbar):
             super().save_figure(*args)
 
 
+class ViewImageCanvas(FigureCanvas):
+    def __init__(self, figure, view_tab):
+        self.view_tab = view_tab
+        super().__init__(figure)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        try:
+            self.grabGesture(Qt.PinchGesture)
+        except Exception:
+            pass
+
+    def event(self, event):
+        view_tab = getattr(self, "view_tab", None)
+        if view_tab is not None and view_tab.image_artist is not None:
+            try:
+                if event.type() == QEvent.NativeGesture:
+                    gesture_type = event.gestureType()
+                    value = event.value()
+                    if gesture_type == Qt.ZoomNativeGesture and value != 0:
+                        scale = 1.0 / (1.0 + value) if value > -0.95 else 1.25
+                        view_tab.zoom_at_qpoint(self._event_center_point(event), scale)
+                        event.accept()
+                        return True
+
+                    if gesture_type == Qt.SmartZoomNativeGesture:
+                        view_tab.reset_image_view()
+                        event.accept()
+                        return True
+
+                if event.type() == QEvent.Gesture:
+                    pinch = event.gesture(Qt.PinchGesture)
+                    if pinch is not None:
+                        factor = pinch.scaleFactor()
+                        if factor and factor > 0:
+                            view_tab.zoom_at_qpoint(self._event_center_point(event), 1.0 / factor)
+                            event.accept()
+                            return True
+            except Exception:
+                pass
+
+        return super().event(event)
+
+    def wheelEvent(self, event):
+        view_tab = getattr(self, "view_tab", None)
+        if view_tab is None or view_tab.image_artist is None:
+            return super().wheelEvent(event)
+
+        delta = event.pixelDelta()
+        if delta.isNull():
+            delta = event.angleDelta()
+            dx = delta.x() / 120.0
+            dy = delta.y() / 120.0
+        else:
+            dx = delta.x() / 80.0
+            dy = delta.y() / 80.0
+
+        if event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+            if dy != 0:
+                scale = 0.88 if dy > 0 else 1.14
+                view_tab.zoom_at_qpoint(event.position(), scale)
+        else:
+            view_tab.pan_by_trackpad(dx, dy)
+
+        event.accept()
+
+    def _event_center_point(self, event):
+        try:
+            position = event.position()
+            if position is not None:
+                return position
+        except Exception:
+            pass
+
+        return self.rect().center()
+
+
 class ViewTab(QWidget):
     folder_changed = Signal(Path)
     def __init__(self):
@@ -96,6 +175,20 @@ class ViewTab(QWidget):
 
         self.intensity_min = 0.0
         self.intensity_max = 1.0
+
+        self._is_panning = False
+        self._pan_start_event = None
+        self._pan_start_xlim = None
+        self._pan_start_ylim = None
+
+        self._saved_xlim = None
+        self._saved_ylim = None
+
+        self.q_geometry_mode = None
+        self.q_geometry_source_tab = None
+        self.custom_q_geometry = self.load_custom_q_geometry()
+        self.current_file_type = None
+        self.current_dataset_name = None
 
         self._build_ui()
 
@@ -269,7 +362,8 @@ class ViewTab(QWidget):
         self.ax.set_axis_off()
         self.ax.set_aspect("equal")
 
-        self.canvas = FigureCanvas(self.fig)
+        self.canvas = ViewImageCanvas(self.fig, self)
+        self.canvas.setFocus()
 
         self.toolbar = ImageOnlyToolbar(self.canvas, self)
         self.toolbar.setIconSize(QSize(32, 32))
@@ -330,6 +424,9 @@ class ViewTab(QWidget):
 
         self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
         self.canvas.mpl_connect("figure_leave_event", self.on_mouse_leave)
+        self.canvas.mpl_connect("scroll_event", self.on_scroll_zoom)
+        self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
+        self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
 
         nav_layout = QHBoxLayout()
 
@@ -381,6 +478,10 @@ class ViewTab(QWidget):
         self.keep_ratio_checkbox.setChecked(True)
         self.keep_ratio_checkbox.stateChanged.connect(self.update_image)
 
+        self.keep_zoom_checkbox = QCheckBox("Keep zoom")
+        self.keep_zoom_checkbox.setChecked(False)
+        self.keep_zoom_checkbox.setToolTip("Keep current zoom and pan when changing file or frame")
+
         self.save_colorbar_checkbox = QCheckBox("Save colorbar")
         self.save_colorbar_checkbox.setChecked(
             self.settings.value("view/save_colorbar", False, type=bool)
@@ -390,13 +491,13 @@ class ViewTab(QWidget):
         self.vmin_spin = QDoubleSpinBox()
         self.vmin_spin.setDecimals(4)
         self.vmin_spin.setRange(-999999, 999999)
-        self.vmin_spin.setValue(0)
+        self.vmin_spin.setValue(self.settings.value("view/vmin", 0.0, type=float))
         self.vmin_spin.valueChanged.connect(self.spin_intensity_changed)
 
         self.vmax_spin = QDoubleSpinBox()
         self.vmax_spin.setDecimals(4)
         self.vmax_spin.setRange(-999999, 999999)
-        self.vmax_spin.setValue(5)
+        self.vmax_spin.setValue(self.settings.value("view/vmax", 5.0, type=float))
         self.vmax_spin.valueChanged.connect(self.spin_intensity_changed)
 
         autoscale_button = QPushButton("Auto intensity")
@@ -404,6 +505,7 @@ class ViewTab(QWidget):
 
         display_layout.addWidget(self.log_checkbox)
         display_layout.addWidget(self.keep_ratio_checkbox)
+        display_layout.addWidget(self.keep_zoom_checkbox)
         display_layout.addWidget(self.save_colorbar_checkbox)
         display_layout.addWidget(QLabel("Min:"))
         display_layout.addWidget(self.vmin_spin)
@@ -460,6 +562,41 @@ class ViewTab(QWidget):
         self.dataset_list.hide()
 
         info_box_layout.addWidget(self.info_text)
+
+        q_buttons_layout = QHBoxLayout()
+        q_buttons_layout.setSpacing(4)
+        self.q_xenocs_button = QPushButton("XENOCS")
+        self.q_id02_button = QPushButton("ID02")
+        self.q_id13_button = QPushButton("ID13")
+        self.q_custom_button = QPushButton("Custom")
+        self.q_manual_button = QPushButton("+")
+        self.q_manual_button.setFixedWidth(28)
+
+        self.q_xenocs_button.clicked.connect(lambda: self.set_q_geometry_mode("XENOCS"))
+        self.q_id02_button.clicked.connect(lambda: self.set_q_geometry_mode("ID02"))
+        self.q_id13_button.clicked.connect(lambda: self.set_q_geometry_mode("ID13"))
+        self.q_custom_button.clicked.connect(self.use_custom_q_geometry_from_source)
+        self.q_manual_button.clicked.connect(self.open_q_geometry_dialog)
+
+        for button in [
+            self.q_xenocs_button,
+            self.q_id02_button,
+            self.q_id13_button,
+            self.q_custom_button,
+        ]:
+            button.setCheckable(True)
+
+        for button in [
+            self.q_xenocs_button,
+            self.q_id02_button,
+            self.q_id13_button,
+            self.q_custom_button,
+            self.q_manual_button,
+        ]:
+            q_buttons_layout.addWidget(button)
+
+        self.update_q_geometry_button_styles()
+        info_box_layout.addLayout(q_buttons_layout)
         right_layout.addWidget(info_box)
 
         display_box = QGroupBox("Display settings")
@@ -501,6 +638,7 @@ class ViewTab(QWidget):
         display_checks_layout.setSpacing(8)
         display_checks_layout.addWidget(self.log_checkbox)
         display_checks_layout.addWidget(self.keep_ratio_checkbox)
+        display_checks_layout.addWidget(self.keep_zoom_checkbox)
         display_checks_layout.addWidget(self.save_colorbar_checkbox)
 
         min_layout = QHBoxLayout()
@@ -536,10 +674,181 @@ class ViewTab(QWidget):
     # ============================================================
 
     def save_colorbar_setting(self):
-        self.settings.setValue(
-            "view/save_colorbar",
-            self.save_colorbar_checkbox.isChecked()
-        )
+        keep_colorbar = self.save_colorbar_checkbox.isChecked()
+        self.settings.setValue("view/save_colorbar", keep_colorbar)
+
+        if keep_colorbar:
+            self.settings.setValue("view/vmin", self.vmin_spin.value())
+            self.settings.setValue("view/vmax", self.vmax_spin.value())
+
+    def set_q_geometry_source_tab(self, tab):
+        self.q_geometry_source_tab = tab
+
+    def load_custom_q_geometry(self):
+        keys = ["xc", "yc", "distance_m", "pixel_x_mm", "pixel_y_mm", "wavelength_a"]
+        values = {}
+        for key in keys:
+            value = self.settings.value(f"view/custom_q_geometry/{key}", None, type=float)
+            if value is None:
+                return None
+            values[key] = value
+        return values
+
+    def save_custom_q_geometry(self):
+        if not self.custom_q_geometry:
+            return
+
+        for key, value in self.custom_q_geometry.items():
+            self.settings.setValue(f"view/custom_q_geometry/{key}", value)
+
+    def preset_q_geometry(self, mode):
+        if mode == "ID02":
+            return {
+                "xc": 919.689,
+                "yc": 994.290,
+                "distance_m": 1.0,
+                "pixel_x_mm": 0.075000,
+                "pixel_y_mm": 0.075000,
+                "wavelength_a": 1.0,
+            }
+
+        if mode == "ID13":
+            return {
+                "xc": 1294.689,
+                "yc": 1310.290,
+                "distance_m": 0.8,
+                "pixel_x_mm": 0.075000,
+                "pixel_y_mm": 0.075000,
+                "wavelength_a": 0.826563,
+            }
+
+        if mode == "Custom":
+            return self.custom_q_geometry
+
+        return None
+
+    def update_q_geometry_button_styles(self):
+        buttons = {
+            "XENOCS": self.q_xenocs_button,
+            "ID02": self.q_id02_button,
+            "ID13": self.q_id13_button,
+            "Custom": self.q_custom_button,
+        }
+
+        for mode, button in buttons.items():
+            active = mode == self.q_geometry_mode
+            button.blockSignals(True)
+            button.setChecked(active)
+            button.blockSignals(False)
+            if active:
+                button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #007aff;
+                        color: white;
+                        border: 0px;
+                        border-radius: 5px;
+                        padding: 4px;
+                    }
+                """)
+            else:
+                button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #e2e2e2;
+                        color: #222222;
+                        border: 0px;
+                        border-radius: 5px;
+                        padding: 4px;
+                    }
+                    QPushButton:hover {
+                        background-color: #d8d8d8;
+                    }
+                """)
+
+        self.q_manual_button.setStyleSheet("""
+            QPushButton {
+                background-color: #e2e2e2;
+                color: #222222;
+                border: 0px;
+                border-radius: 5px;
+                padding: 4px;
+            }
+            QPushButton:hover {
+                background-color: #d8d8d8;
+            }
+        """)
+
+    def set_q_geometry_mode(self, mode):
+        if mode == "Custom" and not self.custom_q_geometry:
+            self.open_q_geometry_dialog()
+            return
+
+        self.q_geometry_mode = mode
+        self.update_q_geometry_button_styles()
+        self.refresh_file_information()
+        self.update_image()
+
+    def use_custom_q_geometry_from_source(self):
+        if self.q_geometry_source_tab is not None:
+            try:
+                self.custom_q_geometry = {
+                    "xc": self.q_geometry_source_tab.center_x.value(),
+                    "yc": self.q_geometry_source_tab.center_y.value(),
+                    "distance_m": self.q_geometry_source_tab.distance.value(),
+                    "pixel_x_mm": self.q_geometry_source_tab.pixel_x.value(),
+                    "pixel_y_mm": self.q_geometry_source_tab.pixel_y.value(),
+                    "wavelength_a": self.q_geometry_source_tab.wavelength.value(),
+                }
+                self.save_custom_q_geometry()
+            except Exception:
+                pass
+
+        self.set_q_geometry_mode("Custom")
+
+    def open_q_geometry_dialog(self):
+        geometry = self.preset_q_geometry(self.q_geometry_mode) or self.custom_q_geometry
+        if geometry is None:
+            geometry = self.preset_q_geometry("ID13")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Custom q geometry")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+
+        fields = {}
+        labels = [
+            ("xc", "Centre X"),
+            ("yc", "Centre Y"),
+            ("distance_m", "Distance (m)"),
+            ("pixel_x_mm", "Pixel X (mm)"),
+            ("pixel_y_mm", "Pixel Y (mm)"),
+            ("wavelength_a", "Wavelength (Å)"),
+        ]
+
+        for key, label in labels:
+            spin = QDoubleSpinBox()
+            spin.setDecimals(6)
+            spin.setRange(0, 1e9)
+            spin.setValue(float(geometry.get(key, 0)))
+            spin.setFixedWidth(130)
+            fields[key] = spin
+            form.addRow(label, spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self.custom_q_geometry = {
+            key: spin.value()
+            for key, spin in fields.items()
+        }
+        self.save_custom_q_geometry()
+        self.set_q_geometry_mode("Custom")
 
     # ============================================================
     # FILE BROWSER
@@ -601,8 +910,16 @@ class ViewTab(QWidget):
             if not path.is_file():
                 continue
 
+            lower_name = path.name.lower()
+
+            if lower_name.endswith(".dat"):
+                continue
+
+            if lower_name.endswith("_ave.h5"):
+                continue
+
             match_extension = any(
-                fnmatch.fnmatch(path.name.lower(), pattern.lower())
+                fnmatch.fnmatch(lower_name, pattern.lower())
                 for pattern in extension_patterns
             )
 
@@ -648,6 +965,12 @@ class ViewTab(QWidget):
 
     def open_file(self, path):
         self.current_file = Path(path).expanduser().resolve()
+        if hasattr(self, "keep_zoom_checkbox") and self.keep_zoom_checkbox.isChecked() and self.image_artist is not None:
+            self._saved_xlim = self.ax.get_xlim()
+            self._saved_ylim = self.ax.get_ylim()
+        else:
+            self._saved_xlim = None
+            self._saved_ylim = None
         print("Loaded file:", self.current_file)
 
         self.images = None
@@ -771,8 +1094,11 @@ class ViewTab(QWidget):
         )
 
         self.configure_slider()
-        self.auto_intensity()
-        self.update_image()
+        if self.save_colorbar_checkbox.isChecked():
+            self.update_image()
+        else:
+            self.auto_intensity()
+            self.update_image()
 
     def open_h5(self, path):
         datasets = []
@@ -840,6 +1166,8 @@ class ViewTab(QWidget):
             for key, value in self.h5_file.attrs.items():
                 self.headers[f"File attribute - {key}"] = str(value)
 
+            self.add_matching_edf_center_to_headers()
+
         except Exception as e:
             raise RuntimeError(f"Unable to read this H5 dataset:\n{e}")
 
@@ -868,14 +1196,22 @@ class ViewTab(QWidget):
         )
 
         self.configure_slider()
-        self.auto_intensity()
-        self.update_image()
+        if self.save_colorbar_checkbox.isChecked():
+            self.update_image()
+        else:
+            self.auto_intensity()
+            self.update_image()
 
     # ============================================================
     # INFORMATION
     # ============================================================
 
     def update_file_information(self, file_type, dataset_name, n_frames, image_shape):
+        self.current_file_type = file_type
+        self.current_dataset_name = dataset_name
+        self.n_frames = n_frames
+        self.image_shape = image_shape
+
         height, width = image_shape
 
         lines = [
@@ -896,7 +1232,72 @@ class ViewTab(QWidget):
             for key, value in self.headers.items():
                 lines.append(f"{key}: {value}")
 
+        q_geometry = self.get_q_geometry_from_header()
+        if q_geometry is not None:
+            xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_nm = q_geometry
+            source = "header"
+            header_geometry = self.get_header_q_geometry()
+            if header_geometry is None and self.q_geometry_mode is not None:
+                source = self.q_geometry_mode
+
+            lines.extend([
+                "",
+                "q geometry:",
+                f"Source: {source}",
+                f"Centre: X = {xc:.6g}, Y = {yc:.6g}",
+                f"Distance: {distance_m:.6g} m",
+                f"Pixel: {pixel_x_mm:.6g} x {pixel_y_mm:.6g} mm",
+                f"Wavelength: {wavelength_nm:.6g} nm",
+            ])
+
         self.info_text.setPlainText("\n".join(lines))
+
+    def refresh_file_information(self):
+        if (
+            self.current_file is None
+            or self.current_file_type is None
+            or self.current_dataset_name is None
+            or self.image_shape is None
+        ):
+            return
+
+        self.update_file_information(
+            self.current_file_type,
+            self.current_dataset_name,
+            self.n_frames,
+            self.image_shape,
+        )
+
+    def add_matching_edf_center_to_headers(self):
+        if self.current_file is None:
+            return
+
+        edf_path = self.current_file.with_suffix(".edf")
+        if not edf_path.exists():
+            return
+
+        try:
+            import fabio
+
+            edf = fabio.open(str(edf_path))
+            try:
+                edf_header = dict(edf.header)
+            finally:
+                try:
+                    edf.close()
+                except Exception:
+                    pass
+        except Exception:
+            return
+
+        copied = []
+        for key in ["Center_1", "Center_2", "center_1", "center_2"]:
+            if key in edf_header and key not in self.headers:
+                self.headers[key] = edf_header[key]
+                copied.append(key)
+
+        if copied:
+            self.headers["Center source"] = edf_path.name
 
     # ============================================================
     # IMAGE DISPLAY
@@ -1025,6 +1426,128 @@ class ViewTab(QWidget):
 
         return x, y
 
+    def get_header_float(self, *keys):
+        if not self.headers:
+            return None
+
+        for key in keys:
+            if key in self.headers:
+                try:
+                    return float(str(self.headers[key]).replace(",", "."))
+                except Exception:
+                    pass
+
+        return None
+
+    def wavelength_to_nm(self, wavelength):
+        if wavelength < 1e-6:
+            return wavelength * 1e9
+        if wavelength >= 0.5:
+            return wavelength * 0.1
+        return wavelength
+
+    def get_header_q_geometry(self):
+        center = self.get_center_from_header()
+        if center is None:
+            return None
+
+        xc, yc = center
+
+        distance_m = self.get_header_float(
+            "SampleDistance",
+            "sample_distance",
+            "Distance",
+            "DetectorDistance",
+            "detector_distance",
+        )
+
+        pixel_x = self.get_header_float(
+            "PSize_1",
+            "PSize_X",
+            "PixelSizeX",
+            "pixel_size_x",
+            "x_pixel_size",
+        )
+
+        pixel_y = self.get_header_float(
+            "PSize_2",
+            "PSize_Y",
+            "PixelSizeY",
+            "pixel_size_y",
+            "y_pixel_size",
+        )
+
+        wavelength = self.get_header_float(
+            "WaveLength",
+            "Wavelength",
+            "wavelength",
+            "Lambda",
+            "lambda",
+        )
+
+        if distance_m is None or pixel_x is None or pixel_y is None or wavelength is None:
+            return None
+
+        # Pixel sizes may come from headers in meters, while the fallback is in mm.
+        # Values below 1e-3 are assumed to be meters and converted to mm.
+        pixel_x_mm = pixel_x * 1000.0 if pixel_x < 1e-3 else pixel_x
+        pixel_y_mm = pixel_y * 1000.0 if pixel_y < 1e-3 else pixel_y
+
+        wavelength_nm = self.wavelength_to_nm(wavelength)
+
+        if distance_m <= 0 or pixel_x_mm <= 0 or pixel_y_mm <= 0 or wavelength_nm <= 0:
+            return None
+
+        return xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_nm
+
+    def get_preset_q_geometry(self):
+        geometry = self.preset_q_geometry(self.q_geometry_mode)
+        if not geometry:
+            return None
+
+        xc = geometry["xc"]
+        yc = geometry["yc"]
+        distance_m = geometry["distance_m"]
+        pixel_x_mm = geometry["pixel_x_mm"]
+        pixel_y_mm = geometry["pixel_y_mm"]
+        wavelength_nm = self.wavelength_to_nm(geometry["wavelength_a"])
+
+        if distance_m <= 0 or pixel_x_mm <= 0 or pixel_y_mm <= 0 or wavelength_nm <= 0:
+            return None
+
+        return xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_nm
+
+    def get_q_geometry_from_header(self):
+        header_geometry = self.get_header_q_geometry()
+        if header_geometry is not None:
+            return header_geometry
+
+        preset_geometry = self.get_preset_q_geometry()
+        header_center = self.get_center_from_header()
+        if preset_geometry is not None and header_center is not None:
+            return header_center[0], header_center[1], *preset_geometry[2:]
+
+        return preset_geometry
+
+    def calculate_q_at_pixel(self, x_index, y_index):
+        geometry = self.get_q_geometry_from_header()
+        if geometry is None:
+            return None
+
+        xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_nm = geometry
+
+        dx_px = float(x_index) - float(xc)
+        dy_px = float(y_index) - float(yc)
+
+        dx_m = dx_px * pixel_x_mm * 1e-3
+        dy_m = dy_px * pixel_y_mm * 1e-3
+        r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+
+        two_theta = np.arctan2(r_m, distance_m)
+        q_nm = (4.0 * np.pi / wavelength_nm) * np.sin(two_theta / 2.0)
+
+        return q_nm
+
     def draw_center_cross(self):
         for artist in self.center_artists:
             try:
@@ -1035,6 +1558,10 @@ class ViewTab(QWidget):
         self.center_artists = []
 
         center = self.get_center_from_header()
+        if center is None:
+            geometry = self.get_preset_q_geometry()
+            if geometry is not None:
+                center = geometry[:2]
 
         if center is None:
             return
@@ -1113,6 +1640,11 @@ class ViewTab(QWidget):
             )
             self.ax.set_aspect(aspect)
 
+        # Restore zoom/pan if needed
+        if self.keep_zoom_checkbox.isChecked() and self._saved_xlim is not None and self._saved_ylim is not None:
+            self.ax.set_xlim(self._saved_xlim)
+            self.ax.set_ylim(self._saved_ylim)
+
         self.ax.set_title("")
 
         self.draw_center_cross()
@@ -1120,6 +1652,7 @@ class ViewTab(QWidget):
         total = self.n_frames if self.is_lazy_h5 else self.images.shape[0]
         self.frame_label.setText(f"{self.current_index + 1} / {total}")
 
+        self.ax.set_autoscale_on(False)
         self.canvas.draw_idle()
 
     def auto_intensity(self):
@@ -1156,17 +1689,22 @@ class ViewTab(QWidget):
         self.min_slider.blockSignals(False)
         self.max_slider.blockSignals(False)
 
+        if self.save_colorbar_checkbox.isChecked():
+            self.settings.setValue("view/vmin", vmin)
+            self.settings.setValue("view/vmax", vmax)
         self.update_image()
 
     def value_to_slider(self, value):
         if self.intensity_max == self.intensity_min:
             return 0
 
-        return int(
+        slider_value = int(
             1000
             * (value - self.intensity_min)
             / (self.intensity_max - self.intensity_min)
         )
+
+        return max(0, min(1000, slider_value))
 
     def slider_to_value(self, value):
         return self.intensity_min + (
@@ -1179,6 +1717,10 @@ class ViewTab(QWidget):
 
         if vmin >= vmax:
             return
+
+        if self.save_colorbar_checkbox.isChecked():
+            self.settings.setValue("view/vmin", vmin)
+            self.settings.setValue("view/vmax", vmax)
 
         self.vmin_spin.blockSignals(True)
         self.vmax_spin.blockSignals(True)
@@ -1197,6 +1739,17 @@ class ViewTab(QWidget):
 
         if vmin >= vmax:
             return
+
+        current_min = min(vmin, self.intensity_min)
+        current_max = max(vmax, self.intensity_max)
+
+        if current_max > current_min:
+            self.intensity_min = current_min
+            self.intensity_max = current_max
+
+        if self.save_colorbar_checkbox.isChecked():
+            self.settings.setValue("view/vmin", vmin)
+            self.settings.setValue("view/vmax", vmax)
 
         self.min_slider.blockSignals(True)
         self.max_slider.blockSignals(True)
@@ -1234,12 +1787,14 @@ class ViewTab(QWidget):
     # ============================================================
 
     def on_mouse_move(self, event):
+        if self.pan_image_from_motion(event):
+            return
         if self.raw_current_img is None or event.inaxes != self.ax:
-            self.cursor_label.setText("x = - | y = - | I = -")
+            self.cursor_label.setText("x = - | y = - | I = - | q = -")
             return
 
         if event.xdata is None or event.ydata is None:
-            self.cursor_label.setText("x = - | y = - | I = -")
+            self.cursor_label.setText("x = - | y = - | I = - | q = -")
             return
 
         x_index = int(round(event.xdata))
@@ -1248,7 +1803,7 @@ class ViewTab(QWidget):
         ny, nx = self.raw_current_img.shape
 
         if not (0 <= x_index < nx and 0 <= y_index < ny):
-            self.cursor_label.setText("x = - | y = - | I = -")
+            self.cursor_label.setText("x = - | y = - | I = - | q = -")
             return
 
         value = self.raw_current_img[y_index, x_index]
@@ -1262,12 +1817,15 @@ class ViewTab(QWidget):
         else:
             value_text = f"{value:.8g}"
 
+        q_value = self.calculate_q_at_pixel(x_index, y_index)
+        q_text = "-" if q_value is None else f"{q_value:.6g} nm⁻¹"
+
         self.cursor_label.setText(
-            f"x = {x_index + 1} | y = {y_index + 1} | I = {value_text}"
+            f"x = {x_index + 1} | y = {y_index + 1} | I = {value_text} | q = {q_text}"
         )
 
     def on_mouse_leave(self, event):
-        self.cursor_label.setText("x = - | y = - | I = -")
+        self.cursor_label.setText("x = - | y = - | I = - | q = -")
 
     # ============================================================
     # SAVE
@@ -1282,30 +1840,53 @@ class ViewTab(QWidget):
             )
             return
 
-        suggested_path = self.current_file.parent / f"{self.current_file.stem}.png"
+        frame_suffix = ""
+        total_frames = self.n_frames if self.is_lazy_h5 else (self.images.shape[0] if self.images is not None else 1)
+        if total_frames > 1:
+            frame_suffix = f"_frame{self.current_index + 1:04d}"
 
-        path, _ = QFileDialog.getSaveFileName(
+        suggested_path = self.current_file.parent / f"{self.current_file.stem}{frame_suffix}.png"
+
+        path, selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Save image only as PNG",
+            "Save image",
             str(suggested_path),
-            "PNG image (*.png);;TIFF image (*.tif);;All files (*)"
+            "PNG image (*.png);;TIFF image (*.tif);;PDF image (*.pdf);;EDF image (*.edf);;HDF5 image (*.h5);;All files (*)"
         )
 
         if not path:
             return
 
-        if not path.lower().endswith(".png"):
+        lower_path = path.lower()
+        if "EDF" in selected_filter and not lower_path.endswith(".edf"):
+            path += ".edf"
+        elif "HDF5" in selected_filter and not lower_path.endswith((".h5", ".hdf5")):
+            path += ".h5"
+        elif "PDF" in selected_filter and not lower_path.endswith(".pdf"):
+            path += ".pdf"
+        elif "TIFF" in selected_filter and not lower_path.endswith((".tif", ".tiff")):
+            path += ".tif"
+        elif not lower_path.endswith((".png", ".tif", ".tiff", ".pdf", ".edf", ".h5", ".hdf5")):
             path += ".png"
 
         try:
-            plt.imsave(
-                path,
-                self.display_img,
-                cmap="jet",
-                vmin=self.vmin_spin.value(),
-                vmax=self.vmax_spin.value(),
-                origin="upper"
-            )
+            lower_path = path.lower()
+            if lower_path.endswith(".edf"):
+                self.save_current_frame_as_edf(path)
+            elif lower_path.endswith((".h5", ".hdf5")):
+                self.save_current_frame_as_h5(path)
+            elif lower_path.endswith(".pdf"):
+                self.save_current_display_as_pdf(path)
+            else:
+                vmin, vmax = self.display_limits_for_save(self.display_img)
+                plt.imsave(
+                    path,
+                    self.display_img,
+                    cmap="jet",
+                    vmin=vmin,
+                    vmax=vmax,
+                    origin="upper"
+                )
 
         except Exception as e:
             QMessageBox.critical(
@@ -1313,3 +1894,291 @@ class ViewTab(QWidget):
                 "Save error",
                 f"Unable to save image:\n{e}"
             )
+
+    def display_limits_for_save(self, image):
+        vmin = self.vmin_spin.value()
+        vmax = self.vmax_spin.value()
+
+        if vmax > vmin:
+            return vmin, vmax
+
+        finite = np.asarray(image, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            return 0.0, 1.0
+
+        vmin = float(np.nanpercentile(finite, 1))
+        vmax = float(np.nanpercentile(finite, 99))
+        if vmax <= vmin:
+            delta = abs(vmin) * 0.01 or 1.0
+            vmin -= delta
+            vmax += delta
+
+        return vmin, vmax
+
+    def current_raw_image_for_save(self):
+        image = self.get_current_image()
+        if image is None:
+            image = self.raw_current_img
+        if image is None:
+            raise ValueError("No raw image data is available.")
+
+        return np.asarray(image, dtype=float)
+
+    def current_display_image_for_save(self):
+        image = self.current_raw_image_for_save()
+        return self.prepare_display_image(image)
+
+    def save_current_display_as_pdf(self, path):
+        image = self.current_display_image_for_save()
+        vmin, vmax = self.display_limits_for_save(image)
+        ny, nx = image.shape
+        dpi = 150
+        width = max(nx / dpi, 1.0)
+        height = max(ny / dpi, 1.0)
+
+        fig = Figure(figsize=(width, height), dpi=dpi)
+        canvas = FigureCanvas(fig)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.set_axis_off()
+        ax.imshow(
+            image,
+            cmap="jet",
+            origin="upper",
+            vmin=vmin,
+            vmax=vmax,
+            aspect="equal",
+        )
+        canvas.draw()
+        fig.savefig(path, format="pdf", bbox_inches="tight", pad_inches=0)
+
+    def metadata_for_saved_image(self):
+        metadata = {
+            "SourceFile": self.current_file.name if self.current_file is not None else "",
+            "SourceFrame": str(self.current_index),
+            "SavedBy": "LRPhoton View",
+        }
+
+        for key, value in self.headers.items():
+            clean_key = str(key).replace(" ", "_")
+            metadata[clean_key] = str(value)
+
+        geometry = self.get_q_geometry_from_header()
+        if geometry is not None:
+            xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_nm = geometry
+            metadata.update({
+                "Center_1": f"{xc:.12g}",
+                "Center_2": f"{yc:.12g}",
+                "SampleDistance": f"{distance_m:.12g}",
+                "PSize_1": f"{pixel_x_mm / 1000.0:.12g}",
+                "PSize_2": f"{pixel_y_mm / 1000.0:.12g}",
+                "WaveLength": f"{wavelength_nm * 1e-9:.12g}",
+            })
+
+        return metadata
+
+    def save_current_frame_as_h5(self, path):
+        image = self.current_raw_image_for_save()
+
+        metadata = self.metadata_for_saved_image()
+        with h5py.File(path, "w") as h5:
+            dataset = h5.create_dataset(
+                "/entry_0000/instrument/detector/data",
+                data=np.asarray(image, dtype=np.float32),
+                compression="gzip",
+            )
+            for key, value in metadata.items():
+                dataset.attrs[key] = value
+
+    def save_current_frame_as_edf(self, path):
+        image = self.current_raw_image_for_save().astype("<f4", copy=False)
+        ny, nx = image.shape
+        metadata = self.metadata_for_saved_image()
+        metadata.update({
+            "HeaderID": "EH:000001:000000:000000",
+            "Image": "0",
+            "ByteOrder": "LowByteFirst",
+            "DataType": "FloatValue",
+            "Dim_1": str(nx),
+            "Dim_2": str(ny),
+            "Size": str(nx * ny * 4),
+            "EDF_BinarySize": str(nx * ny * 4),
+        })
+
+        header_size = 1024
+        while True:
+            metadata["EDF_HeaderSize"] = str(header_size)
+            header_text = "{\n"
+            for key, value in metadata.items():
+                header_text += f"{key} = {value} ;\n"
+            header_bytes = header_text.encode("latin-1", errors="ignore")
+            closing_bytes = b"}\n"
+            if len(header_bytes) + len(closing_bytes) <= header_size:
+                break
+            header_size += 1024
+
+        padding = b" " * (header_size - len(header_bytes) - len(closing_bytes))
+        header_bytes = header_bytes + padding + closing_bytes
+
+        with open(path, "wb") as file:
+            file.write(header_bytes)
+            file.write(image.tobytes(order="C"))
+
+    # ============================================================
+    # TRACKPAD / MOUSE NAVIGATION
+    # ============================================================
+
+    def qpoint_to_data_pos(self, qpoint):
+        try:
+            x_widget = float(qpoint.x())
+            y_widget = float(qpoint.y())
+        except Exception:
+            x_widget = self.canvas.width() / 2
+            y_widget = self.canvas.height() / 2
+
+        bbox = self.ax.get_window_extent()
+        x_fig = bbox.x0 + (x_widget / max(self.canvas.width(), 1)) * bbox.width
+        y_fig = bbox.y1 - (y_widget / max(self.canvas.height(), 1)) * bbox.height
+
+        xdata, ydata = self.ax.transData.inverted().transform((x_fig, y_fig))
+
+        if not np.isfinite(xdata) or not np.isfinite(ydata):
+            xlim = self.ax.get_xlim()
+            ylim = self.ax.get_ylim()
+            xdata = (xlim[0] + xlim[1]) / 2
+            ydata = (ylim[0] + ylim[1]) / 2
+
+        return xdata, ydata
+
+    def zoom_at_qpoint(self, qpoint, zoom_factor):
+        if zoom_factor <= 0 or self.image_artist is None:
+            return
+
+        xdata, ydata = self.qpoint_to_data_pos(qpoint)
+        self.zoom_at_data_position(xdata, ydata, zoom_factor)
+
+    def zoom_at_data_position(self, xdata, ydata, zoom_factor):
+        x_min, x_max = self.ax.get_xlim()
+        y_min, y_max = self.ax.get_ylim()
+
+        if x_max == x_min or y_max == y_min:
+            return
+
+        new_width = (x_max - x_min) * zoom_factor
+        new_height = (y_max - y_min) * zoom_factor
+
+        rel_x = (xdata - x_min) / (x_max - x_min)
+        rel_y = (ydata - y_min) / (y_max - y_min)
+
+        self.ax.set_xlim(
+            xdata - new_width * rel_x,
+            xdata + new_width * (1.0 - rel_x),
+        )
+        self.ax.set_ylim(
+            ydata - new_height * rel_y,
+            ydata + new_height * (1.0 - rel_y),
+        )
+
+        if self.keep_zoom_checkbox.isChecked():
+            self._saved_xlim = self.ax.get_xlim()
+            self._saved_ylim = self.ax.get_ylim()
+
+        self.ax.set_autoscale_on(False)
+        self.canvas.draw_idle()
+
+    def reset_image_view(self):
+        if self.raw_current_img is None:
+            return
+
+        ny, nx = self.raw_current_img.shape
+        self.ax.set_xlim(-0.5, nx - 0.5)
+        self.ax.set_ylim(ny - 0.5, -0.5)
+
+        if self.keep_zoom_checkbox.isChecked():
+            self._saved_xlim = self.ax.get_xlim()
+            self._saved_ylim = self.ax.get_ylim()
+
+        self.ax.set_autoscale_on(False)
+        self.canvas.draw_idle()
+
+    def pan_by_trackpad(self, dx, dy):
+        if self.image_artist is None:
+            return
+
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        xspan = xlim[1] - xlim[0]
+        yspan = ylim[1] - ylim[0]
+
+        shift_x = -dx * xspan * 0.08
+        shift_y = dy * yspan * 0.08
+
+        self.ax.set_xlim(xlim[0] + shift_x, xlim[1] + shift_x)
+        self.ax.set_ylim(ylim[0] + shift_y, ylim[1] + shift_y)
+
+        if self.keep_zoom_checkbox.isChecked():
+            self._saved_xlim = self.ax.get_xlim()
+            self._saved_ylim = self.ax.get_ylim()
+
+        self.ax.set_autoscale_on(False)
+        self.canvas.draw_idle()
+
+    def on_scroll_zoom(self, event):
+        if self.image_artist is None or event.inaxes != self.ax:
+            return
+
+        if event.xdata is None or event.ydata is None:
+            return
+
+        zoom_factor = 0.85 if event.button == "up" else 1.18
+        self.zoom_at_data_position(event.xdata, event.ydata, zoom_factor)
+
+    def on_mouse_press(self, event):
+        if self.image_artist is None or event.inaxes != self.ax:
+            return
+
+        if event.button != 1:
+            return
+
+        self._is_panning = True
+        self._pan_start_event = event
+        self._pan_start_xlim = self.ax.get_xlim()
+        self._pan_start_ylim = self.ax.get_ylim()
+        self.canvas.setCursor(Qt.ClosedHandCursor)
+
+    def on_mouse_release(self, event):
+        if not self._is_panning:
+            return
+
+        self._is_panning = False
+        self._pan_start_event = None
+        self._pan_start_xlim = None
+        self._pan_start_ylim = None
+        self.canvas.setCursor(Qt.ArrowCursor)
+
+    def pan_image_from_motion(self, event):
+        if not self._is_panning:
+            return False
+
+        if self._pan_start_event is None or event.xdata is None or event.ydata is None:
+            return False
+
+        if self._pan_start_event.xdata is None or self._pan_start_event.ydata is None:
+            return False
+
+        dx = self._pan_start_event.xdata - event.xdata
+        dy = self._pan_start_event.ydata - event.ydata
+
+        x0, x1 = self._pan_start_xlim
+        y0, y1 = self._pan_start_ylim
+
+        self.ax.set_xlim(x0 + dx, x1 + dx)
+        self.ax.set_ylim(y0 + dy, y1 + dy)
+
+        if self.keep_zoom_checkbox.isChecked():
+            self._saved_xlim = self.ax.get_xlim()
+            self._saved_ylim = self.ax.get_ylim()
+
+        self.ax.set_autoscale_on(False)
+        self.canvas.draw_idle()
+        return True
