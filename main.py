@@ -337,17 +337,11 @@ class MainWindow(QMainWindow):
                 "LRPhoton can download the updated source files automatically.\n\n"
                 "After the update, close LRPhoton and open it again."
             )
-            box.setStandardButtons(QMessageBox.Yes | QMessageBox.Open | QMessageBox.Cancel)
+            box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
             box.button(QMessageBox.Yes).setText("Update now")
-            box.button(QMessageBox.Open).setText("Open GitHub")
             box.setDefaultButton(QMessageBox.Yes)
 
             result = box.exec()
-
-            if result == QMessageBox.Open:
-                webbrowser.open(f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")
-                return
-
             if result != QMessageBox.Yes:
                 return
 
