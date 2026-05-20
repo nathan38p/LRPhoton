@@ -121,7 +121,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.tab_bar)
         header_layout.addStretch()
 
-        self.version_label = QLabel(f"Version {APP_VERSION} · Checking for updates…")
+        self.version_label = QLabel("Checking for updates…")
         self.version_label.setStyleSheet("""
             QLabel {
                 font-size: 11px;
@@ -275,7 +275,7 @@ class MainWindow(QMainWindow):
 
             remote_sha = str(data.get("sha", "")).strip()
             if not remote_sha:
-                self.version_label.setText(f"Version {APP_VERSION} · Update status unavailable")
+                self.version_label.setText("Update status unavailable")
                 return
 
             local_sha = self.get_local_commit()
@@ -284,15 +284,15 @@ class MainWindow(QMainWindow):
             # no local commit file exists yet, so this copy is the current GitHub state.
             if not local_sha:
                 self.save_local_commit(remote_sha)
-                self.version_label.setText(f"Version {APP_VERSION} · Up to date")
+                self.version_label.setText("Up to date")
                 return
 
             if local_sha == remote_sha:
-                self.version_label.setText(f"Version {APP_VERSION} · Up to date")
+                self.version_label.setText("Up to date")
                 return
 
             short_sha = remote_sha[:7]
-            self.version_label.setText(f"Version {APP_VERSION} · Update available: {short_sha}")
+            self.version_label.setText(f"Update available: {short_sha}")
 
             box = QMessageBox(self)
             box.setWindowTitle("Update available")
@@ -316,12 +316,12 @@ class MainWindow(QMainWindow):
             if result != QMessageBox.Yes:
                 return
 
-            self.version_label.setText(f"Version {APP_VERSION} · Updating…")
+            self.version_label.setText("Updating…")
             QApplication.processEvents()
 
             self.install_update_from_github(remote_sha)
 
-            self.version_label.setText(f"Version {APP_VERSION} · Updated")
+            self.version_label.setText("Updated")
             QMessageBox.information(
                 self,
                 "LRPhoton updated",
@@ -329,7 +329,7 @@ class MainWindow(QMainWindow):
             )
 
         except Exception as error:
-            self.version_label.setText(f"Version {APP_VERSION} · Update status unavailable")
+            self.version_label.setText("Update status unavailable")
             QMessageBox.warning(
                 self,
                 "Update error",
