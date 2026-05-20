@@ -110,12 +110,8 @@ class MainWindow(QMainWindow):
         self.tab_bar.addTab("Centre")
         self.tab_bar.addTab("Cave")
         self.radial_tab_index = self.tab_bar.addTab("Radial")
-        self.tab_bar.setTabEnabled(self.radial_tab_index, False)
-        self.tab_bar.setTabToolTip(self.radial_tab_index, "Right-click to unlock radial integration.")
         self.tab_bar.addTab("Azimuthal")
         self.tab_bar.addTab("Anisotropy")
-        self.tab_bar.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.tab_bar.customContextMenuRequested.connect(self.unlock_radial_from_right_click)
 
         header_layout.addStretch()
         header_layout.addWidget(self.tab_bar)
@@ -185,14 +181,6 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(container)
 
-    def unlock_radial_from_right_click(self, position):
-        if self.tab_bar.tabAt(position) != self.radial_tab_index:
-            return
-
-        self.tab_bar.setTabEnabled(self.radial_tab_index, True)
-        self.tab_bar.setTabText(self.radial_tab_index, "Radial")
-        self.tab_bar.setTabToolTip(self.radial_tab_index, "")
-        self.tab_bar.setCurrentIndex(self.radial_tab_index)
 
 
     def get_local_commit(self):
