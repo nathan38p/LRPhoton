@@ -1,4 +1,4 @@
-# DataSAXS Template
+# LRPhoton
 
 ## Overview
 
