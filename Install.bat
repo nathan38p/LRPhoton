@@ -7,15 +7,22 @@ echo ==========================================
 echo.
 
 :: =========================================================
-:: INSTALLATION PYTHON 3.13 x64 SI ABSENT
+:: INSTALLATION PYTHON MANAGER
 :: =========================================================
 
-py -3.13-64 --version >nul 2>&1
+winget install -e --id Python.PythonManager
+
+:: =========================================================
+:: INSTALLATION PYTHON 3.14 x64 SI ABSENT
+:: =========================================================
+
+py -3.14-64 --version >nul 2>&1
 
 if errorlevel 1 (
-    echo Python 3.13 x64 non detecte.
+    echo Python 3.14 x64 non detecte.
     echo Installation automatique...
-    winget install -e --id Python.Python.3.13 --architecture x64
+    
+    winget install -e --id Python.Python.3.14 --architecture x64
 
     echo.
     echo Python installe.
@@ -47,14 +54,14 @@ robocopy "%SOURCE%" "%DEST%" /E ^
 echo.
 echo Installation des dependances...
 
-py -3.13-64 -m pip install --upgrade pip
+py -3.14-64 -m pip install --upgrade pip
 
-py -3.13-64 -m pip install ^
+py -3.14-64 -m pip install ^
 PySide6 ^
 numpy ^
 matplotlib ^
 h5py ^
-fabio==2024.9.0 ^
+fabio ^
 requests ^
 hdf5plugin
 
@@ -64,7 +71,7 @@ echo Creation du raccourci bureau...
 (
 echo @echo off
 echo cd /d "C:\Program Files\LRPhoton"
-echo py -3.13-64 main.py
+echo py -3.14-64 main.py
 ) > "%USERPROFILE%\Desktop\LRPhoton.bat"
 
 echo.
