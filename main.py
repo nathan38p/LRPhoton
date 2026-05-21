@@ -224,23 +224,52 @@ class MainWindow(QMainWindow):
 
             source_root = extracted_roots[0]
 
-            files_to_compare = [
-                "main.py",
-                "tabs/view_tab.py",
-                "tabs/datplot_tab.py",
-                "tabs/centre_tab.py",
-                "tabs/cave_tab.py",
-                "tabs/radial_tab.py",
-                "tabs/azimuthal_tab.py",
-                "tabs/hermans_tab.py",
-            ]
+            allowed_extensions = {
+                ".py",
+                ".json",
+                ".txt",
+                ".md",
+                ".svg",
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".ico",
+                ".icns",
+                ".command",
+                ".bat",
+            }
 
-            for relative_name in files_to_compare:
+            ignored_dirs = {
+                ".git",
+                "__pycache__",
+                ".venv",
+                "venv",
+                "dist",
+                "build",
+            }
+
+            remote_files = {
+                path.relative_to(source_root)
+                for path in source_root.rglob("*")
+                if path.is_file()
+                and path.suffix.lower() in allowed_extensions
+                and not any(part in ignored_dirs for part in path.relative_to(source_root).parts)
+            }
+
+            local_files = {
+                path.relative_to(app_dir)
+                for path in app_dir.rglob("*")
+                if path.is_file()
+                and path.suffix.lower() in allowed_extensions
+                and not any(part in ignored_dirs for part in path.relative_to(app_dir).parts)
+            }
+
+            if remote_files != local_files:
+                return False
+
+            for relative_name in remote_files:
                 local_file = app_dir / relative_name
                 remote_file = source_root / relative_name
-
-                if not local_file.exists() or not remote_file.exists():
-                    return False
 
                 if local_file.read_bytes() != remote_file.read_bytes():
                     return False
