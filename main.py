@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import zipfile
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -200,6 +201,22 @@ class MainWindow(QMainWindow):
     def save_local_commit(self, commit_sha):
         LOCAL_VERSION_FILE.write_text(str(commit_sha).strip(), encoding="utf-8")
 
+    def format_github_commit_date(self, data):
+        commit_date = (
+            data.get("commit", {})
+            .get("committer", {})
+            .get("date", "")
+        )
+
+        if not commit_date:
+            return ""
+
+        try:
+            parsed_date = datetime.fromisoformat(commit_date.replace("Z", "+00:00"))
+            return parsed_date.strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            return ""
+
     def current_sources_match_github(self):
         """
         Avoid false update alerts when LRPhoton was freshly downloaded as a GitHub ZIP,
@@ -361,17 +378,22 @@ class MainWindow(QMainWindow):
                 self.version_label.setText("Update status unavailable")
                 return
 
+            remote_date = self.format_github_commit_date(data)
+            up_to_date_text = "Up to date"
+            if remote_date:
+                up_to_date_text = f"Up to date · {remote_date}"
+
             local_sha = self.get_local_commit()
 
             if local_sha == remote_sha:
-                self.version_label.setText("Up to date")
+                self.version_label.setText(up_to_date_text)
                 return
 
             # If the source files already match GitHub, only the local marker is stale.
             # This happens easily after manually downloading/extracting a ZIP over an old folder.
             if self.current_sources_match_github():
                 self.save_local_commit(remote_sha)
-                self.version_label.setText("Up to date")
+                self.version_label.setText(up_to_date_text)
                 return
 
             short_sha = remote_sha[:7]
@@ -398,7 +420,7 @@ class MainWindow(QMainWindow):
 
             self.install_update_from_github(remote_sha)
 
-            self.version_label.setText("Updated")
+            self.version_label.setText(up_to_date_text)
 
             close_box = QMessageBox(self)
             close_box.setWindowTitle("LRPhoton updated")
