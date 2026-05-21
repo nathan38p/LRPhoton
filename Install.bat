@@ -11,6 +11,7 @@ echo.
 :: =========================================================
 
 winget install -e --id Python.PythonManager
+if errorlevel 1 echo Python Manager non trouve par winget, installation ignoree.
 
 :: =========================================================
 :: INSTALLATION PYTHON 3.14 x64 SI ABSENT
@@ -21,7 +22,7 @@ py -3.14-64 --version >nul 2>&1
 if errorlevel 1 (
     echo Python 3.14 x64 non detecte.
     echo Installation automatique...
-    
+
     winget install -e --id Python.Python.3.14 --architecture x64
 
     echo.
@@ -38,8 +39,8 @@ echo.
 :: DOSSIER INSTALLATION
 :: =========================================================
 
-set SOURCE=%~dp0
-set DEST=C:\Program Files\LRPhoton
+set "SOURCE=%~dp0"
+set "DEST=C:\Program Files\LRPhoton"
 
 echo Creation du dossier...
 mkdir "%DEST%" >nul 2>&1
@@ -47,9 +48,7 @@ mkdir "%DEST%" >nul 2>&1
 echo.
 echo Copie des fichiers...
 
-robocopy "%SOURCE%" "%DEST%" /E ^
-/XD .git __pycache__ venv .venv ^
-/XF .DS_Store *.pyc Install.bat
+robocopy "%SOURCE%" "%DEST%" /E /XD .git __pycache__ venv .venv /XF .DS_Store *.pyc Install.bat
 
 echo.
 echo Installation des dependances...
