@@ -38,6 +38,7 @@ from tabs.datplot_tab import DatPlotTab
 
 APP_NAME = "LRPhoton 1"
 APP_VERSION = "1.0.2"
+# update test
 GITHUB_OWNER = "nathan38p"
 GITHUB_REPO = "LRPhoton-releases"
 GITHUB_BRANCH = "main"
