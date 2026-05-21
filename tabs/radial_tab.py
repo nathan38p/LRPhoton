@@ -1180,12 +1180,12 @@ class RadialTab(QWidget):
         form = QGridLayout()
         form.setVerticalSpacing(3)
         form.setHorizontalSpacing(6)
-        self.center_x = self.double_spin(0, decimals=3)
-        self.center_y = self.double_spin(0, decimals=3)
-        self.distance = self.double_spin(0, decimals=6, minimum=0)
+        self.center_x = self.double_spin(0, decimals=13)
+        self.center_y = self.double_spin(0, decimals=13)
+        self.distance = self.double_spin(0, decimals=16, minimum=0)
         self.pixel_x = self.double_spin(0.075000, decimals=6, minimum=0)
         self.pixel_y = self.double_spin(0.075000, decimals=6, minimum=0)
-        self.wavelength = self.double_spin(0, decimals=6, minimum=0)
+        self.wavelength = self.double_spin(0, decimals=16, minimum=0)
         self.use_q_range = QCheckBox("Use q range")
         self.use_q_range.setChecked(False)
         self.use_q_range.stateChanged.connect(self.update_mask_parameter_state)
@@ -1704,26 +1704,12 @@ class RadialTab(QWidget):
             return
 
         if self.instrument_mode == "ID13":
-            cx = get_header_float(header, *CENTER_X_KEYS)
-            cy = get_header_float(header, *CENTER_Y_KEYS)
-            dist = get_header_float(header, "SampleDistance", "sampledistance", "sample_distance")
-            px = get_header_float(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX")
-            py = get_header_float(header, "PSize_2", "psize_2", "PSize_Y", "PixelSizeY")
-            wav = get_header_float(header, "WaveLength", "Wavelength", "wavelength")
-            self.center_x.setValue(cx if cx is not None else ID13_DEFAULT_CENTER_X)
-            self.center_y.setValue(cy if cy is not None else ID13_DEFAULT_CENTER_Y)
-            self.distance.setValue(dist if dist is not None else ID13_DEFAULT_DISTANCE_M)
-            self.pixel_x.setValue(px * 1000 if px is not None else ID13_DEFAULT_PIXEL_MM)
-            self.pixel_y.setValue(py * 1000 if py is not None else ID13_DEFAULT_PIXEL_MM)
-            if wav is not None:
-                if wav < 1e-6:
-                    self.wavelength.setValue(wav * 1e10)
-                elif wav < 0.5:
-                    self.wavelength.setValue(wav * 10.0)
-                else:
-                    self.wavelength.setValue(wav)
-            else:
-                self.wavelength.setValue(ID13_DEFAULT_WAVELENGTH_A)
+            self.center_x.setValue(ID13_DEFAULT_CENTER_X)
+            self.center_y.setValue(ID13_DEFAULT_CENTER_Y)
+            self.distance.setValue(ID13_DEFAULT_DISTANCE_M)
+            self.pixel_x.setValue(ID13_DEFAULT_PIXEL_MM)
+            self.pixel_y.setValue(ID13_DEFAULT_PIXEL_MM)
+            self.wavelength.setValue(ID13_DEFAULT_WAVELENGTH_A)
             return
 
     def integrate_selected_files(self):

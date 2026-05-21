@@ -1062,8 +1062,8 @@ class HermansTab(QWidget):
 
         self.center_x_spin = QDoubleSpinBox()
         self.center_y_spin = QDoubleSpinBox()
-        self.center_x_spin.setDecimals(3)
-        self.center_y_spin.setDecimals(3)
+        self.center_x_spin.setDecimals(13)
+        self.center_y_spin.setDecimals(13)
         self.center_x_spin.setRange(-1e6, 1e6)
         self.center_y_spin.setRange(-1e6, 1e6)
         self.center_x_spin.valueChanged.connect(self.calculate_anisotropy)
@@ -1214,8 +1214,8 @@ class HermansTab(QWidget):
             x = header_float(header, CENTER_X_KEYS, ID02_DEFAULT_CENTER_X)
             y = header_float(header, CENTER_Y_KEYS, ID02_DEFAULT_CENTER_Y)
         elif self.instrument_mode == "ID13":
-            x = header_float(header, CENTER_X_KEYS, ID13_DEFAULT_CENTER_X)
-            y = header_float(header, CENTER_Y_KEYS, ID13_DEFAULT_CENTER_Y)
+            x = ID13_DEFAULT_CENTER_X
+            y = ID13_DEFAULT_CENTER_Y
         else:
             x = self.center_x_spin.value() if self.center_x_spin.value() != 0 else header_float(header, CENTER_X_KEYS, nx / 2)
             y = self.center_y_spin.value() if self.center_y_spin.value() != 0 else header_float(header, CENTER_Y_KEYS, ny / 2)
@@ -1588,17 +1588,19 @@ class HermansTab(QWidget):
             default_pixel = ID02_DEFAULT_PIXEL_MM
             default_wavelength = ID02_DEFAULT_WAVELENGTH_A
         elif self.instrument_mode == "ID13":
-            default_distance = ID13_DEFAULT_DISTANCE_M
-            default_pixel = ID13_DEFAULT_PIXEL_MM
-            default_wavelength = ID13_DEFAULT_WAVELENGTH_A
+            distance = ID13_DEFAULT_DISTANCE_M
+            pixel_x = ID13_DEFAULT_PIXEL_MM
+            pixel_y = ID13_DEFAULT_PIXEL_MM
+            wavelength = ID13_DEFAULT_WAVELENGTH_A
         else:
             default_distance = 0.9
             default_pixel = 0.075
             default_wavelength = 1.54189
-        distance = header_float(header, ["SampleDistance", "sampledistance", "sample_distance", "Distance", "DetectorDistance"], default_distance)
-        pixel_x = header_float(header, ["PSize_1", "psize_1", "PixelSizeX", "pixel_x"], default_pixel)
-        pixel_y = header_float(header, ["PSize_2", "psize_2", "PixelSizeY", "pixel_y"], default_pixel)
-        wavelength = header_float(header, ["Wavelength", "wavelength"], default_wavelength)
+        if self.instrument_mode != "ID13":
+            distance = header_float(header, ["SampleDistance", "sampledistance", "sample_distance", "Distance", "DetectorDistance"], default_distance)
+            pixel_x = header_float(header, ["PSize_1", "psize_1", "PixelSizeX", "pixel_x"], default_pixel)
+            pixel_y = header_float(header, ["PSize_2", "psize_2", "PixelSizeY", "pixel_y"], default_pixel)
+            wavelength = header_float(header, ["Wavelength", "wavelength"], default_wavelength)
 
         if pixel_x < 1e-3:
             pixel_x *= 1000

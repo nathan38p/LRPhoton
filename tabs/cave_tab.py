@@ -766,11 +766,11 @@ class CaveTab(QWidget):
 
         self.xc_spin = QDoubleSpinBox()
         self.xc_spin.setRange(-100000, 100000)
-        self.xc_spin.setDecimals(3)
+        self.xc_spin.setDecimals(13)
 
         self.yc_spin = QDoubleSpinBox()
         self.yc_spin.setRange(-100000, 100000)
-        self.yc_spin.setDecimals(3)
+        self.yc_spin.setDecimals(13)
 
         self.beamstop_y_spin = QDoubleSpinBox()
         self.beamstop_y_spin.setRange(0, 100000)
@@ -1178,10 +1178,10 @@ class CaveTab(QWidget):
             pixel_y = ID02_DEFAULT_PIXEL_MM if pixel_y is None else pixel_y
             wavelength = ID02_DEFAULT_WAVELENGTH_A if wavelength is None else wavelength
         elif self.instrument_mode == "ID13":
-            distance_m = ID13_DEFAULT_DISTANCE_M if distance_m is None else distance_m
-            pixel_x = ID13_DEFAULT_PIXEL_MM if pixel_x is None else pixel_x
-            pixel_y = ID13_DEFAULT_PIXEL_MM if pixel_y is None else pixel_y
-            wavelength = ID13_DEFAULT_WAVELENGTH_A if wavelength is None else wavelength
+            distance_m = ID13_DEFAULT_DISTANCE_M
+            pixel_x = ID13_DEFAULT_PIXEL_MM
+            pixel_y = ID13_DEFAULT_PIXEL_MM
+            wavelength = ID13_DEFAULT_WAVELENGTH_A
 
         if distance_m is None or pixel_x is None or pixel_y is None or wavelength is None:
             return None
@@ -1229,10 +1229,8 @@ class CaveTab(QWidget):
             return
 
         if self.instrument_mode == "ID13":
-            center_1 = get_header_float(self.header, *CENTER_X_KEYS)
-            center_2 = get_header_float(self.header, *CENTER_Y_KEYS)
-            self.xc_spin.setValue(center_1 if center_1 is not None else ID13_DEFAULT_CENTER_X)
-            self.yc_spin.setValue(center_2 if center_2 is not None else ID13_DEFAULT_CENTER_Y)
+            self.xc_spin.setValue(ID13_DEFAULT_CENTER_X)
+            self.yc_spin.setValue(ID13_DEFAULT_CENTER_Y)
             self.nan_operator_combo.setCurrentText(">=")
             self.nan_threshold_spin.setValue(4e9)
             return

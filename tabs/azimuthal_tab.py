@@ -637,12 +637,12 @@ class AzimuthalTab(QWidget):
         form.setVerticalSpacing(3)
         form.setHorizontalSpacing(6)
 
-        self.center_x = self.double_spin(0, decimals=3)
-        self.center_y = self.double_spin(0, decimals=3)
-        self.distance = self.double_spin(0, decimals=6, minimum=0)
+        self.center_x = self.double_spin(0, decimals=13)
+        self.center_y = self.double_spin(0, decimals=13)
+        self.distance = self.double_spin(0, decimals=16, minimum=0)
         self.pixel_x = self.double_spin(0.075000, decimals=6, minimum=0)
         self.pixel_y = self.double_spin(0.075000, decimals=6, minimum=0)
-        self.wavelength = self.double_spin(0, decimals=6, minimum=0)
+        self.wavelength = self.double_spin(0, decimals=16, minimum=0)
         self.q_min = self.double_spin(0.1, decimals=8, minimum=0)
         self.q_max = self.double_spin(1.0, decimals=8, minimum=0)
         self.n_points = QSpinBox()
@@ -1100,26 +1100,12 @@ class AzimuthalTab(QWidget):
             return
 
         if self.instrument_mode == "ID13":
-            cx = get_header_float(header, *CENTER_X_KEYS)
-            cy = get_header_float(header, *CENTER_Y_KEYS)
-            dist = get_header_float(header, "SampleDistance", "sampledistance", "sample_distance")
-            px = get_header_float(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX")
-            py = get_header_float(header, "PSize_2", "psize_2", "PSize_Y", "PixelSizeY")
-            wav = get_header_float(header, "WaveLength", "Wavelength", "wavelength")
-            self.center_x.setValue(cx if cx is not None else ID13_DEFAULT_CENTER_X)
-            self.center_y.setValue(cy if cy is not None else ID13_DEFAULT_CENTER_Y)
-            self.distance.setValue(dist if dist is not None else ID13_DEFAULT_DISTANCE_M)
-            self.pixel_x.setValue(px * 1000 if px is not None else ID13_DEFAULT_PIXEL_MM)
-            self.pixel_y.setValue(py * 1000 if py is not None else ID13_DEFAULT_PIXEL_MM)
-            if wav is not None:
-                if wav < 1e-6:
-                    self.wavelength.setValue(wav * 1e10)
-                elif wav < 0.5:
-                    self.wavelength.setValue(wav * 10.0)
-                else:
-                    self.wavelength.setValue(wav)
-            else:
-                self.wavelength.setValue(ID13_DEFAULT_WAVELENGTH_A)
+            self.center_x.setValue(ID13_DEFAULT_CENTER_X)
+            self.center_y.setValue(ID13_DEFAULT_CENTER_Y)
+            self.distance.setValue(ID13_DEFAULT_DISTANCE_M)
+            self.pixel_x.setValue(ID13_DEFAULT_PIXEL_MM)
+            self.pixel_y.setValue(ID13_DEFAULT_PIXEL_MM)
+            self.wavelength.setValue(ID13_DEFAULT_WAVELENGTH_A)
             self.q_min.setValue(0.1)
             self.q_max.setValue(1.0)
             return

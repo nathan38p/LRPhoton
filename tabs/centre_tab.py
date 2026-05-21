@@ -817,12 +817,12 @@ class CentreTab(QWidget):
 
         self.btn_xenocs.setChecked(True)
 
-        self.edit_xc = self._double_spin(0, decimals=3)
-        self.edit_yc = self._double_spin(0, decimals=3)
-        self.edit_distance = self._double_spin(0, decimals=6, minimum=0)
+        self.edit_xc = self._double_spin(0, decimals=13)
+        self.edit_yc = self._double_spin(0, decimals=13)
+        self.edit_distance = self._double_spin(0, decimals=16, minimum=0)
         self.edit_px_x = self._double_spin(0.075000, decimals=6, minimum=0)
         self.edit_px_y = self._double_spin(0.075000, decimals=6, minimum=0)
-        self.edit_lambda = self._double_spin(0, decimals=6, minimum=0)
+        self.edit_lambda = self._double_spin(0, decimals=16, minimum=0)
 
 
         self.edit_beamstop_radius = self._double_spin(0, decimals=3, minimum=0)
@@ -1004,24 +1004,18 @@ class CentreTab(QWidget):
             return
 
         if self.instrument_mode == "ID13":
-            center_1 = self.get_header_float(header, *CENTER_X_KEYS)
-            center_2 = self.get_header_float(header, *CENTER_Y_KEYS)
-            sample_distance = self.get_header_float(header, "SampleDistance", "sampledistance", "sample_distance")
-            pixel_x_m = self.get_header_float(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX")
-            pixel_y_m = self.get_header_float(header, "PSize_2", "psize_2", "PSize_Y", "PixelSizeY")
-            wavelength_m = self.get_header_float(header, "WaveLength", "Wavelength", "wavelength")
             self.edit_xc.blockSignals(True)
             self.edit_yc.blockSignals(True)
             self.edit_distance.blockSignals(True)
             self.edit_px_x.blockSignals(True)
             self.edit_px_y.blockSignals(True)
             self.edit_lambda.blockSignals(True)
-            self.edit_xc.setValue(center_1 if center_1 is not None else ID13_DEFAULT_CENTER_X)
-            self.edit_yc.setValue(center_2 if center_2 is not None else ID13_DEFAULT_CENTER_Y)
-            self.edit_distance.setValue(sample_distance if sample_distance is not None else ID13_DEFAULT_DISTANCE_M)
-            self.edit_px_x.setValue(pixel_x_m * 1000 if pixel_x_m is not None else ID13_DEFAULT_PIXEL_MM)
-            self.edit_px_y.setValue(pixel_y_m * 1000 if pixel_y_m is not None else ID13_DEFAULT_PIXEL_MM)
-            self.edit_lambda.setValue(wavelength_m * 1e10 if wavelength_m is not None else ID13_DEFAULT_WAVELENGTH_A)
+            self.edit_xc.setValue(ID13_DEFAULT_CENTER_X)
+            self.edit_yc.setValue(ID13_DEFAULT_CENTER_Y)
+            self.edit_distance.setValue(ID13_DEFAULT_DISTANCE_M)
+            self.edit_px_x.setValue(ID13_DEFAULT_PIXEL_MM)
+            self.edit_px_y.setValue(ID13_DEFAULT_PIXEL_MM)
+            self.edit_lambda.setValue(ID13_DEFAULT_WAVELENGTH_A)
             self.edit_xc.blockSignals(False)
             self.edit_yc.blockSignals(False)
             self.edit_distance.blockSignals(False)
