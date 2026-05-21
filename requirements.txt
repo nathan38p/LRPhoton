@@ -4,3 +4,4 @@ matplotlib
 h5py
 fabio
 requests
+hdf5plugin

@@ -1182,7 +1182,7 @@ class RadialTab(QWidget):
         self.sector_max = self.double_spin(360, decimals=3, minimum=-360)
         self.n_bins = QSpinBox()
         self.n_bins.setRange(10, 10000)
-        self.n_bins.setValue(300)
+        self.n_bins.setValue(200)
         self.plot_mode = QComboBox()
         self.plot_mode.addItems(["linear linear", "linear log", "log log", "log linear", "Kratky", "2θ linear", "2θ log"])
         self.plot_mode.setCurrentText("log log")
