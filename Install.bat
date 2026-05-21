@@ -7,32 +7,47 @@ echo ==========================================
 echo.
 
 :: =========================================================
-:: INSTALLATION PYTHON MANAGER
-:: =========================================================
-
-winget install -e --id Python.PythonManager
-if errorlevel 1 echo Python Manager non trouve par winget, installation ignoree.
-
-:: =========================================================
 :: INSTALLATION PYTHON 3.14 x64 SI ABSENT
 :: =========================================================
 
-echo Verification de Python x64...
+echo Verification de Python 3.14 x64...
 
 py -3.14-64 --version >nul 2>&1
 
 if errorlevel 1 (
+
     echo.
     echo Python 3.14 x64 non detecte.
-    echo Installation de Python 3.14 x64...
+    echo Telechargement de Python 3.14 x64 depuis python.org...
+    echo.
 
-    winget install -e --id Python.Python.3.14 --architecture x64
+    set "PYTHON_INSTALLER=%TEMP%\python-3.14.5-amd64.exe"
+
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.14.5/python-3.14.5-amd64.exe' -OutFile '%PYTHON_INSTALLER%'"
 
     echo.
-    echo Python installe.
-    echo Relancez Install.bat.
-    pause
-    exit
+    echo Installation de Python 3.14 x64...
+    echo.
+
+    "%PYTHON_INSTALLER%" /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1 Include_pip=1
+
+    echo.
+    echo Verification installation...
+    echo.
+
+    py -3.14-64 --version >nul 2>&1
+
+    if errorlevel 1 (
+        echo.
+        echo ERREUR :
+        echo Python 3.14 x64 n'a pas ete detecte.
+        echo.
+        echo Redemarrez Windows puis relancez Install.bat
+        echo.
+        pause
+        exit
+    )
 )
 
 echo Python 3.14 x64 detecte.
