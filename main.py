@@ -184,6 +184,14 @@ class MainWindow(QMainWindow):
 
 
 
+    def is_development_copy(self):
+        """
+        Disable GitHub auto-update checks when running from the developer Git repository.
+        ZIP downloads do not contain .git, so normal users still get update checks.
+        """
+        app_dir = Path(__file__).resolve().parent
+        return (app_dir / ".git").exists()
+
     def get_local_commit(self):
         if LOCAL_VERSION_FILE.exists():
             return LOCAL_VERSION_FILE.read_text(encoding="utf-8").strip()
@@ -305,6 +313,9 @@ class MainWindow(QMainWindow):
 
     def check_for_updates(self):
         try:
+            if self.is_development_copy():
+                self.version_label.setText("Development mode")
+                return
             response = requests.get(UPDATE_INFO_URL, timeout=5)
             response.raise_for_status()
             data = response.json()

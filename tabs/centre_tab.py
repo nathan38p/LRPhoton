@@ -486,6 +486,10 @@ class ImageCanvas(FigureCanvas):
         if title:
             self.ax.set_title(title)
         self.ax.set_aspect("equal")
+        self.ax.set_xticks([])
+        self.ax.set_yticks([])
+        self.ax.set_xlabel("")
+        self.ax.set_ylabel("")
 
         # Important: otherwise each update adds a new colorbar and the image shrinks.
         if self.cbar is not None:

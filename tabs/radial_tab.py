@@ -4,7 +4,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QEvent
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -449,12 +449,179 @@ def radial_average(
 # ============================================================
 
 
+
 class PlotCanvas(FigureCanvas):
     def __init__(self):
         self.fig = Figure()
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
         self.fig.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.20)
+
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMouseTracking(True)
+        self.grabGesture(Qt.PinchGesture)
+
+        self._base_zoom = 1.12
+
+    def event(self, event):
+        if event.type() == QEvent.Gesture:
+            return self._handle_gesture_event(event)
+
+        if event.type() == QEvent.NativeGesture:
+            return self._handle_native_gesture_event(event)
+
+        return super().event(event)
+
+    def wheelEvent(self, event):
+        """
+        Trackpad behavior on the radial graph:
+        - two-finger scroll/pan moves the graph,
+        - Ctrl/Command + wheel or pinch-like wheel zooms around the cursor.
+        """
+        modifiers = event.modifiers()
+        is_zoom = bool(modifiers & Qt.ControlModifier) or bool(modifiers & Qt.MetaModifier)
+
+        pixel_delta = event.pixelDelta()
+        angle_delta = event.angleDelta()
+
+        if is_zoom:
+            delta_y = pixel_delta.y() if not pixel_delta.isNull() else angle_delta.y() / 8.0
+            if delta_y == 0:
+                event.accept()
+                return
+
+            scale = self._base_zoom if delta_y < 0 else 1.0 / self._base_zoom
+            position = event.position()
+            self._zoom_at_canvas_position(position.x(), position.y(), scale)
+            event.accept()
+            return
+
+        dx = pixel_delta.x() if not pixel_delta.isNull() else angle_delta.x() / 8.0
+        dy = pixel_delta.y() if not pixel_delta.isNull() else angle_delta.y() / 8.0
+        self._pan_from_pixels(dx, dy)
+        event.accept()
+
+    def _handle_gesture_event(self, event):
+        pinch = event.gesture(Qt.PinchGesture)
+        if pinch is None:
+            return False
+
+        scale = pinch.scaleFactor()
+        if scale and scale > 0:
+            center = pinch.centerPoint()
+            self._zoom_at_canvas_position(center.x(), center.y(), 1.0 / scale)
+
+        event.accept()
+        return True
+
+    def _handle_native_gesture_event(self, event):
+        gesture_type = event.gestureType()
+
+        if gesture_type == Qt.ZoomNativeGesture:
+            value = event.value()
+            if value != 0:
+                scale = 1.0 / (1.0 + value)
+                position = event.position()
+                self._zoom_at_canvas_position(position.x(), position.y(), scale)
+            event.accept()
+            return True
+
+        if gesture_type == Qt.PanNativeGesture:
+            value = event.value()
+            self._pan_from_pixels(0, value * 120.0)
+            event.accept()
+            return True
+
+        return False
+
+    def _zoom_at_canvas_position(self, canvas_x, canvas_y, scale):
+        if scale <= 0:
+            return
+
+        xdata, ydata = self._canvas_position_to_data(canvas_x, canvas_y)
+        if xdata is None or ydata is None:
+            return
+
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+
+        new_xlim = self._scaled_limits(xlim, xdata, scale, self.ax.get_xscale())
+        new_ylim = self._scaled_limits(ylim, ydata, scale, self.ax.get_yscale())
+
+        if new_xlim is not None:
+            self.ax.set_xlim(new_xlim)
+        if new_ylim is not None:
+            self.ax.set_ylim(new_ylim)
+
+        self.draw_idle()
+
+    def _pan_from_pixels(self, dx_pixels, dy_pixels):
+        if dx_pixels == 0 and dy_pixels == 0:
+            return
+
+        bbox = self.ax.bbox
+        width = max(float(bbox.width), 1.0)
+        height = max(float(bbox.height), 1.0)
+
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+
+        new_xlim = self._shift_limits(xlim, -dx_pixels / width, self.ax.get_xscale())
+        new_ylim = self._shift_limits(ylim, dy_pixels / height, self.ax.get_yscale())
+
+        if new_xlim is not None:
+            self.ax.set_xlim(new_xlim)
+        if new_ylim is not None:
+            self.ax.set_ylim(new_ylim)
+
+        self.draw_idle()
+
+    def _canvas_position_to_data(self, canvas_x, canvas_y):
+        height = self.height()
+        display_y = height - canvas_y
+        try:
+            xdata, ydata = self.ax.transData.inverted().transform((canvas_x, display_y))
+        except Exception:
+            return None, None
+
+        if not np.isfinite(xdata) or not np.isfinite(ydata):
+            return None, None
+
+        return float(xdata), float(ydata)
+
+    def _scaled_limits(self, limits, center, scale, axis_scale):
+        low, high = float(limits[0]), float(limits[1])
+        center = float(center)
+
+        if axis_scale == "log":
+            if low <= 0 or high <= 0 or center <= 0:
+                return None
+            log_low = np.log10(low)
+            log_high = np.log10(high)
+            log_center = np.log10(center)
+            new_low = log_center + (log_low - log_center) * scale
+            new_high = log_center + (log_high - log_center) * scale
+            return 10 ** new_low, 10 ** new_high
+
+        new_low = center + (low - center) * scale
+        new_high = center + (high - center) * scale
+        return new_low, new_high
+
+    def _shift_limits(self, limits, fraction, axis_scale):
+        low, high = float(limits[0]), float(limits[1])
+
+        if axis_scale == "log":
+            if low <= 0 or high <= 0:
+                return None
+            log_low = np.log10(low)
+            log_high = np.log10(high)
+            span = log_high - log_low
+            shift = span * fraction
+            return 10 ** (log_low + shift), 10 ** (log_high + shift)
+
+        span = high - low
+        shift = span * fraction
+        return low + shift, high + shift
 
 
 # ======================= IMAGE CANVAS =======================
@@ -472,15 +639,144 @@ class ImageCanvas(FigureCanvas):
         self._xlim_start = None
         self._ylim_start = None
         self._base_scale = 1.18
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMouseTracking(True)
+        self.grabGesture(Qt.PinchGesture)
         self.raw_image = None
         self.coordinate_label = None
         self.display_vmin = None
         self.display_vmax = None
+        self.q_map = None
 
         self.mpl_connect("scroll_event", self._on_scroll)
         self.mpl_connect("button_press_event", self._on_press)
         self.mpl_connect("button_release_event", self._on_release)
         self.mpl_connect("motion_notify_event", self._on_motion)
+
+
+    def event(self, event):
+        if event.type() == QEvent.Gesture:
+            return self._handle_gesture_event(event)
+
+        if event.type() == QEvent.NativeGesture:
+            return self._handle_native_gesture_event(event)
+
+        return super().event(event)
+
+    def wheelEvent(self, event):
+        pixel_delta = event.pixelDelta()
+        angle_delta = event.angleDelta()
+        modifiers = event.modifiers()
+
+        is_zoom = bool(modifiers & Qt.ControlModifier) or bool(modifiers & Qt.MetaModifier)
+
+        if is_zoom:
+            delta_y = pixel_delta.y() if not pixel_delta.isNull() else angle_delta.y() / 8.0
+
+            if delta_y > 0:
+                scale_factor = 1 / self._base_scale
+            elif delta_y < 0:
+                scale_factor = self._base_scale
+            else:
+                return
+
+            canvas_pos = event.position()
+            self._zoom_at_canvas_position(canvas_pos.x(), canvas_pos.y(), scale_factor)
+            event.accept()
+            return
+
+        dx = pixel_delta.x() if not pixel_delta.isNull() else angle_delta.x() / 8.0
+        dy = pixel_delta.y() if not pixel_delta.isNull() else angle_delta.y() / 8.0
+        self._pan_from_pixels(dx, dy)
+        event.accept()
+
+    def _handle_gesture_event(self, event):
+        pinch = event.gesture(Qt.PinchGesture)
+        if pinch is None:
+            return False
+
+        scale = pinch.scaleFactor()
+        if scale and scale > 0:
+            center = pinch.centerPoint()
+            self._zoom_at_canvas_position(center.x(), center.y(), 1.0 / scale)
+
+        event.accept()
+        return True
+
+    def _handle_native_gesture_event(self, event):
+        gesture_type = event.gestureType()
+
+        if gesture_type == Qt.ZoomNativeGesture:
+            value = event.value()
+            if value != 0:
+                scale = 1.0 / (1.0 + value)
+                position = event.position()
+                self._zoom_at_canvas_position(position.x(), position.y(), scale)
+            event.accept()
+            return True
+
+        if gesture_type == Qt.PanNativeGesture:
+            value = event.value()
+            self._pan_from_pixels(0, value * 120.0)
+            event.accept()
+            return True
+
+        return False
+
+    def _zoom_at_canvas_position(self, canvas_x, canvas_y, scale_factor):
+        if scale_factor <= 0:
+            return
+
+        height = self.height()
+        display_y = height - canvas_y
+
+        try:
+            xdata, ydata = self.ax.transData.inverted().transform((canvas_x, display_y))
+        except Exception:
+            return
+
+        if not np.isfinite(xdata) or not np.isfinite(ydata):
+            return
+
+        cur_xlim = self.ax.get_xlim()
+        cur_ylim = self.ax.get_ylim()
+
+        new_width = (cur_xlim[1] - cur_xlim[0]) * scale_factor
+        new_height = (cur_ylim[1] - cur_ylim[0]) * scale_factor
+
+        relx = (cur_xlim[1] - xdata) / (cur_xlim[1] - cur_xlim[0])
+        rely = (cur_ylim[1] - ydata) / (cur_ylim[1] - cur_ylim[0])
+
+        self.ax.set_xlim([
+            xdata - new_width * (1 - relx),
+            xdata + new_width * relx,
+        ])
+
+        self.ax.set_ylim([
+            ydata - new_height * (1 - rely),
+            ydata + new_height * rely,
+        ])
+
+        self.draw_idle()
+
+    def _pan_from_pixels(self, dx_pixels, dy_pixels):
+        if dx_pixels == 0 and dy_pixels == 0:
+            return
+
+        bbox = self.ax.bbox
+        width = max(float(bbox.width), 1.0)
+        height = max(float(bbox.height), 1.0)
+
+        cur_xlim = self.ax.get_xlim()
+        cur_ylim = self.ax.get_ylim()
+
+        dx_data = (cur_xlim[1] - cur_xlim[0]) * dx_pixels / width
+        dy_data = (cur_ylim[1] - cur_ylim[0]) * dy_pixels / height
+
+        self.ax.set_xlim(cur_xlim[0] - dx_data, cur_xlim[1] - dx_data)
+        self.ax.set_ylim(cur_ylim[0] + dy_data, cur_ylim[1] + dy_data)
+
+        self.draw_idle()
 
     def set_coordinate_label(self, label):
         self.coordinate_label = label
@@ -488,6 +784,9 @@ class ImageCanvas(FigureCanvas):
     def reset_display_limits(self):
         self.display_vmin = None
         self.display_vmax = None
+
+    def set_q_map(self, q_map):
+        self.q_map = q_map
 
     def _on_scroll(self, event):
         if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
@@ -539,6 +838,7 @@ class ImageCanvas(FigureCanvas):
                 x_index = int(round(event.xdata))
                 y_index = int(round(event.ydata))
                 value_text = "-"
+                q_text = "-"
 
                 if self.raw_image is not None:
                     ny, nx = self.raw_image.shape
@@ -553,11 +853,16 @@ class ImageCanvas(FigureCanvas):
                         else:
                             value_text = f"{value:.8g}"
 
+                        if self.q_map is not None:
+                            q_value = self.q_map[y_index, x_index]
+                            if np.isfinite(q_value):
+                                q_text = f"{q_value:.6g} nm⁻¹"
+
                 self.coordinate_label.setText(
-                    f"x = {x_index + 1} | y = {y_index + 1} | I = {value_text}"
+                    f"x = {x_index + 1} | y = {y_index + 1}\nq = {q_text} | I = {value_text}"
                 )
             else:
-                self.coordinate_label.setText("x = - | y = - | I = -")
+                self.coordinate_label.setText("x = - | y = -\nq = - | I = -")
 
         if not self._dragging or event.inaxes != self.ax:
             return
@@ -634,9 +939,10 @@ class ImageCanvas(FigureCanvas):
                     bbox=dict(facecolor="black", alpha=0.55, edgecolor="none", pad=2),
                 )
 
-        self.ax.set_xlabel("x / px")
-        self.ax.set_ylabel("y / px")
-        self.ax.tick_params(axis="both", colors="black", labelsize=8)
+        self.ax.set_xticks([])
+        self.ax.set_yticks([])
+        self.ax.set_xlabel("")
+        self.ax.set_ylabel("")
         self.ax.set_aspect("equal")
         if had_image:
             self.ax.set_xlim(current_xlim)
@@ -777,6 +1083,11 @@ class RadialTab(QWidget):
         self.pixel_x = self.double_spin(0.075000, decimals=6, minimum=0)
         self.pixel_y = self.double_spin(0.075000, decimals=6, minimum=0)
         self.wavelength = self.double_spin(0, decimals=6, minimum=0)
+        self.use_q_range = QCheckBox("Use q range")
+        self.use_q_range.setChecked(False)
+        self.use_q_range.stateChanged.connect(self.update_mask_parameter_state)
+        self.q_min = self.double_spin(0, decimals=6, minimum=0)
+        self.q_max = self.double_spin(0, decimals=6, minimum=0)
 
         self.use_sector = QCheckBox("Use azimuthal sector")
         self.use_sector.setChecked(False)
@@ -812,14 +1123,21 @@ class RadialTab(QWidget):
         self.frame_label.hide()
         self.frame_spin.hide()
         self.frame_spin.valueChanged.connect(self.update_selected_h5_frame)
-        form.addWidget(self.use_sector, 7, 0, 1, 2)
-        form.addWidget(QLabel("Sector min ψ (°):"), 8, 0)
-        form.addWidget(self.sector_min, 8, 1)
-        form.addWidget(QLabel("Sector max ψ (°):"), 9, 0)
-        form.addWidget(self.sector_max, 9, 1)
 
-        form.addWidget(QLabel("Bins:"), 10, 0)
-        form.addWidget(self.n_bins, 10, 1)
+        form.addWidget(self.use_q_range, 7, 0, 1, 2)
+        form.addWidget(QLabel("q min (nm⁻¹):"), 8, 0)
+        form.addWidget(self.q_min, 8, 1)
+        form.addWidget(QLabel("q max (nm⁻¹):"), 9, 0)
+        form.addWidget(self.q_max, 9, 1)
+
+        form.addWidget(self.use_sector, 10, 0, 1, 2)
+        form.addWidget(QLabel("Sector min ψ (°):"), 11, 0)
+        form.addWidget(self.sector_min, 11, 1)
+        form.addWidget(QLabel("Sector max ψ (°):"), 12, 0)
+        form.addWidget(self.sector_max, 12, 1)
+
+        form.addWidget(QLabel("Bins:"), 13, 0)
+        form.addWidget(self.n_bins, 13, 1)
         params_layout.addLayout(form)
 
         button_layout = QHBoxLayout()
@@ -860,8 +1178,8 @@ class RadialTab(QWidget):
         graph_layout.addWidget(self.canvas, stretch=1)
 
         self.image_canvas = ImageCanvas()
-        self.image_coordinate_label = QLabel("x = - | y = - | I = -")
-        self.image_coordinate_label.setMinimumHeight(26)
+        self.image_coordinate_label = QLabel("x = - | y = -\nq = - | I = -")
+        self.image_coordinate_label.setMinimumHeight(42)
         self.image_coordinate_label.setAlignment(Qt.AlignCenter)
         self.image_coordinate_label.setStyleSheet("""
             QLabel {
@@ -869,7 +1187,7 @@ class RadialTab(QWidget):
                 border-radius: 8px;
                 padding: 5px;
                 font-family: Menlo, Monaco, monospace;
-                font-size: 11px;
+                font-size: 10px;
             }
         """)
         self.image_canvas.set_coordinate_label(self.image_coordinate_label)
@@ -919,6 +1237,10 @@ class RadialTab(QWidget):
         self.next_frame_button.clicked.connect(self.next_frame)
 
     def update_mask_parameter_state(self):
+        use_q_range = self.use_q_range.isChecked()
+        self.q_min.setEnabled(use_q_range)
+        self.q_max.setEnabled(use_q_range)
+
         use_sector = self.use_sector.isChecked()
         self.sector_min.setEnabled(use_sector)
         self.sector_max.setEnabled(use_sector)
@@ -937,7 +1259,7 @@ class RadialTab(QWidget):
             self.center_x, self.center_y, self.distance, self.pixel_x, self.pixel_y,
             self.wavelength, self.frame_spin, self.frame_start_spin, self.frame_end_spin,
             self.frame_slider, self.prev_frame_button, self.next_frame_button,
-            self.use_sector,
+            self.use_q_range, self.q_min, self.q_max, self.use_sector,
             self.n_bins, self.plot_mode, self.integrate_button, self.save_button,
         ]:
             widget.setEnabled(enabled)
@@ -1147,7 +1469,16 @@ class RadialTab(QWidget):
         header = {}
         if file_path is not None and self.instrument_mode == "XENOCS":
             try:
-                _, header = read_image_file(file_path)
+                if file_path.suffix.lower() in [".h5", ".hdf5"]:
+                    matching_edf = file_path.with_suffix(".edf")
+
+                    if matching_edf.exists():
+                        _, header = read_edf_file(matching_edf)
+                        header["Parameter source"] = matching_edf.name
+                    else:
+                        _, header = read_image_file(file_path)
+                else:
+                    _, header = read_image_file(file_path)
             except Exception:
                 header = {}
 
@@ -1215,8 +1546,8 @@ class RadialTab(QWidget):
                 h5_dataset_name = self.h5_dataset_name if file_path.suffix.lower() in [".h5", ".hdf5"] else None
                 h5_frame_index = self.frame_spin.value() - 1 if file_path.suffix.lower() in [".h5", ".hdf5"] else 0
                 image, _ = read_image_file(file_path, h5_dataset_name, h5_frame_index)
-                q_min = 0
-                q_max = 0
+                q_min = self.q_min.value() if self.use_q_range.isChecked() else 0
+                q_max = self.q_max.value() if self.use_q_range.isChecked() else 0
                 sector_min = self.sector_min.value() if self.use_sector.isChecked() else 0
                 sector_max = self.sector_max.value() if self.use_sector.isChecked() else 360
                 use_log_bins = self.plot_mode.currentText() in ["log log", "log linear", "Kratky"]
@@ -1231,6 +1562,22 @@ class RadialTab(QWidget):
                     self.pixel_y.value(),
                     self.wavelength.value(),
                 )
+
+                # --- q_map calculation ---
+                ny, nx = image.shape
+                yy, xx = np.indices(image.shape)
+
+                dx_px = xx - float(self.center_x.value())
+                dy_px = yy - float(self.center_y.value())
+
+                dx_m = dx_px * float(self.pixel_x.value()) * 1e-3
+                dy_m = dy_px * float(self.pixel_y.value()) * 1e-3
+
+                r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+                two_theta_map = np.arctan2(r_m, float(self.distance.value()))
+                wavelength_nm_map = wavelength_to_nm(float(self.wavelength.value()))
+                q_map = (4.0 * np.pi / wavelength_nm_map) * np.sin(two_theta_map / 2.0)
+                # --- end q_map calculation ---
 
                 q, intensity, counts, mask = radial_average(
                     image,
@@ -1254,6 +1601,7 @@ class RadialTab(QWidget):
                 self.last_results[file_path.stem] = (q, intensity, counts)
 
                 if file_path == files[0]:
+                    self.image_canvas.set_q_map(q_map)
                     self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
                 frame_text = f" | H5 frame {self.frame_spin.value()} / {self.h5_n_frames}" if file_path.suffix.lower() in [".h5", ".hdf5"] and self.h5_n_frames > 1 else ""
                 messages.append(
@@ -1392,7 +1740,10 @@ class RadialTab(QWidget):
             QMessageBox.warning(self, "No results", "No radial integration result to save.")
             return
 
-        range_parts = ["qfull"]
+        if self.use_q_range.isChecked():
+            range_parts = [f"q{self.q_min.value():.4g}-{self.q_max.value():.4g}nm-1"]
+        else:
+            range_parts = ["qfull"]
 
         if self.use_sector.isChecked():
             range_parts.append(f"psi{self.sector_min.value():.3g}-{self.sector_max.value():.3g}deg")
