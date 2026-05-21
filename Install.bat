@@ -48,7 +48,8 @@ mkdir "%DEST%" >nul 2>&1
 echo.
 echo Copie des fichiers...
 
-robocopy "%SOURCE%" "%DEST%" /E /XD .git __pycache__ venv .venv /XF .DS_Store *.pyc Install.bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+"Copy-Item -Path '%SOURCE%*' -Destination '%DEST%' -Recurse -Force"
 
 echo.
 echo Installation des dependances...
