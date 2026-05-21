@@ -248,24 +248,21 @@ class MainWindow(QMainWindow):
                 "build",
             }
 
+            ignored_files = {
+                ".lrphoton_commit",
+                "install.bat",
+                "LRPhoton.bat",
+                "Lancer LRPhoton.bat",
+            }
+
             remote_files = {
                 path.relative_to(source_root)
                 for path in source_root.rglob("*")
                 if path.is_file()
+                and path.name not in ignored_files
                 and path.suffix.lower() in allowed_extensions
                 and not any(part in ignored_dirs for part in path.relative_to(source_root).parts)
             }
-
-            local_files = {
-                path.relative_to(app_dir)
-                for path in app_dir.rglob("*")
-                if path.is_file()
-                and path.suffix.lower() in allowed_extensions
-                and not any(part in ignored_dirs for part in path.relative_to(app_dir).parts)
-            }
-
-            if remote_files != local_files:
-                return False
 
             for relative_name in remote_files:
                 local_file = app_dir / relative_name
@@ -303,6 +300,13 @@ class MainWindow(QMainWindow):
             "build",
         }
 
+        ignored_files = {
+            ".lrphoton_commit",
+            "install.bat",
+            "LRPhoton.bat",
+            "Lancer LRPhoton.bat",
+        }
+
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_path = Path(temporary_directory)
             zip_path = temporary_path / "lrphoton_update.zip"
@@ -324,6 +328,9 @@ class MainWindow(QMainWindow):
                 relative_path = source_path.relative_to(source_root)
 
                 if any(part in ignored_dirs for part in relative_path.parts):
+                    continue
+
+                if source_path.name in ignored_files:
                     continue
 
                 destination_path = app_dir / relative_path
