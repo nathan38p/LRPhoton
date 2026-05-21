@@ -613,9 +613,9 @@ class ImageCanvas(FigureCanvas):
 
             color_overlay = np.zeros((*image.shape, 4), dtype=float)
             if h_mask is not None:
-                color_overlay[h_mask, :] = [0.10, 0.45, 1.0, 0.48]
+                color_overlay[h_mask, :] = [1.0, 0.10, 0.10, 0.48]
             if v_mask is not None:
-                color_overlay[v_mask, :] = [1.0, 0.20, 0.20, 0.48]
+                color_overlay[v_mask, :] = [0.10, 0.35, 1.0, 0.48]
             self.ax.imshow(color_overlay, origin="upper", interpolation="nearest")
         elif mask is not None:
             grey_overlay = np.zeros((*mask.shape, 4), dtype=float)
@@ -640,7 +640,7 @@ class ImageCanvas(FigureCanvas):
             self.ax.plot(
                 [x0 - radius * np.cos(angle90), x0 + radius * np.cos(angle90)],
                 [y0 - radius * np.sin(angle90), y0 + radius * np.sin(angle90)],
-                color="red",
+                color="blue",
                 linewidth=1.0,
             )
             self.ax.plot(x0, y0, "wo", markersize=4)
@@ -865,6 +865,35 @@ class HermansTab(QWidget):
         self.v_psi_min = add_sector_spin(v_layout, 0, "ψ min", 80.0)
         self.v_psi_max = add_sector_spin(v_layout, 1, "ψ max", 100.0)
 
+        h_box.setStyleSheet("""
+            QGroupBox {
+                background-color: #fff1f1;
+                border: 1px solid #f0a0a0;
+                border-radius: 8px;
+                margin-top: 14px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0px 4px;
+                color: #9b1111;
+            }
+        """)
+        v_box.setStyleSheet("""
+            QGroupBox {
+                background-color: #eef4ff;
+                border: 1px solid #9ebcff;
+                border-radius: 8px;
+                margin-top: 14px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0px 4px;
+                color: #123f9a;
+            }
+        """)
+
         q_range_box = QGroupBox("q range")
         q_range_layout = QGridLayout(q_range_box)
         q_range_layout.setContentsMargins(8, 18, 8, 8)
@@ -968,6 +997,30 @@ class HermansTab(QWidget):
 
         self.canvas = PlotCanvas()
         graph_layout.addWidget(self.canvas)
+
+        anisotropy_graph_controls = QHBoxLayout()
+        anisotropy_graph_controls.setContentsMargins(0, 0, 0, 0)
+        anisotropy_graph_controls.setSpacing(6)
+
+        self.anisotropy_plot_mode = QComboBox()
+        self.anisotropy_plot_mode.addItems(["log-log", "lin-lin", "lin-log", "log-lin", "Kratky"])
+        self.anisotropy_plot_mode.currentIndexChanged.connect(self.calculate_anisotropy)
+
+        self.save_anisotropy_button = QPushButton("Save .dat")
+        self.save_anisotropy_button.clicked.connect(self.save_anisotropy_profiles)
+
+        self.anisotropy_plot_mode_label = QLabel("Scale")
+        anisotropy_graph_controls.addWidget(self.anisotropy_plot_mode_label)
+        anisotropy_graph_controls.addWidget(self.anisotropy_plot_mode)
+        anisotropy_graph_controls.addStretch(1)
+        anisotropy_graph_controls.addWidget(self.save_anisotropy_button)
+        graph_layout.addLayout(anisotropy_graph_controls)
+
+        self.anisotropy_param_widgets.extend([
+            self.anisotropy_plot_mode_label,
+            self.anisotropy_plot_mode,
+            self.save_anisotropy_button,
+        ])
 
         self.image_canvas = ImageCanvas()
         image_layout.addWidget(self.image_canvas, stretch=1)
@@ -1602,8 +1655,35 @@ class HermansTab(QWidget):
         ax = self.canvas.ax
         ax.clear()
 
-        plot_valid_iv = np.isfinite(q) & np.isfinite(iv) & (q > 0) & (iv > 0)
-        plot_valid_ih = np.isfinite(q) & np.isfinite(ih) & (q > 0) & (ih > 0)
+        plot_mode = self.anisotropy_plot_mode.currentText()
+        x_values = q
+        y_iv = iv
+        y_ih = ih
+        x_label = "q / nm⁻¹"
+        y_label = "Intensity / a.u."
+        x_scale = "linear"
+        y_scale = "linear"
+
+        if plot_mode == "Kratky":
+            y_iv = iv * q ** 2
+            y_ih = ih * q ** 2
+            y_label = "q² I(q)"
+        elif plot_mode == "log-log":
+            x_scale = "log"
+            y_scale = "log"
+        elif plot_mode == "lin-log":
+            y_scale = "log"
+        elif plot_mode == "log-lin":
+            x_scale = "log"
+
+        plot_valid_iv = np.isfinite(x_values) & np.isfinite(y_iv)
+        plot_valid_ih = np.isfinite(x_values) & np.isfinite(y_ih)
+        if x_scale == "log":
+            plot_valid_iv &= x_values > 0
+            plot_valid_ih &= x_values > 0
+        if y_scale == "log":
+            plot_valid_iv &= y_iv > 0
+            plot_valid_ih &= y_ih > 0
 
         if self.use_q_range.isChecked():
             q_min = min(self.q_min_filter.value(), self.q_max_filter.value())
@@ -1611,12 +1691,12 @@ class HermansTab(QWidget):
             plot_valid_iv &= (q >= q_min) & (q <= q_max)
             plot_valid_ih &= (q >= q_min) & (q <= q_max)
 
-        ax.plot(q[plot_valid_iv], iv[plot_valid_iv], linewidth=1.4, label="Iv")
-        ax.plot(q[plot_valid_ih], ih[plot_valid_ih], linewidth=1.4, label="Ih")
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("q / nm⁻¹")
-        ax.set_ylabel("Intensity / a.u.")
+        ax.plot(x_values[plot_valid_ih], y_ih[plot_valid_ih], color="red", linewidth=1.4, label="Ih")
+        ax.plot(x_values[plot_valid_iv], y_iv[plot_valid_iv], color="blue", linewidth=1.4, label="Iv")
+        ax.set_xscale(x_scale)
+        ax.set_yscale(y_scale)
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
         ax.grid(True, which="both")
         ax.legend(loc="best")
         self.canvas.draw_idle()
@@ -1731,3 +1811,58 @@ class HermansTab(QWidget):
             np.savetxt(file, output, fmt="%.6f %.10e %.10e")
 
         QMessageBox.information(self, "Fit saved", f"Fit saved:\n{output_file}")
+
+    def save_anisotropy_profiles(self):
+        if self.current_file is None:
+            QMessageBox.warning(self, "Save unavailable", "No image file is currently loaded.")
+            return
+
+        if not self.is_anisotropy_mode():
+            QMessageBox.warning(self, "Save unavailable", "Switch to anisotropy mode first.")
+            return
+
+        if self.last_anisotropy is None:
+            self.calculate_anisotropy()
+
+        if self.last_anisotropy is None:
+            QMessageBox.warning(self, "Save unavailable", "No Iv/Ih profiles are currently available.")
+            return
+
+        data = self.last_anisotropy
+        q = np.asarray(data["q"], dtype=float)
+        ih = np.asarray(data["ih"], dtype=float)
+        iv = np.asarray(data["iv"], dtype=float)
+
+        frame_suffix = ""
+        if self.total_frames > 1:
+            frame_suffix = f"_frame{self.current_frame:04d}"
+
+        ih_file = self.current_file.parent / f"{self.current_file.stem}{frame_suffix}_Ih.dat"
+        iv_file = self.current_file.parent / f"{self.current_file.stem}{frame_suffix}_Iv.dat"
+
+        def write_profile(path, intensity, label):
+            valid = np.isfinite(q) & np.isfinite(intensity)
+            output = np.column_stack([q[valid], intensity[valid]])
+
+            with open(path, "w", encoding="utf-8") as file:
+                file.write(f"# {label} profile saved from Hermans anisotropy\n")
+                file.write(f"# Source file: {self.current_file}\n")
+                file.write(f"# Frame: {self.current_frame} / {self.total_frames}\n")
+                file.write(f"# Instrument mode: {self.instrument_mode}\n")
+                file.write(f"# Center X = {data['xc']:.10g}\n")
+                file.write(f"# Center Y = {data['yc']:.10g}\n")
+                file.write(f"# Distance = {data['distance']:.10g} m\n")
+                file.write(f"# Pixel X = {data['pixel_x']:.10g} mm\n")
+                file.write(f"# Pixel Y = {data['pixel_y']:.10g} mm\n")
+                file.write(f"# Wavelength = {data['wavelength']:.10g} Å\n")
+                file.write("# Columns: q_nm^-1 intensity\n")
+                np.savetxt(file, output, fmt="%.10e %.10e")
+
+        write_profile(ih_file, ih, "Ih")
+        write_profile(iv_file, iv, "Iv")
+
+        QMessageBox.information(
+            self,
+            "Profiles saved",
+            f"Profiles saved:\n{ih_file}\n{iv_file}",
+        )
