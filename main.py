@@ -269,7 +269,6 @@ class MainWindow(QMainWindow):
 
             ignored_files = {
                 ".lrphoton_commit",
-                "install.bat",
                 "LRPhoton.bat",
                 "Lancer LRPhoton.bat",
             }
@@ -321,7 +320,6 @@ class MainWindow(QMainWindow):
 
         ignored_files = {
             ".lrphoton_commit",
-            "install.bat",
             "LRPhoton.bat",
             "Lancer LRPhoton.bat",
         }
