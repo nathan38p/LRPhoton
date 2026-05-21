@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QComboBox,
+    QSlider,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -133,7 +134,7 @@ def add_matching_edf_center(header: dict, filename: str):
     return header
 
 
-def read_h5_first_image(filename: str):
+def read_h5_first_image(filename: str, frame_index: int = 0):
     filename = Path(filename)
     datasets = []
 
@@ -173,27 +174,30 @@ def read_h5_first_image(filename: str):
         elif dataset.ndim == 3:
             shape = dataset.shape
             frame_axis = int(np.argmin(shape))
+            n_frames = int(shape[frame_axis])
+            frame_index = int(np.clip(frame_index, 0, n_frames - 1))
+
             if frame_axis == 0:
-                image = np.asarray(dataset[0, :, :], dtype=np.float64)
-                header["Displayed frame"] = "0 from axis 0"
+                image = np.asarray(dataset[frame_index, :, :], dtype=np.float64)
+                header["Displayed frame"] = f"{frame_index} from axis 0"
             elif frame_axis == 1:
-                image = np.asarray(dataset[:, 0, :], dtype=np.float64)
-                header["Displayed frame"] = "0 from axis 1"
+                image = np.asarray(dataset[:, frame_index, :], dtype=np.float64)
+                header["Displayed frame"] = f"{frame_index} from axis 1"
             else:
-                image = np.asarray(dataset[:, :, 0], dtype=np.float64)
-                header["Displayed frame"] = "0 from axis 2"
+                image = np.asarray(dataset[:, :, frame_index], dtype=np.float64)
+                header["Displayed frame"] = f"{frame_index} from axis 2"
         else:
             raise ValueError("Only 2D and 3D H5 datasets are supported here.")
 
     return image, header
 
 
-def read_image_file(file_path):
+def read_image_file(file_path, frame_index: int = 0):
     suffix = Path(file_path).suffix.lower()
     if suffix == ".edf":
         return read_edf_file(file_path)
     if suffix in [".h5", ".hdf5"]:
-        return read_h5_first_image(file_path)
+        return read_h5_first_image(file_path, frame_index=frame_index)
     raise ValueError("Unsupported file format. Please select EDF, H5 or HDF5.")
 
 
@@ -211,7 +215,7 @@ def get_header_float(header: dict, *names):
 # AZIMUTHAL INTEGRATION TOOLS
 # ============================================================
 
-def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_a, q_min, q_max, psi_points, calibrated_q_max=None):
+def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_a, q_min, q_max, psi_points):
     if distance_m <= 0:
         raise ValueError("Detector distance must be > 0.")
     if pixel_x_mm <= 0 or pixel_y_mm <= 0:
@@ -228,30 +232,16 @@ def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelen
 
     dx_px = x + 1 - xc
     dy_px = y + 1 - yc
-    r_px = np.sqrt(dx_px ** 2 + dy_px ** 2)
 
-    if calibrated_q_max is not None:
-        # ID13 calibrated q scale:
-        # the beam centre corresponds to q = 0, and the largest distance from
-        # the centre to the detector image corresponds to calibrated_q_max.
-        corners_x = np.array([1, img.shape[1], 1, img.shape[1]], dtype=np.float64)
-        corners_y = np.array([1, 1, img.shape[0], img.shape[0]], dtype=np.float64)
-        corner_r_px = np.sqrt((corners_x - xc) ** 2 + (corners_y - yc) ** 2)
-        r_px_max = float(np.nanmax(corner_r_px))
+    # Always use geometric q calculation:
+    dx_m = dx_px * pixel_x_mm * 1e-3
+    dy_m = dy_px * pixel_y_mm * 1e-3
+    r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
 
-        if r_px_max <= 0:
-            raise ValueError("Invalid calibrated q scale: maximum detector radius is zero.")
-
-        q = r_px / r_px_max * float(calibrated_q_max)
-    else:
-        dx_m = dx_px * pixel_x_mm * 1e-3
-        dy_m = dy_px * pixel_y_mm * 1e-3
-        r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
-
-        two_theta = np.arctan2(r_m, distance_m)
-        theta = two_theta / 2
-        wavelength_nm = wavelength_a * 0.1
-        q = (4 * np.pi / wavelength_nm) * np.sin(theta)
+    two_theta = np.arctan2(r_m, distance_m)
+    theta = two_theta / 2
+    wavelength_nm = wavelength_a * 0.1
+    q = (4 * np.pi / wavelength_nm) * np.sin(theta)
 
     psi = (np.degrees(np.arctan2(dy_px, dx_px)) + 360) % 360
 
@@ -276,7 +266,7 @@ def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelen
         psi_mean = psi_sums / counts
 
     valid_bins = counts > 0
-    return psi_mean[valid_bins], intensity[valid_bins], counts[valid_bins], valid
+    return psi_mean[valid_bins], intensity[valid_bins], counts[valid_bins], valid, q
 
 
 # ============================================================
@@ -296,8 +286,9 @@ class ImageCanvas(FigureCanvas):
         self.fig = Figure()
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
-        self.ax.set_axis_on()
-        self.fig.subplots_adjust(left=0.08, right=0.99, top=0.98, bottom=0.14)
+        self.ax.set_axis_off()
+        self.ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+        self.fig.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01)
 
         self._dragging = False
         self._drag_start = None
@@ -306,6 +297,14 @@ class ImageCanvas(FigureCanvas):
         self._base_scale = 1.18
         self.raw_image = None
         self.coordinate_label = None
+        self.display_vmin = None
+        self.display_vmax = None
+        self.display_data_min = 0.0
+        self.display_data_max = 1.0
+        self.last_xc = None
+        self.last_yc = None
+        self.last_mask = None
+        self.q_map = None
 
         self.mpl_connect("scroll_event", self._on_scroll)
         self.mpl_connect("button_press_event", self._on_press)
@@ -314,6 +313,22 @@ class ImageCanvas(FigureCanvas):
 
     def set_coordinate_label(self, label):
         self.coordinate_label = label
+
+    def set_q_map(self, q_map):
+        self.q_map = q_map
+
+    def reset_display_limits(self):
+        self.display_vmin = None
+        self.display_vmax = None
+
+    def set_display_limits(self, vmin, vmax):
+        self.display_vmin = float(vmin)
+        self.display_vmax = float(vmax)
+        if self.display_vmax <= self.display_vmin:
+            self.display_vmax = self.display_vmin + 1e-6
+
+        if self.raw_image is not None:
+            self.show_image(self.raw_image, self.last_xc, self.last_yc, self.last_mask)
 
     def _on_scroll(self, event):
         if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
@@ -363,6 +378,7 @@ class ImageCanvas(FigureCanvas):
                 x_index = int(round(event.xdata))
                 y_index = int(round(event.ydata))
                 value_text = "-"
+                q_text = "-"
 
                 if self.raw_image is not None:
                     ny, nx = self.raw_image.shape
@@ -377,9 +393,19 @@ class ImageCanvas(FigureCanvas):
                         else:
                             value_text = f"{value:.8g}"
 
-                self.coordinate_label.setText(f"x = {x_index + 1} | y = {y_index + 1} | I = {value_text}")
+                if self.q_map is not None:
+                    q_ny, q_nx = self.q_map.shape
+                    if 0 <= x_index < q_nx and 0 <= y_index < q_ny:
+                        q_value = self.q_map[y_index, x_index]
+                        if np.isfinite(q_value):
+                            q_text = f"{q_value:.6g}"
+
+                self.coordinate_label.setText(
+                    f"x = {x_index + 1} | y = {y_index + 1}\n"
+                    f"q = {q_text} nm⁻¹ | I = {value_text}"
+                )
             else:
-                self.coordinate_label.setText("x = - | y = - | I = -")
+                self.coordinate_label.setText("x = - | y = -\nq = - | I = -")
 
         if not self._dragging or event.inaxes != self.ax:
             return
@@ -397,9 +423,13 @@ class ImageCanvas(FigureCanvas):
         current_ylim = self.ax.get_ylim()
         had_image = len(self.ax.images) > 0
         self.raw_image = image
+        self.last_xc = xc
+        self.last_yc = yc
+        self.last_mask = mask
 
         self.ax.clear()
-        self.ax.set_axis_on()
+        self.ax.set_axis_off()
+        self.ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
 
         display = image.astype(np.float64).copy()
         display[~np.isfinite(display)] = np.nan
@@ -408,7 +438,30 @@ class ImageCanvas(FigureCanvas):
         with np.errstate(invalid="ignore", divide="ignore"):
             display = np.log10(display + 1)
 
-        self.ax.imshow(display, origin="upper", cmap="jet", interpolation="nearest")
+        finite_display = display[np.isfinite(display)]
+        if finite_display.size > 0:
+            self.display_data_min = float(np.nanmin(finite_display))
+            self.display_data_max = float(np.nanmax(finite_display))
+        else:
+            self.display_data_min = 0.0
+            self.display_data_max = 1.0
+
+        if self.display_vmin is None or self.display_vmax is None:
+            if finite_display.size > 0:
+                self.display_vmin = float(np.nanpercentile(finite_display, 1))
+                self.display_vmax = float(np.nanpercentile(finite_display, 99))
+            else:
+                self.display_vmin = None
+                self.display_vmax = None
+
+        self.ax.imshow(
+            display,
+            origin="upper",
+            cmap="jet",
+            interpolation="nearest",
+            vmin=self.display_vmin,
+            vmax=self.display_vmax,
+        )
 
         if mask is not None:
             overlay = np.zeros((*mask.shape, 4), dtype=float)
@@ -438,9 +491,8 @@ class ImageCanvas(FigureCanvas):
                     bbox=dict(facecolor="black", alpha=0.55, edgecolor="none", pad=2),
                 )
 
-        self.ax.set_xlabel("x / px")
-        self.ax.set_ylabel("y / px")
-        self.ax.tick_params(axis="both", colors="black", labelsize=8)
+        self.ax.set_axis_off()
+        self.ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
         self.ax.set_aspect("equal")
 
         if had_image:
@@ -466,6 +518,8 @@ class AzimuthalTab(QWidget):
         self.instrument_mode = "XENOCS"
         self.last_results = {}
         self._syncing_folder = False
+        self.current_frame = 1
+        self.total_frames = 1
 
         self.build_ui()
         self.refresh_files()
@@ -494,16 +548,22 @@ class AzimuthalTab(QWidget):
         right_layout.setSpacing(6)
         main_layout.addWidget(right_panel, stretch=1)
 
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        right_layout.addLayout(content_layout, stretch=1)
+
         graph_box = QGroupBox("I(ψ) graph")
         graph_layout = QVBoxLayout(graph_box)
         graph_layout.setContentsMargins(6, 18, 6, 6)
-        right_layout.addWidget(graph_box, stretch=2)
+        content_layout.addWidget(graph_box, stretch=5)
 
-        image_box = QGroupBox("Image / selected q crown")
+        image_box = QGroupBox("Selected area")
         image_layout = QVBoxLayout(image_box)
         image_layout.setContentsMargins(6, 18, 6, 6)
-        right_layout.addWidget(image_box, stretch=1)
-        image_box.setMaximumHeight(260)
+        image_box.setMinimumWidth(320)
+        image_box.setMaximumWidth(430)
+        content_layout.addWidget(image_box, stretch=2)
 
         file_box = QGroupBox("File browser")
         file_layout = QVBoxLayout(file_box)
@@ -566,8 +626,8 @@ class AzimuthalTab(QWidget):
         self.pixel_x = self.double_spin(0.075000, decimals=6, minimum=0)
         self.pixel_y = self.double_spin(0.075000, decimals=6, minimum=0)
         self.wavelength = self.double_spin(0, decimals=6, minimum=0)
-        self.q_min = self.double_spin(0, decimals=8, minimum=0)
-        self.q_max = self.double_spin(0, decimals=8, minimum=0)
+        self.q_min = self.double_spin(0.1, decimals=8, minimum=0)
+        self.q_max = self.double_spin(1.0, decimals=8, minimum=0)
         self.n_points = QSpinBox()
         self.n_points.setRange(10, 10000)
         self.n_points.setValue(360)
@@ -650,7 +710,7 @@ class AzimuthalTab(QWidget):
         graph_layout.addWidget(self.canvas, stretch=1)
 
         self.image_canvas = ImageCanvas()
-        self.image_coordinate_label = QLabel("x = - | y = - | I = -")
+        self.image_coordinate_label = QLabel("x = - | y = -\nq = - | I = -")
         self.image_coordinate_label.setMinimumHeight(26)
         self.image_coordinate_label.setAlignment(Qt.AlignCenter)
         self.image_coordinate_label.setStyleSheet("""
@@ -665,10 +725,79 @@ class AzimuthalTab(QWidget):
         self.image_canvas.set_coordinate_label(self.image_coordinate_label)
         image_layout.addWidget(self.image_canvas, stretch=1)
         image_layout.addWidget(self.image_coordinate_label, stretch=0)
+        image_limits_layout = QGridLayout()
+        image_limits_layout.setContentsMargins(0, 0, 0, 0)
+        image_limits_layout.setHorizontalSpacing(6)
+        image_limits_layout.setVerticalSpacing(2)
+
+        self.image_vmin_label = QLabel("Min: -")
+        self.image_vmax_label = QLabel("Max: -")
+        self.image_vmin_label.setAlignment(Qt.AlignCenter)
+        self.image_vmax_label.setAlignment(Qt.AlignCenter)
+
+        self.image_vmin_slider = QSlider(Qt.Horizontal)
+        self.image_vmax_slider = QSlider(Qt.Horizontal)
+        self.image_vmin_slider.setRange(0, 1000)
+        self.image_vmax_slider.setRange(0, 1000)
+        self.image_vmin_slider.setValue(0)
+        self.image_vmax_slider.setValue(1000)
+
+        image_limits_layout.addWidget(self.image_vmin_label, 0, 0)
+        image_limits_layout.addWidget(self.image_vmin_slider, 0, 1)
+        image_limits_layout.addWidget(self.image_vmax_label, 1, 0)
+        image_limits_layout.addWidget(self.image_vmax_slider, 1, 1)
+
+        image_layout.addLayout(image_limits_layout)
+        self.image_vmin_slider.valueChanged.connect(self.update_image_intensity_limits)
+        self.image_vmax_slider.valueChanged.connect(self.update_image_intensity_limits)
 
         self.canvas.mpl_connect("button_press_event", self.on_graph_right_click)
         self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
         self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
+
+        frame_nav = QHBoxLayout()
+        frame_nav.setContentsMargins(0, 0, 0, 0)
+        frame_nav.setSpacing(6)
+
+        self.frame_start_spin = QSpinBox()
+        self.frame_start_spin.setRange(1, 1)
+        self.frame_start_spin.setValue(1)
+        self.frame_start_spin.setFixedWidth(70)
+
+        self.frame_end_spin = QSpinBox()
+        self.frame_end_spin.setRange(1, 1)
+        self.frame_end_spin.setValue(1)
+        self.frame_end_spin.setFixedWidth(70)
+
+        self.prev_frame_button = QPushButton("<")
+        self.next_frame_button = QPushButton(">")
+        self.prev_frame_button.setFixedWidth(44)
+        self.next_frame_button.setFixedWidth(44)
+
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setRange(1, 1)
+        self.frame_slider.setValue(1)
+
+        self.frame_counter_label = QLabel("1 / 1")
+        self.frame_counter_label.setMinimumWidth(56)
+        self.frame_counter_label.setAlignment(Qt.AlignCenter)
+
+        frame_nav.addWidget(QLabel("From:"))
+        frame_nav.addWidget(self.frame_start_spin)
+        frame_nav.addWidget(self.prev_frame_button)
+        frame_nav.addWidget(self.frame_slider, stretch=1)
+        frame_nav.addWidget(self.next_frame_button)
+        frame_nav.addWidget(QLabel("To:"))
+        frame_nav.addWidget(self.frame_end_spin)
+        frame_nav.addWidget(self.frame_counter_label)
+
+        right_layout.addLayout(frame_nav)
+
+        self.frame_start_spin.valueChanged.connect(self.update_frame_bounds)
+        self.frame_end_spin.valueChanged.connect(self.update_frame_bounds)
+        self.frame_slider.valueChanged.connect(self.frame_slider_changed)
+        self.prev_frame_button.clicked.connect(self.previous_frame)
+        self.next_frame_button.clicked.connect(self.next_frame)
 
         self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
         self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
@@ -690,8 +819,68 @@ class AzimuthalTab(QWidget):
             self.center_x, self.center_y, self.distance, self.pixel_x, self.pixel_y,
             self.wavelength, self.q_min, self.q_max, self.n_points,
             self.integrate_button, self.save_button, self.plot_mode,
+            self.frame_start_spin, self.frame_end_spin, self.prev_frame_button,
+            self.next_frame_button, self.frame_slider,
+            self.image_vmin_slider, self.image_vmax_slider,
         ]:
             widget.setEnabled(enabled)
+    def update_image_intensity_limits(self):
+        if not hasattr(self, "image_canvas") or self.image_canvas.raw_image is None:
+            return
+
+        data_min = self.image_canvas.display_data_min
+        data_max = self.image_canvas.display_data_max
+        span = data_max - data_min
+        if span <= 0:
+            return
+
+        min_pos = self.image_vmin_slider.value()
+        max_pos = self.image_vmax_slider.value()
+
+        if min_pos >= max_pos:
+            sender = self.sender()
+            if sender is self.image_vmin_slider:
+                max_pos = min(1000, min_pos + 1)
+                self.image_vmax_slider.blockSignals(True)
+                self.image_vmax_slider.setValue(max_pos)
+                self.image_vmax_slider.blockSignals(False)
+            else:
+                min_pos = max(0, max_pos - 1)
+                self.image_vmin_slider.blockSignals(True)
+                self.image_vmin_slider.setValue(min_pos)
+                self.image_vmin_slider.blockSignals(False)
+
+        vmin = data_min + span * min_pos / 1000.0
+        vmax = data_min + span * max_pos / 1000.0
+
+        self.image_canvas.set_display_limits(vmin, vmax)
+        self.image_vmin_label.setText(f"Min: {vmin:.3g}")
+        self.image_vmax_label.setText(f"Max: {vmax:.3g}")
+        self.canvas.draw_idle()
+
+    def sync_image_intensity_sliders(self):
+        data_min = self.image_canvas.display_data_min
+        data_max = self.image_canvas.display_data_max
+        span = data_max - data_min
+        if span <= 0 or self.image_canvas.display_vmin is None or self.image_canvas.display_vmax is None:
+            self.image_vmin_label.setText("Min: -")
+            self.image_vmax_label.setText("Max: -")
+            return
+
+        min_pos = int(round((self.image_canvas.display_vmin - data_min) / span * 1000))
+        max_pos = int(round((self.image_canvas.display_vmax - data_min) / span * 1000))
+        min_pos = max(0, min(1000, min_pos))
+        max_pos = max(0, min(1000, max_pos))
+
+        self.image_vmin_slider.blockSignals(True)
+        self.image_vmax_slider.blockSignals(True)
+        self.image_vmin_slider.setValue(min_pos)
+        self.image_vmax_slider.setValue(max_pos)
+        self.image_vmin_slider.blockSignals(False)
+        self.image_vmax_slider.blockSignals(False)
+
+        self.image_vmin_label.setText(f"Min: {self.image_canvas.display_vmin:.3g}")
+        self.image_vmax_label.setText(f"Max: {self.image_canvas.display_vmax:.3g}")
 
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose folder", str(self.current_folder))
@@ -739,16 +928,104 @@ class AzimuthalTab(QWidget):
         for file in files:
             self.file_list.addItem(file.name)
 
-        self.set_controls_enabled(bool(files))
+        self.set_controls_enabled(bool(self.selected_files()))
 
     def selection_changed(self):
         selected = self.selected_files()
         self.set_controls_enabled(bool(selected))
+        self.image_canvas.reset_display_limits()
         if selected:
             self.apply_preset_from_file(selected[0])
+            self.update_frame_controls_from_file(selected[0])
+        else:
+            self.update_frame_controls_from_file(None)
 
     def selected_files(self):
         return [self.current_folder / item.text() for item in self.file_list.selectedItems()]
+
+    def update_frame_controls_from_file(self, file_path):
+        self.total_frames = 1
+        self.current_frame = 1
+
+        try:
+            if file_path is None:
+                raise ValueError("No file selected")
+
+            suffix = Path(file_path).suffix.lower()
+            if suffix in [".h5", ".hdf5"]:
+                with h5py.File(file_path, "r") as h5:
+                    datasets = []
+
+                    def collect_dataset(name, obj):
+                        if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
+                            datasets.append(name)
+
+                    h5.visititems(collect_dataset)
+
+                    if datasets:
+                        preferred = None
+                        for name in datasets:
+                            lower = name.lower()
+                            if "data" in lower or "eiger" in lower or "detector" in lower:
+                                preferred = name
+                                break
+
+                        dataset = h5[preferred or datasets[0]]
+                        if dataset.ndim == 3:
+                            self.total_frames = int(np.min(dataset.shape))
+        except Exception:
+            self.total_frames = 1
+
+        self.frame_start_spin.blockSignals(True)
+        self.frame_end_spin.blockSignals(True)
+        self.frame_slider.blockSignals(True)
+
+        self.frame_start_spin.setRange(1, self.total_frames)
+        self.frame_end_spin.setRange(1, self.total_frames)
+        self.frame_slider.setRange(1, self.total_frames)
+
+        self.frame_start_spin.setValue(1)
+        self.frame_end_spin.setValue(self.total_frames)
+        self.frame_slider.setValue(1)
+        self.frame_counter_label.setText(f"1 / {self.total_frames}")
+
+        self.frame_start_spin.blockSignals(False)
+        self.frame_end_spin.blockSignals(False)
+        self.frame_slider.blockSignals(False)
+
+    def update_frame_bounds(self):
+        start = self.frame_start_spin.value()
+        end = self.frame_end_spin.value()
+
+        if start > end:
+            if self.sender() == self.frame_start_spin:
+                self.frame_end_spin.setValue(start)
+                end = start
+            else:
+                self.frame_start_spin.setValue(end)
+                start = end
+
+        self.frame_slider.setRange(start, end)
+
+        if self.frame_slider.value() < start:
+            self.frame_slider.setValue(start)
+        elif self.frame_slider.value() > end:
+            self.frame_slider.setValue(end)
+
+    def frame_slider_changed(self, value):
+        self.current_frame = value
+        self.frame_counter_label.setText(f"{value} / {self.total_frames}")
+
+        if self.selected_files():
+            self.integrate_selected_files()
+
+    def previous_frame(self):
+        value = max(self.frame_slider.minimum(), self.frame_slider.value() - 1)
+        self.frame_slider.setValue(value)
+
+    def next_frame(self):
+        value = min(self.frame_slider.maximum(), self.frame_slider.value() + 1)
+        self.frame_slider.setValue(value)
 
     def set_instrument_mode(self, mode):
         self.instrument_mode = mode
@@ -806,8 +1083,8 @@ class AzimuthalTab(QWidget):
             self.pixel_x.setValue(0.075000)
             self.pixel_y.setValue(0.075000)
             self.wavelength.setValue(0.826563)
-            self.q_min.setValue(0.08987301)
-            self.q_max.setValue(46.69102)
+            self.q_min.setValue(0.1)
+            self.q_max.setValue(1.0)
             return
 
     def integrate_selected_files(self):
@@ -822,10 +1099,9 @@ class AzimuthalTab(QWidget):
         messages = []
         for file_path in files:
             try:
-                image, _ = read_image_file(file_path)
-                calibrated_q_max = 46.69102 if self.instrument_mode == "ID13" else None
+                image, _ = read_image_file(file_path, frame_index=self.current_frame - 1)
 
-                psi, intensity, counts, mask = azimuthal_average(
+                psi, intensity, counts, mask, q_map = azimuthal_average(
                     image,
                     self.center_x.value(),
                     self.center_y.value(),
@@ -836,18 +1112,18 @@ class AzimuthalTab(QWidget):
                     self.q_min.value(),
                     self.q_max.value(),
                     self.n_points.value(),
-                    calibrated_q_max,
                 )
 
                 ax.plot(psi, intensity, linewidth=1.2, label=file_path.stem)
                 self.last_results[file_path.stem] = (psi, intensity, counts)
 
                 if file_path == files[0]:
+                    self.image_canvas.set_q_map(q_map)
                     self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
+                    self.sync_image_intensity_sliders()
 
-                calibration_text = " | ID13 calibrated q: centre = 0, image edge = 46.69102 nm⁻¹" if self.instrument_mode == "ID13" else ""
                 messages.append(
-                    f"Integrated: {file_path.name} ({psi.size} ψ points) | q crown = {self.q_min.value():.8g} -> {self.q_max.value():.8g} nm⁻¹{calibration_text}"
+                    f"Integrated: {file_path.name} ({psi.size} ψ points) | q crown = {self.q_min.value():.8g} -> {self.q_max.value():.8g} nm⁻¹"
                 )
 
             except Exception as error:

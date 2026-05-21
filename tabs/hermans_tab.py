@@ -1,6 +1,8 @@
 
 from pathlib import Path
+import re
 
+import h5py
 import numpy as np
 
 from PySide6.QtCore import Qt, Signal
@@ -13,12 +15,14 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QDoubleSpinBox,
+    QSpinBox,
     QTextEdit,
     QGridLayout,
     QListWidget,
     QMessageBox,
     QSlider,
     QCheckBox,
+    QComboBox,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -79,6 +83,202 @@ def read_azimuthal_file(file_path):
     return azimuth[order], intensity[order]
 
 
+def parse_edf_header(header_text):
+    header = {}
+    for raw_line in header_text.replace("{", "").replace("}", "").split(";"):
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        header[key.strip()] = value.strip()
+    return header
+
+
+def read_edf_file(file_path):
+    file_path = Path(file_path)
+    with open(file_path, "rb") as file:
+        content = file.read()
+
+    header_end = content.find(b"}\n")
+    if header_end < 0:
+        header_end = content.find(b"}")
+    if header_end < 0:
+        raise ValueError("EDF header end not found.")
+
+    header_bytes = content[:header_end + 1]
+    header_text = header_bytes.decode("latin-1", errors="ignore")
+    header = parse_edf_header(header_text)
+
+    header_size = ((header_end + 1 + 511) // 512) * 512
+
+    dim1 = int(float(header.get("Dim_1", header.get("dim_1"))))
+    dim2 = int(float(header.get("Dim_2", header.get("dim_2"))))
+    data_type = header.get("DataType", header.get("Data_Type", "UnsignedShort")).lower()
+
+    if "unsignedshort" in data_type or "uint16" in data_type:
+        dtype = np.uint16
+    elif "signedshort" in data_type or "int16" in data_type:
+        dtype = np.int16
+    elif "unsignedlong" in data_type or "uint32" in data_type:
+        dtype = np.uint32
+    elif "signedlong" in data_type or "int32" in data_type:
+        dtype = np.int32
+    elif "float" in data_type:
+        dtype = np.float32
+    elif "double" in data_type:
+        dtype = np.float64
+    else:
+        dtype = np.float32
+
+    data = np.frombuffer(content[header_size:], dtype=dtype, count=dim1 * dim2)
+    if data.size != dim1 * dim2:
+        raise ValueError("EDF data size does not match header dimensions.")
+
+    image = data.reshape((dim2, dim1)).astype(np.float64)
+    image[image > 4e9] = np.nan
+    return image, header
+
+
+def find_h5_dataset(h5):
+    datasets = []
+
+    def collect(name, obj):
+        if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
+            datasets.append(name)
+
+    h5.visititems(collect)
+    if not datasets:
+        raise ValueError("No 2D or 3D dataset found in H5 file.")
+
+    for name in datasets:
+        lower = name.lower()
+        if "data" in lower or "eiger" in lower or "detector" in lower:
+            return name
+    return datasets[0]
+
+
+def read_h5_image(file_path, frame_index=0):
+    with h5py.File(file_path, "r") as h5:
+        dataset_name = find_h5_dataset(h5)
+        dataset = h5[dataset_name]
+        header = {"Dataset": dataset_name, "Shape": str(dataset.shape)}
+
+        if dataset.ndim == 2:
+            image = np.asarray(dataset[...], dtype=np.float64)
+        elif dataset.ndim == 3:
+            frame_axis = int(np.argmin(dataset.shape))
+            n_frames = int(dataset.shape[frame_axis])
+            frame_index = int(np.clip(frame_index, 0, n_frames - 1))
+            if frame_axis == 0:
+                image = np.asarray(dataset[frame_index, :, :], dtype=np.float64)
+            elif frame_axis == 1:
+                image = np.asarray(dataset[:, frame_index, :], dtype=np.float64)
+            else:
+                image = np.asarray(dataset[:, :, frame_index], dtype=np.float64)
+            header["Frames"] = str(n_frames)
+        else:
+            raise ValueError("Only 2D and 3D H5 datasets are supported.")
+
+    image[image > 4e9] = np.nan
+    return image, header
+
+
+def count_h5_frames(file_path):
+    try:
+        with h5py.File(file_path, "r") as h5:
+            dataset = h5[find_h5_dataset(h5)]
+            if dataset.ndim == 3:
+                return int(np.min(dataset.shape))
+    except Exception:
+        pass
+    return 1
+
+
+def read_image_file(file_path, frame_index=0):
+    suffix = Path(file_path).suffix.lower()
+    if suffix == ".edf":
+        return read_edf_file(file_path)
+    if suffix in [".h5", ".hdf5"]:
+        return read_h5_image(file_path, frame_index=frame_index)
+    raise ValueError("Unsupported image file format.")
+
+
+def header_float(header, keys, default):
+    for key in keys:
+        if key in header:
+            try:
+                match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", str(header[key]))
+                if match:
+                    return float(match.group(0))
+            except Exception:
+                pass
+    return default
+
+
+def q_map_from_geometry(shape, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_a):
+    y, x = np.indices(shape)
+    dx_px = x + 1 - xc
+    dy_px = y + 1 - yc
+    dx_m = dx_px * pixel_x_mm * 1e-3
+    dy_m = dy_px * pixel_y_mm * 1e-3
+    r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+    two_theta = np.arctan2(r_m, distance_m)
+    theta = two_theta / 2
+    wavelength_nm = wavelength_a * 0.1
+    return (4 * np.pi / wavelength_nm) * np.sin(theta)
+
+
+def sector_iq_profiles(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_a, horizontal_ranges, vertical_ranges, n_bins=300, reference_angle=0.0):
+    img = image.astype(np.float64)
+    q = q_map_from_geometry(img.shape, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_a)
+
+    y, x = np.indices(img.shape)
+    dx_px = x + 1 - xc
+    dy_px = y + 1 - yc
+    psi = (np.degrees(np.arctan2(dy_px, dx_px)) - reference_angle + 360) % 360
+
+    finite = np.isfinite(img) & np.isfinite(q)
+    if not np.any(finite):
+        raise ValueError("No valid image pixels for I(q) calculation.")
+
+    q_values = q[finite]
+    q_min = float(np.nanpercentile(q_values, 1))
+    q_max = float(np.nanpercentile(q_values, 99))
+    edges = np.linspace(q_min, q_max, n_bins + 1)
+    q_centers = 0.5 * (edges[:-1] + edges[1:])
+
+    def sector_mask(ranges):
+        mask = np.zeros(img.shape, dtype=bool)
+        for a0, a1 in ranges:
+            a0 = a0 % 360
+            a1 = a1 % 360
+            if a0 <= a1:
+                mask |= (psi >= a0) & (psi <= a1)
+            else:
+                mask |= (psi >= a0) | (psi <= a1)
+        return mask & finite
+
+    def integrate(mask):
+        values = img[mask]
+        q_sector = q[mask]
+        bin_index = np.digitize(q_sector, edges) - 1
+        valid = (bin_index >= 0) & (bin_index < n_bins) & np.isfinite(values)
+        sums = np.bincount(bin_index[valid], weights=values[valid], minlength=n_bins)
+        counts = np.bincount(bin_index[valid], minlength=n_bins)
+        profile = np.full(n_bins, np.nan)
+        ok = counts > 0
+        profile[ok] = sums[ok] / counts[ok]
+        return profile, counts
+
+    h_mask = sector_mask(horizontal_ranges)
+    v_mask = sector_mask(vertical_ranges)
+    ih, h_counts = integrate(h_mask)
+    iv, v_counts = integrate(v_mask)
+
+    mask_overlay = h_mask | v_mask
+    return q_centers, ih, iv, h_counts, v_counts, mask_overlay, h_mask, v_mask
+
+
 def fit_gaussian_fixed_center(x, y, x0, window):
     if x.size < 10 or np.nanmax(y) <= 0:
         raise ValueError("Not enough valid points for Gaussian fit.")
@@ -121,12 +321,266 @@ def fit_gaussian_fixed_center(x, y, x0, window):
 # =========================== CANVAS ==========================
 # ============================================================
 
+
 class PlotCanvas(FigureCanvas):
     def __init__(self):
         self.fig = Figure()
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
-        self.fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.10)
+        self.fig.subplots_adjust(left=0.12, right=0.98, top=0.94, bottom=0.20)
+
+        self._dragging = False
+        self._drag_start = None
+        self._xlim_start = None
+        self._ylim_start = None
+        self._base_scale = 1.18
+
+        self.mpl_connect("scroll_event", self._on_scroll)
+        self.mpl_connect("button_press_event", self._on_press)
+        self.mpl_connect("button_release_event", self._on_release)
+        self.mpl_connect("motion_notify_event", self._on_motion)
+
+    def _on_scroll(self, event):
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+
+        scale = 1 / self._base_scale if event.step > 0 else self._base_scale
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+
+        x = event.xdata
+        y = event.ydata
+
+        if self.ax.get_xscale() == "log":
+            if x <= 0 or xlim[0] <= 0 or xlim[1] <= 0:
+                return
+            log_x = np.log10(x)
+            log_xlim = np.log10(xlim)
+            new_log_xlim = [
+                log_x - (log_x - log_xlim[0]) * scale,
+                log_x + (log_xlim[1] - log_x) * scale,
+            ]
+            self.ax.set_xlim(10 ** new_log_xlim[0], 10 ** new_log_xlim[1])
+        else:
+            self.ax.set_xlim(
+                x - (x - xlim[0]) * scale,
+                x + (xlim[1] - x) * scale,
+            )
+
+        if self.ax.get_yscale() == "log":
+            if y <= 0 or ylim[0] <= 0 or ylim[1] <= 0:
+                return
+            log_y = np.log10(y)
+            log_ylim = np.log10(ylim)
+            new_log_ylim = [
+                log_y - (log_y - log_ylim[0]) * scale,
+                log_y + (log_ylim[1] - log_y) * scale,
+            ]
+            self.ax.set_ylim(10 ** new_log_ylim[0], 10 ** new_log_ylim[1])
+        else:
+            self.ax.set_ylim(
+                y - (y - ylim[0]) * scale,
+                y + (ylim[1] - y) * scale,
+            )
+
+        self.draw_idle()
+
+    def _on_press(self, event):
+        if event.inaxes != self.ax or event.button not in [1, 2]:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        self._dragging = True
+        self._drag_start = (event.xdata, event.ydata)
+        self._xlim_start = self.ax.get_xlim()
+        self._ylim_start = self.ax.get_ylim()
+
+    def _on_release(self, event):
+        self._dragging = False
+        self._drag_start = None
+        self._xlim_start = None
+        self._ylim_start = None
+
+    def _on_motion(self, event):
+        if not self._dragging or event.inaxes != self.ax:
+            return
+        if event.xdata is None or event.ydata is None or self._drag_start is None:
+            return
+
+        dx = event.xdata - self._drag_start[0]
+        dy = event.ydata - self._drag_start[1]
+
+        self.ax.set_xlim(self._xlim_start[0] - dx, self._xlim_start[1] - dx)
+        self.ax.set_ylim(self._ylim_start[0] - dy, self._ylim_start[1] - dy)
+        self.draw_idle()
+
+
+# ============================================================
+# ======================== IMAGE CANVAS ======================
+# ============================================================
+
+class ImageCanvas(FigureCanvas):
+    def __init__(self):
+        self.fig = Figure()
+        self.ax = self.fig.add_subplot(111)
+        super().__init__(self.fig)
+        self.ax.set_axis_off()
+        self.fig.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01)
+        self.raw_image = None
+        self._dragging = False
+        self._drag_start = None
+        self._xlim_start = None
+        self._ylim_start = None
+        self._base_scale = 1.18
+
+        self.mpl_connect("scroll_event", self._on_scroll)
+        self.mpl_connect("button_press_event", self._on_press)
+        self.mpl_connect("button_release_event", self._on_release)
+        self.mpl_connect("motion_notify_event", self._on_motion)
+
+    def _on_scroll(self, event):
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+
+        scale = 1 / self._base_scale if event.step > 0 else self._base_scale
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        x = event.xdata
+        y = event.ydata
+
+        self.ax.set_xlim(
+            x - (x - xlim[0]) * scale,
+            x + (xlim[1] - x) * scale,
+        )
+        self.ax.set_ylim(
+            y - (y - ylim[0]) * scale,
+            y + (ylim[1] - y) * scale,
+        )
+        self.draw_idle()
+
+    def _on_press(self, event):
+        if event.inaxes != self.ax or event.button not in [1, 2]:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        self._dragging = True
+        self._drag_start = (event.xdata, event.ydata)
+        self._xlim_start = self.ax.get_xlim()
+        self._ylim_start = self.ax.get_ylim()
+
+    def _on_release(self, event):
+        self._dragging = False
+        self._drag_start = None
+        self._xlim_start = None
+        self._ylim_start = None
+
+    def _on_motion(self, event):
+        if not self._dragging or event.inaxes != self.ax:
+            return
+        if event.xdata is None or event.ydata is None or self._drag_start is None:
+            return
+
+        dx = event.xdata - self._drag_start[0]
+        dy = event.ydata - self._drag_start[1]
+        self.ax.set_xlim(self._xlim_start[0] - dx, self._xlim_start[1] - dx)
+        self.ax.set_ylim(self._ylim_start[0] - dy, self._ylim_start[1] - dy)
+        self.draw_idle()
+
+    def show_image(self, image, xc=None, yc=None, mask=None, h_mask=None, v_mask=None, reference_angle=0.0):
+        self.raw_image = image
+        self.ax.clear()
+        self.ax.set_axis_off()
+
+        display = image.astype(np.float64).copy()
+        display[~np.isfinite(display)] = np.nan
+        display[display < 0] = np.nan
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            display = np.log10(display + 1)
+
+        finite = display[np.isfinite(display)]
+        if finite.size > 0:
+            vmin = float(np.nanpercentile(finite, 1))
+            vmax = float(np.nanpercentile(finite, 99))
+        else:
+            vmin = None
+            vmax = None
+
+        self.ax.imshow(
+            display,
+            origin="upper",
+            cmap="jet",
+            interpolation="nearest",
+            vmin=vmin,
+            vmax=vmax,
+        )
+
+        if h_mask is not None or v_mask is not None:
+            selected = np.zeros(image.shape, dtype=bool)
+            if h_mask is not None:
+                selected |= h_mask
+            if v_mask is not None:
+                selected |= v_mask
+
+            grey_overlay = np.zeros((*image.shape, 4), dtype=float)
+            grey_overlay[:, :, :] = [0.30, 0.30, 0.30, 0.34]
+            grey_overlay[selected, 3] = 0.0
+            self.ax.imshow(grey_overlay, origin="upper", interpolation="nearest")
+
+            color_overlay = np.zeros((*image.shape, 4), dtype=float)
+            if h_mask is not None:
+                color_overlay[h_mask, :] = [0.10, 0.45, 1.0, 0.48]
+            if v_mask is not None:
+                color_overlay[v_mask, :] = [1.0, 0.20, 0.20, 0.48]
+            self.ax.imshow(color_overlay, origin="upper", interpolation="nearest")
+        elif mask is not None:
+            grey_overlay = np.zeros((*mask.shape, 4), dtype=float)
+            grey_overlay[~mask, :] = [0.45, 0.45, 0.45, 0.58]
+            self.ax.imshow(grey_overlay, origin="upper", interpolation="nearest")
+
+        if xc is not None and yc is not None:
+            x0 = xc - 1
+            y0 = yc - 1
+            ny, nx = image.shape
+            radius = 0.55 * max(nx, ny)
+
+            angle0 = np.deg2rad(reference_angle)
+            angle90 = np.deg2rad(reference_angle + 90)
+
+            self.ax.plot(
+                [x0 - radius * np.cos(angle0), x0 + radius * np.cos(angle0)],
+                [y0 - radius * np.sin(angle0), y0 + radius * np.sin(angle0)],
+                color="red",
+                linewidth=1.0,
+            )
+            self.ax.plot(
+                [x0 - radius * np.cos(angle90), x0 + radius * np.cos(angle90)],
+                [y0 - radius * np.sin(angle90), y0 + radius * np.sin(angle90)],
+                color="red",
+                linewidth=1.0,
+            )
+            self.ax.plot(x0, y0, "wo", markersize=4)
+
+            label_style = dict(
+                fontsize=9,
+                color="black",
+                ha="center",
+                va="center",
+                bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor="#4a90e2", alpha=0.92),
+            )
+
+            label_radius = 0.48 * min(nx, ny)
+            labels = [(0, "0°"), (90, "90°"), (180, "180°"), (270, "270°")]
+            for angle_deg, text in labels:
+                angle = np.deg2rad(reference_angle + angle_deg)
+                x_label = x0 + label_radius * np.cos(angle)
+                y_label = y0 + label_radius * np.sin(angle)
+                x_label = min(max(x_label, 12), nx - 12)
+                y_label = min(max(y_label, 12), ny - 12)
+                self.ax.text(x_label, y_label, text, **label_style)
+
+        self.ax.set_aspect("equal")
+        self.draw_idle()
 
 
 # ============================================================
@@ -145,7 +599,14 @@ class HermansTab(QWidget):
         self.current_file = None
         self.azimuth = None
         self.intensity = None
+        self.current_image = None
+        self.current_header = {}
         self.last_fit = None
+        self.last_anisotropy = None
+        self.current_frame = 1
+        self.total_frames = 1
+        self._updating_frame_controls = False
+        self.instrument_mode = "Custom"
 
         self.build_ui()
         self.init_default_folder()
@@ -164,14 +625,47 @@ class HermansTab(QWidget):
         graph_wrapper = QWidget()
         graph_wrapper_layout = QVBoxLayout(graph_wrapper)
         graph_wrapper_layout.setContentsMargins(0, 0, 0, 0)
-        graph_wrapper_layout.setSpacing(0)
+        graph_wrapper_layout.setSpacing(8)
 
-        graph_box = QGroupBox("Azimuthal profile")
-        graph_layout = QVBoxLayout(graph_box)
+        graph_content_layout = QHBoxLayout()
+        graph_content_layout.setContentsMargins(0, 0, 0, 0)
+        graph_content_layout.setSpacing(8)
+        graph_wrapper_layout.addLayout(graph_content_layout, stretch=1)
+
+        self.graph_box = QGroupBox("Azimuthal profile")
+        graph_layout = QVBoxLayout(self.graph_box)
         graph_layout.setContentsMargins(6, 24, 6, 6)
         graph_layout.setSpacing(6)
-        graph_wrapper_layout.addWidget(graph_box)
+        graph_content_layout.addWidget(self.graph_box, stretch=5)
+
+        self.image_box = QGroupBox("Pattern")
+        image_layout = QVBoxLayout(self.image_box)
+        image_layout.setContentsMargins(6, 24, 6, 6)
+        image_layout.setSpacing(6)
+        self.image_box.setMinimumWidth(320)
+        self.image_box.setMaximumWidth(430)
+        graph_content_layout.addWidget(self.image_box, stretch=2)
+
         main_layout.addWidget(graph_wrapper, stretch=1)
+
+        # --- Parameter selection box ---
+        mode_box = QGroupBox("Parameter")
+        mode_layout = QGridLayout(mode_box)
+        mode_layout.setContentsMargins(8, 18, 8, 8)
+        mode_layout.setSpacing(6)
+
+        self.parameter_selector = QComboBox()
+        self.parameter_selector.addItems([
+            "Hermans factor",
+            "Anisotropy factor (Iv - Ih) / (Iv + Ih)",
+        ])
+        self.parameter_selector.currentIndexChanged.connect(self.parameter_mode_changed)
+
+        mode_layout.addWidget(QLabel("Parameter:"), 0, 0)
+        mode_layout.addWidget(self.parameter_selector, 0, 1)
+        mode_layout.setColumnStretch(1, 1)
+
+        controls_layout.addWidget(mode_box, stretch=0)
 
         file_browser_box = QGroupBox("File browser")
         file_browser_layout = QVBoxLayout(file_browser_box)
@@ -188,14 +682,26 @@ class HermansTab(QWidget):
         self.file_list.currentItemChanged.connect(self.load_selected_file)
         file_browser_layout.addWidget(self.file_list, stretch=1)
 
-        controls_layout.addWidget(file_browser_box, stretch=0)
-        file_browser_box.setFixedHeight(240)
+        controls_layout.addWidget(file_browser_box, stretch=1)
+        file_browser_box.setMinimumHeight(320)
+
+        results_box = QGroupBox("Results")
+        results_layout = QVBoxLayout(results_box)
+        results_layout.setContentsMargins(8, 18, 8, 8)
+        results_layout.setSpacing(6)
+
+        self.results_text = QTextEdit()
+        self.results_text.setReadOnly(True)
+        results_layout.addWidget(self.results_text)
+
+        controls_layout.addWidget(results_box, stretch=0)
+        results_box.setFixedHeight(190)
 
         params_box = QGroupBox("Parameters")
         params_layout = QGridLayout(params_box)
         params_layout.setContentsMargins(6, 18, 6, 6)
         params_layout.setSpacing(6)
-        controls_layout.addWidget(params_box)
+        graph_wrapper_layout.addWidget(params_box, stretch=0)
 
         self.offset_spin, self.offset_slider = self.add_slider_control(
             params_layout, 0, "Baseline", 0.0, -1.0, 1.0
@@ -226,19 +732,178 @@ class HermansTab(QWidget):
         params_layout.addWidget(self.fit_button, 6, 0, 1, 2)
         params_layout.addWidget(self.save_fit_button, 6, 2, 1, 3)
 
-        results_box = QGroupBox("Results")
-        results_layout = QVBoxLayout(results_box)
-        results_layout.setContentsMargins(8, 18, 8, 8)
-        results_layout.setSpacing(6)
+        self.anisotropy_param_widgets = []
 
-        self.results_text = QTextEdit()
-        self.results_text.setReadOnly(True)
-        self.results_text.setPlaceholderText("Hermans results will appear here.")
-        results_layout.addWidget(self.results_text)
-        controls_layout.addWidget(results_box, stretch=1)
+        h_box = QGroupBox("Horizontal sector")
+        h_layout = QGridLayout(h_box)
+        h_layout.setContentsMargins(8, 18, 8, 8)
+        h_layout.setHorizontalSpacing(8)
+        h_layout.setVerticalSpacing(6)
+
+        v_box = QGroupBox("Vertical sector")
+        reference_box = QGroupBox("Reference frame")
+        reference_layout = QGridLayout(reference_box)
+        reference_layout.setContentsMargins(8, 18, 8, 8)
+        reference_layout.setHorizontalSpacing(8)
+        reference_layout.setVerticalSpacing(6)
+        v_layout = QGridLayout(v_box)
+        v_layout.setContentsMargins(8, 18, 8, 8)
+        v_layout.setHorizontalSpacing(8)
+        v_layout.setVerticalSpacing(6)
+
+        beamstop_box = QGroupBox("Beamstop removal")
+        beamstop_layout = QGridLayout(beamstop_box)
+        beamstop_layout.setContentsMargins(8, 18, 8, 8)
+        beamstop_layout.setHorizontalSpacing(8)
+        beamstop_layout.setVerticalSpacing(6)
+
+        def add_sector_spin(layout, row, label, value):
+            label_widget = QLabel(label)
+            spin = QDoubleSpinBox()
+            spin.setDecimals(3)
+            spin.setRange(0, 360)
+            spin.setValue(value)
+            spin.setSuffix(" °")
+            spin.valueChanged.connect(self.calculate_anisotropy)
+            layout.addWidget(label_widget, row, 0)
+            layout.addWidget(spin, row, 1)
+            layout.setColumnStretch(1, 1)
+            self.anisotropy_param_widgets.extend([label_widget, spin])
+            return spin
+
+        self.h_psi_min = add_sector_spin(h_layout, 0, "ψ min", 350.0)
+        self.h_psi_max = add_sector_spin(h_layout, 1, "ψ max", 10.0)
+        self.v_psi_min = add_sector_spin(v_layout, 0, "ψ min", 80.0)
+        self.v_psi_max = add_sector_spin(v_layout, 1, "ψ max", 100.0)
+
+        self.use_beamstop_cutoff = QCheckBox("Remove q values below")
+        self.use_beamstop_cutoff.setChecked(False)
+        self.use_beamstop_cutoff.stateChanged.connect(self.calculate_anisotropy)
+
+        self.beamstop_q = QDoubleSpinBox()
+        self.beamstop_q.setDecimals(4)
+        self.beamstop_q.setRange(0, 1000)
+        self.beamstop_q.setValue(0.0)
+        self.beamstop_q.setSuffix(" nm⁻¹")
+        self.beamstop_q.valueChanged.connect(self.calculate_anisotropy)
+
+        beamstop_layout.addWidget(QLabel("q beamstop"), 0, 0)
+        beamstop_layout.addWidget(self.beamstop_q, 0, 1)
+        beamstop_layout.addWidget(self.use_beamstop_cutoff, 1, 0, 1, 2)
+        beamstop_layout.setColumnStretch(1, 1)
+
+        self.reference_angle = QDoubleSpinBox()
+        self.reference_angle.setDecimals(3)
+        self.reference_angle.setRange(-180, 180)
+        self.reference_angle.setValue(0.0)
+        self.reference_angle.setSuffix(" °")
+        self.reference_angle.valueChanged.connect(self.calculate_anisotropy)
+
+        reference_layout.addWidget(QLabel("0° direction"), 0, 0)
+        reference_layout.addWidget(self.reference_angle, 0, 1)
+        reference_layout.setColumnStretch(1, 1)
+
+        params_layout.addWidget(h_box, 7, 0, 3, 2)
+        params_layout.addWidget(v_box, 7, 2, 3, 2)
+        params_layout.addWidget(beamstop_box, 7, 4, 3, 2)
+        params_layout.addWidget(reference_box, 7, 6, 3, 2)
+        params_layout.setColumnStretch(0, 1)
+        params_layout.setColumnStretch(2, 1)
+        params_layout.setColumnStretch(4, 1)
+        params_layout.setColumnStretch(6, 1)
+
+        self.anisotropy_param_widgets.extend([
+            h_box, v_box, beamstop_box, reference_box,
+            self.use_beamstop_cutoff, self.beamstop_q, self.reference_angle,
+        ])
+
+        frame_nav = QHBoxLayout()
+        frame_nav.setContentsMargins(0, 0, 0, 0)
+        frame_nav.setSpacing(6)
+
+        self.frame_start_spin = QSpinBox()
+        self.frame_start_spin.setRange(1, 1)
+        self.frame_start_spin.setValue(1)
+        self.frame_start_spin.setFixedWidth(70)
+
+        self.frame_end_spin = QSpinBox()
+        self.frame_end_spin.setRange(1, 1)
+        self.frame_end_spin.setValue(1)
+        self.frame_end_spin.setFixedWidth(70)
+
+        self.prev_frame_button = QPushButton("<")
+        self.next_frame_button = QPushButton(">")
+        self.prev_frame_button.setFixedWidth(44)
+        self.next_frame_button.setFixedWidth(44)
+
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setRange(1, 1)
+        self.frame_slider.setValue(1)
+
+        self.frame_counter_label = QLabel("1 / 1")
+        self.frame_counter_label.setMinimumWidth(56)
+        self.frame_counter_label.setAlignment(Qt.AlignCenter)
+
+        frame_nav.addWidget(QLabel("From:"))
+        frame_nav.addWidget(self.frame_start_spin)
+        frame_nav.addWidget(self.prev_frame_button)
+        frame_nav.addWidget(self.frame_slider, stretch=1)
+        frame_nav.addWidget(self.next_frame_button)
+        frame_nav.addWidget(QLabel("To:"))
+        frame_nav.addWidget(self.frame_end_spin)
+        frame_nav.addWidget(self.frame_counter_label)
+
+        graph_wrapper_layout.addLayout(frame_nav)
+
+        self.frame_start_spin.valueChanged.connect(self.update_frame_bounds)
+        self.frame_end_spin.valueChanged.connect(self.update_frame_bounds)
+        self.frame_slider.valueChanged.connect(self.frame_slider_changed)
+        self.prev_frame_button.clicked.connect(self.previous_frame)
+        self.next_frame_button.clicked.connect(self.next_frame)
+
 
         self.canvas = PlotCanvas()
         graph_layout.addWidget(self.canvas)
+
+        self.image_canvas = ImageCanvas()
+        image_layout.addWidget(self.image_canvas, stretch=1)
+
+        # --- Instrument buttons and center controls ---
+        instrument_layout = QGridLayout()
+        instrument_layout.setContentsMargins(0, 0, 0, 0)
+        instrument_layout.setHorizontalSpacing(6)
+        instrument_layout.setVerticalSpacing(4)
+
+        self.btn_xenocs = QPushButton("XENOCS")
+        self.btn_id02 = QPushButton("ID02")
+        self.btn_id13 = QPushButton("ID13")
+        self.btn_custom = QPushButton("Custom")
+
+        self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
+        self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
+        self.btn_id13.clicked.connect(lambda: self.set_instrument_mode("ID13"))
+        self.btn_custom.clicked.connect(lambda: self.set_instrument_mode("Custom"))
+
+        instrument_layout.addWidget(self.btn_xenocs, 0, 0)
+        instrument_layout.addWidget(self.btn_id02, 0, 1)
+        instrument_layout.addWidget(self.btn_id13, 0, 2)
+        instrument_layout.addWidget(self.btn_custom, 0, 3)
+
+        self.center_x_spin = QDoubleSpinBox()
+        self.center_y_spin = QDoubleSpinBox()
+        self.center_x_spin.setDecimals(3)
+        self.center_y_spin.setDecimals(3)
+        self.center_x_spin.setRange(-1e6, 1e6)
+        self.center_y_spin.setRange(-1e6, 1e6)
+        self.center_x_spin.valueChanged.connect(self.calculate_anisotropy)
+        self.center_y_spin.valueChanged.connect(self.calculate_anisotropy)
+
+        instrument_layout.addWidget(QLabel("Center X"), 1, 0)
+        instrument_layout.addWidget(self.center_x_spin, 1, 1)
+        instrument_layout.addWidget(QLabel("Center Y"), 1, 2)
+        instrument_layout.addWidget(self.center_y_spin, 1, 3)
+
+        image_layout.insertLayout(0, instrument_layout)
 
         for widget in [
             self.peak_spin,
@@ -259,6 +924,133 @@ class HermansTab(QWidget):
             slider.valueChanged.connect(self.slider_changed)
 
         self.update_fit_mode()
+        self.parameter_mode_changed()
+    def is_anisotropy_mode(self):
+        return hasattr(self, "parameter_selector") and self.parameter_selector.currentIndex() == 1
+
+    def parameter_mode_changed(self):
+        anisotropy_mode = self.is_anisotropy_mode()
+
+        self.graph_box.setTitle("I(q) profiles" if anisotropy_mode else "Azimuthal profile")
+        self.image_box.setVisible(anisotropy_mode)
+
+        hermans_widgets = [
+            self.offset_slider.label_widget,
+            self.peak_slider.label_widget,
+            self.window_slider.label_widget,
+            self.height_slider.label_widget,
+            self.manual_fwhm_slider.label_widget,
+            self.offset_spin, self.offset_slider, self.offset_slider.min_spin, self.offset_slider.max_spin,
+            self.peak_spin, self.peak_slider, self.peak_slider.min_spin, self.peak_slider.max_spin,
+            self.window_spin, self.window_slider, self.window_slider.min_spin, self.window_slider.max_spin,
+            self.use_fit_checkbox, self.height_spin, self.height_slider,
+            self.height_slider.min_spin, self.height_slider.max_spin,
+            self.manual_fwhm_spin, self.manual_fwhm_slider,
+            self.manual_fwhm_slider.min_spin, self.manual_fwhm_slider.max_spin,
+            self.fit_button, self.save_fit_button,
+        ]
+
+        for widget in hermans_widgets:
+            widget.setVisible(not anisotropy_mode)
+
+        for widget in self.anisotropy_param_widgets:
+            widget.setVisible(anisotropy_mode)
+
+        for widget in [
+            self.frame_start_spin, self.frame_end_spin, self.prev_frame_button,
+            self.next_frame_button, self.frame_slider, self.frame_counter_label,
+            self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom,
+            self.center_x_spin, self.center_y_spin,
+        ]:
+            widget.setVisible(anisotropy_mode)
+
+        if self.folder is not None:
+            self.load_folder(self.folder)
+        elif anisotropy_mode:
+            self.calculate_anisotropy()
+        else:
+            self.calculate()
+
+    def configure_frame_navigation(self, n_frames):
+        self.total_frames = max(1, int(n_frames))
+        self.current_frame = min(max(1, self.current_frame), self.total_frames)
+
+        self._updating_frame_controls = True
+        self.frame_start_spin.setRange(1, self.total_frames)
+        self.frame_end_spin.setRange(1, self.total_frames)
+        self.frame_slider.setRange(1, self.total_frames)
+        self.frame_start_spin.setValue(1)
+        self.frame_end_spin.setValue(self.total_frames)
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_counter_label.setText(f"{self.current_frame} / {self.total_frames}")
+        self._updating_frame_controls = False
+
+    def update_frame_bounds(self):
+        start = self.frame_start_spin.value()
+        end = self.frame_end_spin.value()
+
+        if start > end:
+            if self.sender() == self.frame_start_spin:
+                self.frame_end_spin.setValue(start)
+                end = start
+            else:
+                self.frame_start_spin.setValue(end)
+                start = end
+
+        self.frame_slider.setRange(start, end)
+        if self.frame_slider.value() < start:
+            self.frame_slider.setValue(start)
+        elif self.frame_slider.value() > end:
+            self.frame_slider.setValue(end)
+
+    def frame_slider_changed(self, value):
+        self.current_frame = int(value)
+        self.frame_counter_label.setText(f"{self.current_frame} / {self.total_frames}")
+
+        if not self._updating_frame_controls and self.is_anisotropy_mode() and self.current_file is not None:
+            self.load_file(self.current_file)
+
+    def previous_frame(self):
+        self.frame_slider.setValue(max(self.frame_slider.minimum(), self.frame_slider.value() - 1))
+
+    def next_frame(self):
+        self.frame_slider.setValue(min(self.frame_slider.maximum(), self.frame_slider.value() + 1))
+
+    def set_instrument_mode(self, mode):
+        self.instrument_mode = mode
+        self.apply_instrument_preset()
+        self.calculate_anisotropy()
+
+    def set_center_spins(self, x_value, y_value):
+        self.center_x_spin.blockSignals(True)
+        self.center_y_spin.blockSignals(True)
+        self.center_x_spin.setValue(float(x_value))
+        self.center_y_spin.setValue(float(y_value))
+        self.center_x_spin.blockSignals(False)
+        self.center_y_spin.blockSignals(False)
+
+    def apply_instrument_preset(self):
+        if self.current_image is None:
+            return
+
+        ny, nx = self.current_image.shape
+        header = self.current_header or {}
+
+        if self.instrument_mode == "XENOCS":
+            x = header_float(header, ["Center_1", "CenterX", "BeamCenterX", "center_x"], 612.0)
+            y = header_float(header, ["Center_2", "CenterY", "BeamCenterY", "center_y"], 649.0)
+        elif self.instrument_mode == "ID02":
+            x = header_float(header, ["Center_1", "CenterX", "BeamCenterX", "center_x"], nx / 2)
+            y = header_float(header, ["Center_2", "CenterY", "BeamCenterY", "center_y"], ny / 2)
+        elif self.instrument_mode == "ID13":
+            x = header_float(header, ["Center_1", "CenterX", "BeamCenterX", "center_x"], 1294.689)
+            y = header_float(header, ["Center_2", "CenterY", "BeamCenterY", "center_y"], 1310.290)
+        else:
+            x = self.center_x_spin.value() if self.center_x_spin.value() != 0 else header_float(header, ["Center_1", "CenterX", "BeamCenterX", "center_x"], nx / 2)
+            y = self.center_y_spin.value() if self.center_y_spin.value() != 0 else header_float(header, ["Center_2", "CenterY", "BeamCenterY", "center_y"], ny / 2)
+
+        self.set_center_spins(x, y)
+
     def update_fit_mode(self):
         use_fit = self.use_fit_checkbox.isChecked()
 
@@ -343,6 +1135,7 @@ class HermansTab(QWidget):
         slider.min_spin = min_spin
         slider.max_spin = max_spin
         slider.value_spin = value_spin
+        slider.label_widget = label_widget
 
         return value_spin, slider
 
@@ -420,9 +1213,32 @@ class HermansTab(QWidget):
     def load_folder(self, folder):
         self.folder = Path(folder)
         self.folder_changed.emit(self.folder)
-        self.available_files = sorted(
-            file.name for file in self.folder.glob("*_cave*_azimProf.dat")
-        )
+
+        if self.is_anisotropy_mode():
+            files = []
+            for pattern in ["*.edf", "*.h5", "*.hdf5"]:
+                files.extend(self.folder.glob(pattern))
+
+            excluded_suffixes = ("_ave.h5", "_aveq_ave.h5", "polar.edf")
+            unique_files = sorted(set(files))
+            edf_stems = {file.stem for file in unique_files if file.suffix.lower() == ".edf"}
+
+            self.available_files = []
+            for file in unique_files:
+                lower_name = file.name.lower()
+                suffix = file.suffix.lower()
+
+                if lower_name.endswith(excluded_suffixes):
+                    continue
+
+                if suffix in [".h5", ".hdf5"] and file.stem in edf_stems:
+                    continue
+
+                self.available_files.append(file.name)
+        else:
+            self.available_files = sorted(
+                file.name for file in self.folder.glob("*_cave*_azimProf.dat")
+            )
 
         self.file_list.blockSignals(True)
         self.file_list.clear()
@@ -452,15 +1268,40 @@ class HermansTab(QWidget):
         self.load_file(self.folder / item.text())
 
     def load_file(self, file_path):
+        self.current_file = Path(file_path)
+
+        if self.is_anisotropy_mode():
+            try:
+                if self.current_file.suffix.lower() in [".h5", ".hdf5"]:
+                    self.configure_frame_navigation(count_h5_frames(self.current_file))
+                else:
+                    self.configure_frame_navigation(1)
+
+                image, header = read_image_file(self.current_file, frame_index=self.current_frame - 1)
+            except Exception as error:
+                QMessageBox.critical(self, "File reading error", str(error))
+                return
+
+            self.current_image = image
+            self.current_header = header
+            self.azimuth = None
+            self.intensity = None
+            self.last_fit = None
+            self.apply_instrument_preset()
+            self.calculate_anisotropy()
+            return
+
         try:
             azimuth, intensity = read_azimuthal_file(file_path)
         except Exception as error:
             QMessageBox.critical(self, "File reading error", str(error))
             return
 
-        self.current_file = Path(file_path)
+        self.configure_frame_navigation(1)
         self.azimuth = azimuth
         self.intensity = intensity
+        self.current_image = None
+        self.current_header = {}
         self.last_fit = None
 
         self.offset_spin.blockSignals(True)
@@ -473,6 +1314,10 @@ class HermansTab(QWidget):
         self.calculate()
 
     def calculate(self):
+        if self.is_anisotropy_mode():
+            self.calculate_anisotropy()
+            return
+
         if self.azimuth is None or self.intensity is None or self.current_file is None:
             return
 
@@ -552,6 +1397,120 @@ class HermansTab(QWidget):
         self.update_plot(azimuth, intensity, baseline, peak, amplitude, sigma, fwhm, pi, hermans_corr)
         self.update_results_text()
 
+    def calculate_anisotropy(self):
+        if not self.is_anisotropy_mode():
+            return
+
+        if self.current_image is None or self.current_file is None:
+            return
+
+        image = self.current_image
+        header = self.current_header or {}
+
+        ny, nx = image.shape
+        if self.center_x_spin.value() == 0 and self.center_y_spin.value() == 0:
+            self.apply_instrument_preset()
+        xc = self.center_x_spin.value()
+        yc = self.center_y_spin.value()
+        distance = header_float(header, ["SampleDistance", "Distance", "DetectorDistance"], 0.9)
+        pixel_x = header_float(header, ["PSize_1", "PixelSizeX", "pixel_x"], 0.075)
+        pixel_y = header_float(header, ["PSize_2", "PixelSizeY", "pixel_y"], 0.075)
+        wavelength = header_float(header, ["Wavelength", "wavelength"], 1.54189)
+
+        if pixel_x < 1e-3:
+            pixel_x *= 1000
+        if pixel_y < 1e-3:
+            pixel_y *= 1000
+        if wavelength < 1e-6:
+            wavelength *= 1e10
+
+        horizontal_ranges = [(self.h_psi_min.value(), self.h_psi_max.value())]
+        vertical_ranges = [(self.v_psi_min.value(), self.v_psi_max.value())]
+
+        try:
+            q, ih, iv, h_counts, v_counts, mask, h_mask, v_mask = sector_iq_profiles(
+                image,
+                xc,
+                yc,
+                distance,
+                pixel_x,
+                pixel_y,
+                wavelength,
+                horizontal_ranges,
+                vertical_ranges,
+                reference_angle=self.reference_angle.value(),
+            )
+        except Exception as error:
+            self.results_text.setPlainText(str(error))
+            return
+
+        valid = np.isfinite(ih) & np.isfinite(iv) & ((iv + ih) != 0)
+        if self.use_beamstop_cutoff.isChecked():
+            valid &= q >= self.beamstop_q.value()
+        anisotropy_curve = np.full_like(q, np.nan, dtype=float)
+        anisotropy_curve[valid] = (iv[valid] - ih[valid]) / (iv[valid] + ih[valid])
+        anisotropy_factor = float(np.nanmean(anisotropy_curve[valid])) if np.any(valid) else np.nan
+
+        self.last_anisotropy = {
+            "q": q,
+            "ih": ih,
+            "iv": iv,
+            "anisotropy_curve": anisotropy_curve,
+            "anisotropy_factor": anisotropy_factor,
+            "xc": xc,
+            "yc": yc,
+            "distance": distance,
+            "pixel_x": pixel_x,
+            "pixel_y": pixel_y,
+            "wavelength": wavelength,
+        }
+
+        ax = self.canvas.ax
+        ax.clear()
+
+        plot_valid_iv = np.isfinite(q) & np.isfinite(iv) & (q > 0) & (iv > 0)
+        plot_valid_ih = np.isfinite(q) & np.isfinite(ih) & (q > 0) & (ih > 0)
+
+        if self.use_beamstop_cutoff.isChecked():
+            cutoff = self.beamstop_q.value()
+            plot_valid_iv &= q >= cutoff
+            plot_valid_ih &= q >= cutoff
+
+        ax.plot(q[plot_valid_iv], iv[plot_valid_iv], linewidth=1.4, label="Iv")
+        ax.plot(q[plot_valid_ih], ih[plot_valid_ih], linewidth=1.4, label="Ih")
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("q / nm⁻¹")
+        ax.set_ylabel("Intensity / a.u.")
+        ax.grid(True, which="both")
+        ax.legend(loc="best")
+        self.canvas.draw_idle()
+
+        self.image_canvas.show_image(
+            image,
+            xc,
+            yc,
+            mask=mask,
+            h_mask=h_mask,
+            v_mask=v_mask,
+            reference_angle=self.reference_angle.value(),
+        )
+
+        self.results_text.setPlainText(
+            f"File = {self.current_file.name}\n"
+            f"Frame = {self.current_frame} / {self.total_frames}\n"
+            f"Horizontal ψ = {self.h_psi_min.value():.3f}° -> {self.h_psi_max.value():.3f}°\n"
+            f"Vertical ψ = {self.v_psi_min.value():.3f}° -> {self.v_psi_max.value():.3f}°\n"
+            f"Reference angle = {self.reference_angle.value():.3f}°\n"
+            f"Center = ({xc:.3f}, {yc:.3f}) | {self.instrument_mode}\n"
+            f"Beamstop cutoff = {'on' if self.use_beamstop_cutoff.isChecked() else 'off'}"
+            f" ({self.beamstop_q.value():.4f} nm⁻¹)\n"
+            f"A = (Iv - Ih) / (Iv + Ih)\n"
+            f"A mean = {anisotropy_factor:.5f}"
+        )
+
+        # (Removed accidental duplicated Hermans calculation block)
+
     def update_plot(self, azimuth, intensity, baseline, peak, amplitude, sigma, fwhm, pi, hermans_corr):
         ax = self.canvas.ax
         ax.clear()
@@ -570,7 +1529,7 @@ class HermansTab(QWidget):
         ax.plot([x_left, x_right], [half_max_raw, half_max_raw], "b-", linewidth=2, label="FWHM")
         ax.axvline(peak, color="blue", linestyle="--", linewidth=1, label="Peak centre")
 
-        ax.set_title(self.current_file.name)
+        ax.set_title("")
         ax.set_xlabel("ψ / °")
         ax.set_ylabel("Intensity / a.u.")
         ax.set_xlim(0, 360)

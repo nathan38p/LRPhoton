@@ -631,7 +631,8 @@ class ImageCanvas(FigureCanvas):
         self.fig = Figure()
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
-        self.ax.set_axis_on()
+        self.ax.set_axis_off()
+        self.ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
         self.fig.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01)
 
         self._dragging = False
@@ -646,6 +647,8 @@ class ImageCanvas(FigureCanvas):
         self.coordinate_label = None
         self.display_vmin = None
         self.display_vmax = None
+        self.display_data_min = 0.0
+        self.display_data_max = 1.0
         self.q_map = None
 
         self.mpl_connect("scroll_event", self._on_scroll)
@@ -883,7 +886,8 @@ class ImageCanvas(FigureCanvas):
         self.raw_image = image
 
         self.ax.clear()
-        self.ax.set_axis_on()
+        self.ax.set_axis_off()
+        self.ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
 
         display = image.astype(np.float64).copy()
         display[~np.isfinite(display)] = np.nan
@@ -892,8 +896,15 @@ class ImageCanvas(FigureCanvas):
         with np.errstate(invalid="ignore", divide="ignore"):
             display = np.log10(display + 1)
 
+        finite_display = display[np.isfinite(display)]
+        if finite_display.size > 0:
+            self.display_data_min = float(np.nanmin(finite_display))
+            self.display_data_max = float(np.nanmax(finite_display))
+        else:
+            self.display_data_min = 0.0
+            self.display_data_max = 1.0
+
         if self.display_vmin is None or self.display_vmax is None:
-            finite_display = display[np.isfinite(display)]
             if finite_display.size > 0:
                 self.display_vmin = float(np.nanpercentile(finite_display, 1))
                 self.display_vmax = float(np.nanpercentile(finite_display, 99))
@@ -939,6 +950,8 @@ class ImageCanvas(FigureCanvas):
                     bbox=dict(facecolor="black", alpha=0.55, edgecolor="none", pad=2),
                 )
 
+        self.ax.set_axis_off()
+        self.ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
         self.ax.set_xticks([])
         self.ax.set_yticks([])
         self.ax.set_xlabel("")
@@ -982,6 +995,79 @@ class RadialTab(QWidget):
         self.refresh_files()
         self.set_controls_enabled(False)
 
+    def update_image_intensity_limits(self):
+        if not hasattr(self, "image_canvas") or self.image_canvas.raw_image is None:
+            return
+
+        data_min = self.image_canvas.display_data_min
+        data_max = self.image_canvas.display_data_max
+        span = data_max - data_min
+        if span <= 0:
+            return
+
+        min_pos = self.image_vmin_slider.value()
+        max_pos = self.image_vmax_slider.value()
+
+        if min_pos >= max_pos:
+            sender = self.sender()
+            if sender is self.image_vmin_slider:
+                max_pos = min(1000, min_pos + 1)
+                self.image_vmax_slider.blockSignals(True)
+                self.image_vmax_slider.setValue(max_pos)
+                self.image_vmax_slider.blockSignals(False)
+            else:
+                min_pos = max(0, max_pos - 1)
+                self.image_vmin_label.setVisible(True)
+                self.image_vmax_label.setVisible(True)
+                self.image_vmin_slider.setVisible(True)
+                self.image_vmax_slider.setVisible(True)
+                self.image_vmin_label.setVisible(True)
+                self.image_vmax_label.setVisible(True)
+                self.image_vmin_slider.setVisible(True)
+                self.image_vmax_slider.setVisible(True)
+                self.image_vmin_slider.blockSignals(True)
+                self.image_vmin_slider.setValue(min_pos)
+                self.image_vmin_slider.blockSignals(False)
+
+        vmin = data_min + span * min_pos / 1000.0
+        vmax = data_min + span * max_pos / 1000.0
+
+        self.image_canvas.display_vmin = vmin
+        self.image_canvas.display_vmax = vmax
+        self.image_vmin_label.setText(f"Min: {vmin:.3g}")
+        self.image_vmax_label.setText(f"Max: {vmax:.3g}")
+
+        self.image_canvas.show_image(
+            self.image_canvas.raw_image,
+            self.center_x.value(),
+            self.center_y.value(),
+            None,
+        )
+
+    def sync_image_intensity_sliders(self):
+        data_min = self.image_canvas.display_data_min
+        data_max = self.image_canvas.display_data_max
+        span = data_max - data_min
+        if span <= 0 or self.image_canvas.display_vmin is None or self.image_canvas.display_vmax is None:
+            self.image_vmin_label.setText("Min: -")
+            self.image_vmax_label.setText("Max: -")
+            return
+
+        min_pos = int(round((self.image_canvas.display_vmin - data_min) / span * 1000))
+        max_pos = int(round((self.image_canvas.display_vmax - data_min) / span * 1000))
+        min_pos = max(0, min(1000, min_pos))
+        max_pos = max(0, min(1000, max_pos))
+
+        self.image_vmin_slider.blockSignals(True)
+        self.image_vmax_slider.blockSignals(True)
+        self.image_vmin_slider.setValue(min_pos)
+        self.image_vmax_slider.setValue(max_pos)
+        self.image_vmin_slider.blockSignals(False)
+        self.image_vmax_slider.blockSignals(False)
+
+        self.image_vmin_label.setText(f"Min: {self.image_canvas.display_vmin:.3g}")
+        self.image_vmax_label.setText(f"Max: {self.image_canvas.display_vmax:.3g}")
+
     def build_ui(self):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(4, 4, 4, 4)
@@ -1013,14 +1099,14 @@ class RadialTab(QWidget):
         graph_box = QGroupBox("I(q) graph")
         graph_layout = QVBoxLayout(graph_box)
         graph_layout.setContentsMargins(6, 18, 6, 6)
-        view_row.addWidget(graph_box, stretch=3)
+        view_row.addWidget(graph_box, stretch=5)
 
-        image_box = QGroupBox("Image / selected integration area")
+        image_box = QGroupBox("Selected area")
         image_layout = QVBoxLayout(image_box)
         image_layout.setContentsMargins(6, 18, 6, 6)
         image_box.setMinimumWidth(320)
         image_box.setMaximumWidth(430)
-        view_row.addWidget(image_box, stretch=1)
+        view_row.addWidget(image_box, stretch=2)
 
         file_box = QGroupBox("File browser")
         file_layout = QVBoxLayout(file_box)
@@ -1208,34 +1294,62 @@ class RadialTab(QWidget):
         self.image_canvas.set_coordinate_label(self.image_coordinate_label)
         image_layout.addWidget(self.image_canvas, stretch=1)
         image_layout.addWidget(self.image_coordinate_label, stretch=0)
+        image_limits_layout = QGridLayout()
+        image_limits_layout.setContentsMargins(0, 0, 0, 0)
+        image_limits_layout.setHorizontalSpacing(6)
+        image_limits_layout.setVerticalSpacing(2)
+
+        self.image_vmin_label = QLabel("Min: -")
+        self.image_vmax_label = QLabel("Max: -")
+        self.image_vmin_label.setAlignment(Qt.AlignCenter)
+        self.image_vmax_label.setAlignment(Qt.AlignCenter)
+
+        self.image_vmin_slider = QSlider(Qt.Horizontal)
+        self.image_vmax_slider = QSlider(Qt.Horizontal)
+        self.image_vmin_slider.setRange(0, 1000)
+        self.image_vmax_slider.setRange(0, 1000)
+        self.image_vmin_slider.setValue(0)
+        self.image_vmax_slider.setValue(1000)
+
+        image_limits_layout.addWidget(self.image_vmin_label, 0, 0)
+        image_limits_layout.addWidget(self.image_vmin_slider, 0, 1)
+        image_limits_layout.addWidget(self.image_vmax_label, 1, 0)
+        image_limits_layout.addWidget(self.image_vmax_slider, 1, 1)
+
+        image_layout.addLayout(image_limits_layout)
+
+        self.image_vmin_slider.valueChanged.connect(self.update_image_intensity_limits)
+        self.image_vmax_slider.valueChanged.connect(self.update_image_intensity_limits)
 
         self.canvas.mpl_connect("button_press_event", self.on_graph_right_click)
         self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
         self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
-
-        self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
-        self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
-        self.btn_id13.clicked.connect(lambda: self.set_instrument_mode("ID13"))
-        self.btn_custom.clicked.connect(lambda: self.set_instrument_mode("Custom"))
-        self.update_mask_parameter_state()
-
         frame_nav = QHBoxLayout()
         frame_nav.setContentsMargins(0, 0, 0, 0)
         frame_nav.setSpacing(6)
+
         self.frame_start_spin = QSpinBox()
         self.frame_start_spin.setRange(1, 1)
         self.frame_start_spin.setValue(1)
+        self.frame_start_spin.setFixedWidth(70)
+
         self.frame_end_spin = QSpinBox()
         self.frame_end_spin.setRange(1, 1)
         self.frame_end_spin.setValue(1)
+        self.frame_end_spin.setFixedWidth(70)
+
         self.prev_frame_button = QPushButton("<")
         self.next_frame_button = QPushButton(">")
         self.prev_frame_button.setFixedWidth(44)
         self.next_frame_button.setFixedWidth(44)
+
         self.frame_slider = QSlider(Qt.Horizontal)
         self.frame_slider.setRange(1, 1)
         self.frame_slider.setValue(1)
+
         self.frame_counter_label = QLabel("1 / 1")
+        self.frame_counter_label.setMinimumWidth(56)
+        self.frame_counter_label.setAlignment(Qt.AlignCenter)
 
         frame_nav.addWidget(QLabel("From:"))
         frame_nav.addWidget(self.frame_start_spin)
@@ -1245,6 +1359,7 @@ class RadialTab(QWidget):
         frame_nav.addWidget(QLabel("To:"))
         frame_nav.addWidget(self.frame_end_spin)
         frame_nav.addWidget(self.frame_counter_label)
+
         right_layout.addLayout(frame_nav)
 
         self.frame_start_spin.valueChanged.connect(self.update_frame_bounds)
@@ -1252,6 +1367,12 @@ class RadialTab(QWidget):
         self.frame_slider.valueChanged.connect(self.frame_slider_changed)
         self.prev_frame_button.clicked.connect(self.previous_frame)
         self.next_frame_button.clicked.connect(self.next_frame)
+
+        self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
+        self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
+        self.btn_id13.clicked.connect(lambda: self.set_instrument_mode("ID13"))
+        self.btn_custom.clicked.connect(lambda: self.set_instrument_mode("Custom"))
+        self.update_mask_parameter_state()
 
     def update_mask_parameter_state(self):
         use_q_range = self.use_q_range.isChecked()
@@ -1277,24 +1398,37 @@ class RadialTab(QWidget):
             self.wavelength, self.frame_spin, self.frame_start_spin, self.frame_end_spin,
             self.frame_slider, self.prev_frame_button, self.next_frame_button,
             self.use_q_range, self.q_min, self.q_max, self.use_sector,
+            self.sector_min, self.sector_max,
             self.n_bins, self.plot_mode, self.integrate_button, self.save_button,
+            self.image_vmin_slider, self.image_vmax_slider,
         ]:
             widget.setEnabled(enabled)
+
         self.plot_mode.setCurrentText("log log")
         self.update_frame_selector_visibility()
         self.update_mask_parameter_state()
+
+        if not enabled:
+            self.q_min.setEnabled(False)
+            self.q_max.setEnabled(False)
+            self.sector_min.setEnabled(False)
+            self.sector_max.setEnabled(False)
+            self.prev_frame_button.setEnabled(False)
+            self.next_frame_button.setEnabled(False)
 
     def update_frame_selector_visibility(self):
         is_multiframe_h5 = self.h5_n_frames > 1
         self.frame_label.setVisible(False)
         self.frame_spin.setVisible(False)
         self.frame_spin.setEnabled(is_multiframe_h5)
-        self.frame_start_spin.setVisible(is_multiframe_h5)
-        self.frame_end_spin.setVisible(is_multiframe_h5)
-        self.frame_slider.setVisible(is_multiframe_h5)
-        self.prev_frame_button.setVisible(is_multiframe_h5)
-        self.next_frame_button.setVisible(is_multiframe_h5)
-        self.frame_counter_label.setVisible(is_multiframe_h5)
+
+        self.frame_start_spin.setVisible(True)
+        self.frame_end_spin.setVisible(True)
+        self.frame_slider.setVisible(True)
+        self.prev_frame_button.setVisible(True)
+        self.next_frame_button.setVisible(True)
+        self.frame_counter_label.setVisible(True)
+
         self.update_frame_counter()
 
     def configure_frame_navigation(self, n_frames):
@@ -1324,12 +1458,24 @@ class RadialTab(QWidget):
             return
 
         value = max(self.frame_start_spin.value(), min(int(value), self.frame_end_spin.value()))
+
         if value != self.frame_slider.value():
             self.frame_slider.blockSignals(True)
             self.frame_slider.setValue(value)
             self.frame_slider.blockSignals(False)
 
+        self.frame_spin.blockSignals(True)
         self.frame_spin.setValue(value)
+        self.frame_spin.blockSignals(False)
+
+        self.update_frame_counter()
+
+        if self.h5_n_frames > 1 and self.selected_files():
+            self._changing_h5_frame = True
+            try:
+                self.integrate_selected_files()
+            finally:
+                self._changing_h5_frame = False
 
     def update_frame_bounds(self):
         if self._syncing_frame_controls:
@@ -1365,10 +1511,10 @@ class RadialTab(QWidget):
         self.next_frame_button.setEnabled(self.h5_n_frames > 1 and current < self.frame_end_spin.value())
 
     def previous_frame(self):
-        self.frame_spin.setValue(max(self.frame_start_spin.value(), self.frame_spin.value() - 1))
+        self.frame_slider.setValue(max(self.frame_start_spin.value(), self.frame_slider.value() - 1))
 
     def next_frame(self):
-        self.frame_spin.setValue(min(self.frame_end_spin.value(), self.frame_spin.value() + 1))
+        self.frame_slider.setValue(min(self.frame_end_spin.value(), self.frame_slider.value() + 1))
 
     def update_selected_h5_frame(self):
         self.update_frame_counter()
@@ -1430,7 +1576,7 @@ class RadialTab(QWidget):
         for file in files:
             self.file_list.addItem(file.name)
 
-        self.set_controls_enabled(bool(files))
+        self.set_controls_enabled(bool(self.selected_files()))
 
     def selection_changed(self):
         selected = self.selected_files()
@@ -1460,6 +1606,7 @@ class RadialTab(QWidget):
             self.update_frame_selector_visibility()
             self.apply_preset_from_file(selected[0])
         else:
+            self.configure_frame_navigation(1)
             self.update_frame_selector_visibility()
 
     def selected_files(self):
@@ -1620,6 +1767,7 @@ class RadialTab(QWidget):
                 if file_path == files[0]:
                     self.image_canvas.set_q_map(q_map)
                     self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
+                    self.sync_image_intensity_sliders()
                 frame_text = f" | H5 frame {self.frame_spin.value()} / {self.h5_n_frames}" if file_path.suffix.lower() in [".h5", ".hdf5"] and self.h5_n_frames > 1 else ""
                 messages.append(
                     f"Integrated: {file_path.name}{frame_text} ({q.size} bins)\n"
