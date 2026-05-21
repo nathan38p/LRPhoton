@@ -427,6 +427,8 @@ class ImageCanvas(FigureCanvas):
         self.ax.set_axis_off()
         self.fig.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01)
         self.raw_image = None
+        self.q_map = None
+        self.coordinate_label = None
         self._dragging = False
         self._drag_start = None
         self._xlim_start = None
@@ -437,6 +439,12 @@ class ImageCanvas(FigureCanvas):
         self.mpl_connect("button_press_event", self._on_press)
         self.mpl_connect("button_release_event", self._on_release)
         self.mpl_connect("motion_notify_event", self._on_motion)
+
+    def set_coordinate_label(self, label):
+        self.coordinate_label = label
+
+    def set_q_map(self, q_map):
+        self.q_map = q_map
 
     def _on_scroll(self, event):
         if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
@@ -475,6 +483,40 @@ class ImageCanvas(FigureCanvas):
         self._ylim_start = None
 
     def _on_motion(self, event):
+        if self.coordinate_label is not None:
+            if event.inaxes == self.ax and event.xdata is not None and event.ydata is not None:
+                x_index = int(round(event.xdata))
+                y_index = int(round(event.ydata))
+                value_text = "-"
+                q_text = "-"
+
+                if self.raw_image is not None:
+                    ny, nx = self.raw_image.shape
+                    if 0 <= x_index < nx and 0 <= y_index < ny:
+                        value = self.raw_image[y_index, x_index]
+                        if np.isnan(value):
+                            value_text = "NaN"
+                        elif np.isposinf(value):
+                            value_text = "+Inf"
+                        elif np.isneginf(value):
+                            value_text = "-Inf"
+                        else:
+                            value_text = f"{value:.8g}"
+
+                if self.q_map is not None:
+                    q_ny, q_nx = self.q_map.shape
+                    if 0 <= x_index < q_nx and 0 <= y_index < q_ny:
+                        q_value = self.q_map[y_index, x_index]
+                        if np.isfinite(q_value):
+                            q_text = f"{q_value:.6g}"
+
+                self.coordinate_label.setText(
+                    f"x = {x_index + 1} | y = {y_index + 1}\n"
+                    f"q = {q_text} nm⁻¹ | I = {value_text}"
+                )
+            else:
+                self.coordinate_label.setText("x = - | y = -\nq = - | I = -")
+
         if not self._dragging or event.inaxes != self.ax:
             return
         if event.xdata is None or event.ydata is None or self._drag_start is None:
@@ -487,6 +529,14 @@ class ImageCanvas(FigureCanvas):
         self.draw_idle()
 
     def show_image(self, image, xc=None, yc=None, mask=None, h_mask=None, v_mask=None, reference_angle=0.0):
+        previous_xlim = None
+        previous_ylim = None
+        preserve_view = self.raw_image is not None and self.raw_image.shape == image.shape
+
+        if preserve_view:
+            previous_xlim = self.ax.get_xlim()
+            previous_ylim = self.ax.get_ylim()
+
         self.raw_image = image
         self.ax.clear()
         self.ax.set_axis_off()
@@ -580,6 +630,11 @@ class ImageCanvas(FigureCanvas):
                 self.ax.text(x_label, y_label, text, **label_style)
 
         self.ax.set_aspect("equal")
+
+        if preserve_view and previous_xlim is not None and previous_ylim is not None:
+            self.ax.set_xlim(previous_xlim)
+            self.ax.set_ylim(previous_ylim)
+
         self.draw_idle()
 
 
@@ -751,11 +806,11 @@ class HermansTab(QWidget):
         v_layout.setHorizontalSpacing(8)
         v_layout.setVerticalSpacing(6)
 
-        beamstop_box = QGroupBox("Beamstop removal")
-        beamstop_layout = QGridLayout(beamstop_box)
-        beamstop_layout.setContentsMargins(8, 18, 8, 8)
-        beamstop_layout.setHorizontalSpacing(8)
-        beamstop_layout.setVerticalSpacing(6)
+        q_range_box = QGroupBox("q range")
+        q_range_layout = QGridLayout(q_range_box)
+        q_range_layout.setContentsMargins(8, 18, 8, 8)
+        q_range_layout.setHorizontalSpacing(8)
+        q_range_layout.setVerticalSpacing(6)
 
         def add_sector_spin(layout, row, label, value):
             label_widget = QLabel(label)
@@ -776,21 +831,36 @@ class HermansTab(QWidget):
         self.v_psi_min = add_sector_spin(v_layout, 0, "ψ min", 80.0)
         self.v_psi_max = add_sector_spin(v_layout, 1, "ψ max", 100.0)
 
-        self.use_beamstop_cutoff = QCheckBox("Remove q values below")
-        self.use_beamstop_cutoff.setChecked(False)
-        self.use_beamstop_cutoff.stateChanged.connect(self.calculate_anisotropy)
+        q_range_box = QGroupBox("q range")
+        q_range_layout = QGridLayout(q_range_box)
+        q_range_layout.setContentsMargins(8, 18, 8, 8)
+        q_range_layout.setHorizontalSpacing(8)
+        q_range_layout.setVerticalSpacing(6)
 
-        self.beamstop_q = QDoubleSpinBox()
-        self.beamstop_q.setDecimals(4)
-        self.beamstop_q.setRange(0, 1000)
-        self.beamstop_q.setValue(0.0)
-        self.beamstop_q.setSuffix(" nm⁻¹")
-        self.beamstop_q.valueChanged.connect(self.calculate_anisotropy)
+        self.use_q_range = QCheckBox("Use q range")
+        self.use_q_range.setChecked(False)
+        self.use_q_range.stateChanged.connect(self.calculate_anisotropy)
 
-        beamstop_layout.addWidget(QLabel("q beamstop"), 0, 0)
-        beamstop_layout.addWidget(self.beamstop_q, 0, 1)
-        beamstop_layout.addWidget(self.use_beamstop_cutoff, 1, 0, 1, 2)
-        beamstop_layout.setColumnStretch(1, 1)
+        self.q_min_filter = QDoubleSpinBox()
+        self.q_min_filter.setDecimals(4)
+        self.q_min_filter.setRange(0, 1000)
+        self.q_min_filter.setValue(0.0)
+        self.q_min_filter.setSuffix(" nm⁻¹")
+        self.q_min_filter.valueChanged.connect(self.calculate_anisotropy)
+
+        self.q_max_filter = QDoubleSpinBox()
+        self.q_max_filter.setDecimals(4)
+        self.q_max_filter.setRange(0, 1000)
+        self.q_max_filter.setValue(10.0)
+        self.q_max_filter.setSuffix(" nm⁻¹")
+        self.q_max_filter.valueChanged.connect(self.calculate_anisotropy)
+
+        q_range_layout.addWidget(QLabel("q min"), 0, 0)
+        q_range_layout.addWidget(self.q_min_filter, 0, 1)
+        q_range_layout.addWidget(QLabel("q max"), 1, 0)
+        q_range_layout.addWidget(self.q_max_filter, 1, 1)
+        q_range_layout.addWidget(self.use_q_range, 2, 0, 1, 2)
+        q_range_layout.setColumnStretch(1, 1)
 
         self.reference_angle = QDoubleSpinBox()
         self.reference_angle.setDecimals(3)
@@ -805,7 +875,7 @@ class HermansTab(QWidget):
 
         params_layout.addWidget(h_box, 7, 0, 3, 2)
         params_layout.addWidget(v_box, 7, 2, 3, 2)
-        params_layout.addWidget(beamstop_box, 7, 4, 3, 2)
+        params_layout.addWidget(q_range_box, 7, 4, 3, 2)
         params_layout.addWidget(reference_box, 7, 6, 3, 2)
         params_layout.setColumnStretch(0, 1)
         params_layout.setColumnStretch(2, 1)
@@ -813,8 +883,8 @@ class HermansTab(QWidget):
         params_layout.setColumnStretch(6, 1)
 
         self.anisotropy_param_widgets.extend([
-            h_box, v_box, beamstop_box, reference_box,
-            self.use_beamstop_cutoff, self.beamstop_q, self.reference_angle,
+            h_box, v_box, q_range_box, reference_box,
+            self.use_q_range, self.q_min_filter, self.q_max_filter, self.reference_angle,
         ])
 
         frame_nav = QHBoxLayout()
@@ -867,6 +937,12 @@ class HermansTab(QWidget):
 
         self.image_canvas = ImageCanvas()
         image_layout.addWidget(self.image_canvas, stretch=1)
+
+        self.image_coordinate_label = QLabel("x = - | y = -\nq = - | I = -")
+        self.image_coordinate_label.setAlignment(Qt.AlignCenter)
+        self.image_coordinate_label.setStyleSheet("font-family: Menlo, monospace;")
+        image_layout.addWidget(self.image_coordinate_label, stretch=0)
+        self.image_canvas.set_coordinate_label(self.image_coordinate_label)
 
         # --- Instrument buttons and center controls ---
         instrument_layout = QGridLayout()
@@ -1444,11 +1520,23 @@ class HermansTab(QWidget):
             self.results_text.setPlainText(str(error))
             return
 
+        q_map = q_map_from_geometry(image.shape, xc, yc, distance, pixel_x, pixel_y, wavelength)
+        self.image_canvas.set_q_map(q_map)
+
+        display_h_mask = h_mask.copy()
+        display_v_mask = v_mask.copy()
+
         valid = np.isfinite(ih) & np.isfinite(iv) & ((iv + ih) != 0)
-        if self.use_beamstop_cutoff.isChecked():
-            valid &= q >= self.beamstop_q.value()
+        if self.use_q_range.isChecked():
+            q_min = min(self.q_min_filter.value(), self.q_max_filter.value())
+            q_max = max(self.q_min_filter.value(), self.q_max_filter.value())
+            valid &= (q >= q_min) & (q <= q_max)
+
+            q_range_image_mask = np.isfinite(q_map) & (q_map >= q_min) & (q_map <= q_max)
+            display_h_mask &= q_range_image_mask
+            display_v_mask &= q_range_image_mask
         anisotropy_curve = np.full_like(q, np.nan, dtype=float)
-        anisotropy_curve[valid] = (iv[valid] - ih[valid]) / (iv[valid] + ih[valid])
+        anisotropy_curve[valid] = np.abs((iv[valid] - ih[valid]) / (iv[valid] + ih[valid]))
         anisotropy_factor = float(np.nanmean(anisotropy_curve[valid])) if np.any(valid) else np.nan
 
         self.last_anisotropy = {
@@ -1471,10 +1559,11 @@ class HermansTab(QWidget):
         plot_valid_iv = np.isfinite(q) & np.isfinite(iv) & (q > 0) & (iv > 0)
         plot_valid_ih = np.isfinite(q) & np.isfinite(ih) & (q > 0) & (ih > 0)
 
-        if self.use_beamstop_cutoff.isChecked():
-            cutoff = self.beamstop_q.value()
-            plot_valid_iv &= q >= cutoff
-            plot_valid_ih &= q >= cutoff
+        if self.use_q_range.isChecked():
+            q_min = min(self.q_min_filter.value(), self.q_max_filter.value())
+            q_max = max(self.q_min_filter.value(), self.q_max_filter.value())
+            plot_valid_iv &= (q >= q_min) & (q <= q_max)
+            plot_valid_ih &= (q >= q_min) & (q <= q_max)
 
         ax.plot(q[plot_valid_iv], iv[plot_valid_iv], linewidth=1.4, label="Iv")
         ax.plot(q[plot_valid_ih], ih[plot_valid_ih], linewidth=1.4, label="Ih")
@@ -1490,9 +1579,9 @@ class HermansTab(QWidget):
             image,
             xc,
             yc,
-            mask=mask,
-            h_mask=h_mask,
-            v_mask=v_mask,
+            mask=display_h_mask | display_v_mask,
+            h_mask=display_h_mask,
+            v_mask=display_v_mask,
             reference_angle=self.reference_angle.value(),
         )
 
@@ -1503,9 +1592,9 @@ class HermansTab(QWidget):
             f"Vertical ψ = {self.v_psi_min.value():.3f}° -> {self.v_psi_max.value():.3f}°\n"
             f"Reference angle = {self.reference_angle.value():.3f}°\n"
             f"Center = ({xc:.3f}, {yc:.3f}) | {self.instrument_mode}\n"
-            f"Beamstop cutoff = {'on' if self.use_beamstop_cutoff.isChecked() else 'off'}"
-            f" ({self.beamstop_q.value():.4f} nm⁻¹)\n"
-            f"A = (Iv - Ih) / (Iv + Ih)\n"
+            f"q range = {'on' if self.use_q_range.isChecked() else 'off'}"
+            f" ({self.q_min_filter.value():.4f} -> {self.q_max_filter.value():.4f} nm⁻¹)\n"
+            f"A = |Iv - Ih| / (Iv + Ih)\n"
             f"A mean = {anisotropy_factor:.5f}"
         )
 
