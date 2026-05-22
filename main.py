@@ -214,6 +214,27 @@ class MainWindow(QMainWindow):
         """)
         header_layout.addWidget(self.version_label)
 
+        self.update_button = QPushButton("Update now")
+        self.update_button.setVisible(False)
+        self.update_button.setCursor(Qt.PointingHandCursor)
+        self.update_button.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                color: #444444;
+                padding: 4px 10px;
+                border-radius: 8px;
+                border: 1px solid #dddddd;
+                background: #f8f8f8;
+            }
+            QPushButton:hover {
+                background-color: #eeeeee;
+            }
+        """)
+        self.update_button.clicked.connect(self.on_update_button_clicked)
+        header_layout.addWidget(self.update_button)
+
+        self.available_update_sha = None
+
         main_layout.addWidget(header)
 
         # ============================================================
@@ -517,6 +538,8 @@ class MainWindow(QMainWindow):
 
             if local_sha == remote_sha:
                 self.version_label.setText(up_to_date_text)
+                self.update_button.setVisible(False)
+                self.available_update_sha = None
                 return
 
             # If the source files already match GitHub, only the local marker is stale.
@@ -524,45 +547,16 @@ class MainWindow(QMainWindow):
             if self.current_sources_match_github():
                 self.save_local_commit(remote_sha)
                 self.version_label.setText(up_to_date_text)
+                self.update_button.setVisible(False)
+                self.available_update_sha = None
                 return
 
             short_sha = remote_sha[:7]
             self.version_label.setText(f"Update available: {short_sha}")
-
-            box = QMessageBox(self)
-            box.setWindowTitle("Update available")
-            box.setIcon(QMessageBox.Information)
-            box.setText("A new version of LRPhoton is available on GitHub.")
-            box.setInformativeText(
-                "LRPhoton can download the updated source files automatically.\n\n"
-                "After the update, close LRPhoton and open it again."
-            )
-            box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
-            box.button(QMessageBox.Yes).setText("Update now")
-            box.setDefaultButton(QMessageBox.Yes)
-
-            result = box.exec()
-            if result != QMessageBox.Yes:
-                return
-
-            self.version_label.setText("Updating…")
-            QApplication.processEvents()
-
-            self.install_update_from_github(remote_sha)
-
-            self.version_label.setText(up_to_date_text)
-
-            close_box = QMessageBox(self)
-            close_box.setWindowTitle("LRPhoton updated")
-            close_box.setIcon(QMessageBox.Information)
-            close_box.setText("The update has been installed.")
-            close_box.setInformativeText("Click Close to apply the new files.")
-            close_box.setStandardButtons(QMessageBox.Ok)
-            close_box.button(QMessageBox.Ok).setText("Close")
-
-            close_box.exec()
-
-            app_dir = Path(__file__).resolve().parent
+            self.available_update_sha = remote_sha
+            self.update_button.setText("Update now")
+            self.update_button.setVisible(True)
+            return
 
             try:
                 if sys.platform == "darwin":
@@ -590,10 +584,66 @@ class MainWindow(QMainWindow):
 
         except Exception as error:
             self.version_label.setText("Update status unavailable")
+            self.update_button.setVisible(False)
+            self.available_update_sha = None
             QMessageBox.warning(
                 self,
                 "Update error",
                 f"Impossible to check or install the update:\n{error}"
+            )
+
+    def on_update_button_clicked(self):
+        if not self.available_update_sha:
+            return
+
+        self.update_button.setEnabled(False)
+        self.version_label.setText("Updating…")
+        QApplication.processEvents()
+
+        try:
+            self.install_update_from_github(self.available_update_sha)
+            self.version_label.setText("Update installed")
+            self.update_button.setVisible(False)
+
+            close_box = QMessageBox(self)
+            close_box.setWindowTitle("LRPhoton updated")
+            close_box.setIcon(QMessageBox.Information)
+            close_box.setText("The update has been installed.")
+            close_box.setInformativeText("Close LRPhoton and open it again to apply the new files.")
+            close_box.setStandardButtons(QMessageBox.Ok)
+            close_box.button(QMessageBox.Ok).setText("Close")
+            close_box.exec()
+
+            app_dir = Path(__file__).resolve().parent
+            try:
+                if sys.platform == "darwin":
+                    launcher = app_dir / "LRPhoton.command"
+                    if launcher.exists():
+                        subprocess.Popen(["open", str(launcher)])
+                    else:
+                        subprocess.Popen([sys.executable, str(app_dir / "main.py")], cwd=str(app_dir))
+
+                elif sys.platform.startswith("win"):
+                    launcher = app_dir / "Lancer LRPhoton.bat"
+                    if launcher.exists():
+                        subprocess.Popen([str(launcher)], cwd=str(app_dir), shell=True)
+                    else:
+                        subprocess.Popen([sys.executable, str(app_dir / "main.py")], cwd=str(app_dir))
+
+                else:
+                    subprocess.Popen([sys.executable, str(app_dir / "main.py")], cwd=str(app_dir))
+            except Exception:
+                pass
+
+            self.close()
+            QApplication.instance().quit()
+        except Exception as error:
+            self.version_label.setText("Update failed")
+            self.update_button.setEnabled(True)
+            QMessageBox.warning(
+                self,
+                "Update error",
+                f"Impossible to install the update:\n{error}"
             )
 
 
