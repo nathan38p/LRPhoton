@@ -226,29 +226,15 @@ class MainWindow(QMainWindow):
         self.report_button.setVisible(not self.is_development_copy())
         header_layout.addWidget(self.report_button)
 
-        self.version_label = QPushButton("Checking for updates…")
+        self.version_label = QPushButton()
         self.version_label.setFixedHeight(28)
         self.version_label.setEnabled(False)
         self.version_label.setCursor(Qt.PointingHandCursor)
-        self.version_label.setStyleSheet("""
-            QPushButton {
-                font-size: 11px;
-                color: #444444;
-                padding: 4px 10px;
-                border-radius: 8px;
-                border: 1px solid #dddddd;
-                background: #f8f8f8;
-            }
-            QPushButton:disabled {
-                color: #999999;
-                background: #f2f2f2;
-                border-color: #dddddd;
-            }
-        """)
         self.version_label.clicked.connect(self.on_update_button_clicked)
         header_layout.addWidget(self.version_label)
 
         self.available_update_sha = None
+        self.set_update_button_state("disabled", "Checking for updates…")
         self.silent_update_test = (
             "--silent-update-test" in sys.argv
             or os.getenv("LRPHOTON_SILENT_UPDATE_TEST") in ("1", "true", "True", "TRUE")
@@ -351,7 +337,44 @@ class MainWindow(QMainWindow):
         except Exception:
             webbrowser.open(mailto_url)
 
+    def set_update_button_state(self, state, text=None):
+        if text is not None:
+            self.version_label.setText(text)
 
+        if state == "available":
+            self.version_label.setEnabled(True)
+            self.version_label.setStyleSheet("""
+                QPushButton {
+                    font-size: 11px;
+                    color: #856404;
+                    padding: 4px 10px;
+                    border-radius: 8px;
+                    border: 1px solid #ffeeba;
+                    background: #fff3cd;
+                }
+                QPushButton:disabled {
+                    color: #856404;
+                    background: #fff3cd;
+                    border-color: #ffeeba;
+                }
+            """)
+        else:
+            self.version_label.setEnabled(False)
+            self.version_label.setStyleSheet("""
+                QPushButton {
+                    font-size: 11px;
+                    color: #444444;
+                    padding: 4px 10px;
+                    border-radius: 8px;
+                    border: 1px solid #dddddd;
+                    background: #f8f8f8;
+                }
+                QPushButton:disabled {
+                    color: #999999;
+                    background: #f2f2f2;
+                    border-color: #dddddd;
+                }
+            """)
 
     def is_development_copy(self):
         """
@@ -554,8 +577,7 @@ class MainWindow(QMainWindow):
 
             remote_sha = str(data.get("sha", "")).strip()
             if not remote_sha:
-                self.version_label.setText("Update status unavailable")
-                self.version_label.setEnabled(False)
+                self.set_update_button_state("disabled", "Update status unavailable")
                 self.available_update_sha = None
                 return
 
@@ -579,19 +601,17 @@ class MainWindow(QMainWindow):
             self.available_update_sha = remote_sha
 
             if silent or self.silent_update_test:
-                self.version_label.setText("Updating…")
-                self.version_label.setEnabled(False)
+                self.set_update_button_state("disabled", "Updating…")
                 QApplication.processEvents()
                 try:
                     self.install_update_from_github(remote_sha)
-                    self.version_label.setText("Update installed")
+                    self.set_update_button_state("disabled", "Update installed")
                 except Exception:
-                    self.version_label.setText("Update failed")
+                    self.set_update_button_state("disabled", "Update failed")
                 self.available_update_sha = None
                 return
 
-            self.version_label.setText(f"Update available: {short_sha}")
-            self.version_label.setEnabled(True)
+            self.set_update_button_state("available", f"Update available: {short_sha}")
 
             box = QMessageBox(self)
             box.setWindowTitle("Update available")
@@ -607,20 +627,18 @@ class MainWindow(QMainWindow):
 
             result = box.exec()
             if result == QMessageBox.Yes:
-                self.version_label.setText("Updating…")
-                self.version_label.setEnabled(False)
+                self.set_update_button_state("disabled", "Updating…")
                 QApplication.processEvents()
                 try:
                     self.install_update_from_github(remote_sha)
-                    self.version_label.setText("Update installed")
+                    self.set_update_button_state("disabled", "Update installed")
                 except Exception:
-                    self.version_label.setText("Update failed")
+                    self.set_update_button_state("disabled", "Update failed")
                 self.available_update_sha = None
             return
 
         except Exception as error:
-            self.version_label.setText("Update status unavailable")
-            self.version_label.setEnabled(False)
+            self.set_update_button_state("disabled", "Update status unavailable")
             self.available_update_sha = None
             QMessageBox.warning(
                 self,
@@ -632,13 +650,12 @@ class MainWindow(QMainWindow):
         if not self.available_update_sha:
             return
 
-        self.version_label.setEnabled(False)
-        self.version_label.setText("Updating…")
+        self.set_update_button_state("disabled", "Updating…")
         QApplication.processEvents()
 
         try:
             self.install_update_from_github(self.available_update_sha)
-            self.version_label.setText("Update installed")
+            self.set_update_button_state("disabled", "Update installed")
             self.available_update_sha = None
 
             close_box = QMessageBox(self)
@@ -674,8 +691,7 @@ class MainWindow(QMainWindow):
             self.close()
             QApplication.instance().quit()
         except Exception as error:
-            self.version_label.setText("Update failed")
-            self.version_label.setEnabled(True)
+            self.set_update_button_state("disabled", "Update failed")
             QMessageBox.warning(
                 self,
                 "Update error",
