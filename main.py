@@ -200,19 +200,25 @@ class MainWindow(QMainWindow):
             }
         """)
         self.report_button.clicked.connect(self.open_issue_report_dialog)
+        self.report_button.setVisible(not self.is_development_copy())
         header_layout.addWidget(self.report_button)
 
-        self.version_label = QLabel("Checking for updates…")
+        self.version_label = QPushButton("Checking for updates…")
         self.version_label.setFixedHeight(28)
-        self.version_label.setAlignment(Qt.AlignCenter)
+        self.version_label.setEnabled(False)
         self.version_label.setStyleSheet("""
-            QLabel {
+            QPushButton {
                 font-size: 11px;
                 color: #444444;
                 padding: 4px 10px;
                 border-radius: 8px;
                 border: 1px solid #dddddd;
                 background: #f8f8f8;
+            }
+            QPushButton:disabled {
+                color: #999999;
+                background: #f2f2f2;
+                border-color: #dddddd;
             }
         """)
         header_layout.addWidget(self.version_label)
@@ -521,10 +527,16 @@ class MainWindow(QMainWindow):
 
         self.save_local_commit(remote_sha)
 
+    def can_check_for_updates(self):
+        app_dir = Path(__file__).resolve().parent
+        return app_dir.exists() and not self.is_development_copy()
+
     def check_for_updates(self):
         try:
-            if self.is_development_copy():
-                self.version_label.setText("Development mode")
+            if not self.can_check_for_updates():
+                self.version_label.setText("DEV")
+                self.update_button.setVisible(False)
+                self.available_update_sha = None
                 return
             response = requests.get(UPDATE_INFO_URL, timeout=5)
             response.raise_for_status()
@@ -718,7 +730,11 @@ def main():
 
     window = MainWindow()
     window.show()
-    QTimer.singleShot(1200, window.check_for_updates)
+    if window.can_check_for_updates():
+        QTimer.singleShot(1200, window.check_for_updates)
+    else:
+        window.version_label.setText("DEV")
+        window.update_button.setVisible(False)
 
     sys.exit(app.exec())
 
