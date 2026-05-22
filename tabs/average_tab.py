@@ -585,7 +585,7 @@ class AverageTab(QWidget):
         end = self.frame_end_spin.value()
 
         if self.first_edf_header_text:
-            suggested_path = first_path.parent / f"{first_path.stem}_average.edf"
+            suggested_path = first_path.parent / f"{first_path.stem}_averaged.edf"
             output_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save average EDF",
@@ -593,7 +593,7 @@ class AverageTab(QWidget):
                 "EDF (*.edf);;HDF5 (*.h5);;All files (*)",
             )
         else:
-            suggested_path = first_path.parent / f"{first_path.stem}_average.h5"
+            suggested_path = first_path.parent / f"{first_path.stem}_averaged.h5"
             output_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save average H5",
@@ -603,6 +603,8 @@ class AverageTab(QWidget):
 
         if not output_path:
             return
+
+        output_path = self._ensure_averaged_suffix(output_path)
 
         try:
             lower_path = output_path.lower()
@@ -618,6 +620,20 @@ class AverageTab(QWidget):
                 self.status.append(f"\nSaved average H5:\n{output_path}")
         except Exception as error:
             QMessageBox.critical(self, "Save error", str(error))
+
+    def _ensure_averaged_suffix(self, output_path):
+        path_obj = Path(output_path)
+        suffix = path_obj.suffix.lower()
+        name = path_obj.stem
+
+        if suffix in {".edf", ".h5", ".hdf5"}:
+            if not name.endswith("_averaged"):
+                name += "_averaged"
+            return str(path_obj.with_name(name + path_obj.suffix))
+
+        if not name.endswith("_averaged"):
+            name += "_averaged"
+        return str(path_obj.with_name(name))
 
     def update_status(self):
         if not self.sources:

@@ -51,6 +51,7 @@ from .ui_style import (
     MATPLOTLIB_TOOLBAR_MAX_HEIGHT,
     PAGE_MARGINS,
 )
+from .ui_style import make_matplotlib_toolbar_block
 
 
 # ============================================================
@@ -304,72 +305,7 @@ class DatPlotTab(QWidget):
         save_tooltip="Save",
         toolbar_width=340,
     ):
-        toolbar_box = QGroupBox(title)
-        toolbar_box.setFixedHeight(78)
-        self.style_top_group_box(toolbar_box)
-
-        toolbar_layout = QVBoxLayout(toolbar_box)
-        toolbar_layout.setContentsMargins(6, 0, 6, 2)
-        toolbar_layout.setSpacing(0)
-
-        # Set icon size using scaling factor, like View 2D toolbar
-        toolbar.setIconSize(toolbar.iconSize() * MATPLOTLIB_TOOLBAR_ICON_SCALE)
-        toolbar.setFixedHeight(MATPLOTLIB_TOOLBAR_MAX_HEIGHT)
-        toolbar.setFixedWidth(toolbar_width)
-        toolbar.setContentsMargins(0, 0, 0, 0)
-        toolbar.coordinates = False
-        toolbar.setStyleSheet("""
-            QToolBar {
-                background: #f4f4f4;
-                background-color: #f4f4f4;
-                border: none;
-            }
-            QToolButton {
-                background: transparent;
-                background-color: transparent;
-            }
-        """)
-
-        for action in list(toolbar.actions()):
-            text = action.text().lower()
-            if action.isSeparator() or text in ["save", "save the figure", "save image only"]:
-                toolbar.removeAction(action)
-
-        toolbar_extra_layout = QHBoxLayout()
-        toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
-        toolbar_extra_layout.setSpacing(8)
-        toolbar_extra_layout.addWidget(toolbar, stretch=0, alignment=Qt.AlignVCenter)
-        toolbar_extra_layout.addStretch(1)
-
-        if option_widgets:
-            for widget in option_widgets:
-                toolbar_extra_layout.addWidget(widget, stretch=0, alignment=Qt.AlignVCenter)
-
-        save_button = None
-        if save_callback is not None:
-            save_button = QToolButton()
-            save_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
-            save_button.setToolTip(save_tooltip)
-            save_button.setFixedSize(
-                MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8,
-                MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8,
-            )
-            save_button.setIconSize(toolbar.iconSize() * 1.25)
-            save_button.clicked.connect(save_callback)
-            save_button.setStyleSheet("""
-                QToolButton {
-                    background: transparent;
-                    background-color: transparent;
-                    border: none;
-                    padding: 0px;
-                    margin: 0px;
-                }
-            """)
-            toolbar_extra_layout.addWidget(save_button, stretch=0, alignment=Qt.AlignVCenter)
-
-        toolbar_layout.addLayout(toolbar_extra_layout)
-
-        return toolbar_box, toolbar_extra_layout, save_button
+        return make_matplotlib_toolbar_block(self, title, toolbar, option_widgets=option_widgets, save_callback=save_callback, save_tooltip=save_tooltip, toolbar_width=toolbar_width)
 
     def build_ui(self):
         main_layout = QVBoxLayout(self)

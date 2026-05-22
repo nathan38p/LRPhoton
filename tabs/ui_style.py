@@ -1,3 +1,7 @@
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QToolButton, QStyle
+
+
 GROUP_BOX_STYLE = """
     QGroupBox {
         background-color: #f4f4f4;
@@ -63,3 +67,119 @@ FRAME_COUNTER_WIDTH = 56
 FILE_BROWSER_WIDTH = 320
 MATPLOTLIB_TOOLBAR_ICON_SCALE = 0.8
 MATPLOTLIB_TOOLBAR_MAX_HEIGHT = 42
+
+
+def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, save_callback=None, save_tooltip="Save", toolbar_width=340):
+    toolbar_box = QGroupBox(title)
+    toolbar_box.setFixedHeight(78)
+    try:
+        toolbar_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
+    except Exception:
+        pass
+
+    toolbar_layout = QVBoxLayout(toolbar_box)
+    toolbar_layout.setContentsMargins(6, 0, 6, 2)
+    toolbar_layout.setSpacing(0)
+
+    try:
+        orig_icon_size = toolbar.iconSize()
+        if hasattr(orig_icon_size, 'width') and orig_icon_size.width() > 0:
+            toolbar_icon_size = QSize(
+                max(1, int(orig_icon_size.width() * MATPLOTLIB_TOOLBAR_ICON_SCALE)),
+                max(1, int(orig_icon_size.height() * MATPLOTLIB_TOOLBAR_ICON_SCALE)),
+            )
+        else:
+            toolbar_icon_size = QSize(24, 24)
+    except Exception:
+        toolbar_icon_size = QSize(24, 24)
+    toolbar_button_size = QSize(32, 32)
+    save_button_size = QSize(MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8, MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8)
+    save_icon_size = QSize(30, 30)
+
+    try:
+        toolbar.setIconSize(toolbar_icon_size)
+    except Exception:
+        pass
+    try:
+        toolbar.setFixedHeight(MATPLOTLIB_TOOLBAR_MAX_HEIGHT)
+        toolbar.setFixedWidth(toolbar_width)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+    except Exception:
+        pass
+
+    toolbar.coordinates = False
+    toolbar.setStyleSheet("""
+        QToolBar {
+            background: #f4f4f4;
+            background-color: #f4f4f4;
+            border: none;
+            spacing: 6px;
+        }
+        QToolButton {
+            background: transparent;
+            background-color: transparent;
+            border: none;
+            padding: 0px;
+            margin: 0px;
+            min-width: 32px;
+            max-width: 32px;
+            min-height: 32px;
+            max-height: 32px;
+        }
+    """)
+
+    for action in list(toolbar.actions()):
+        try:
+            text = action.text().lower()
+        except Exception:
+            text = ""
+        if action.isSeparator() or text in ["save", "save the figure", "save image only"]:
+            try:
+                toolbar.removeAction(action)
+            except Exception:
+                pass
+
+    for action in toolbar.actions():
+        widget = toolbar.widgetForAction(action)
+        if isinstance(widget, QToolButton):
+            try:
+                widget.setFixedSize(toolbar_button_size)
+                widget.setIconSize(toolbar_icon_size)
+            except Exception:
+                pass
+
+    toolbar_extra_layout = QHBoxLayout()
+    toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
+    toolbar_extra_layout.setSpacing(8)
+    toolbar_extra_layout.addWidget(toolbar, stretch=0, alignment=Qt.AlignVCenter)
+    toolbar_extra_layout.addStretch(1)
+
+    if option_widgets:
+        for widget in option_widgets:
+            toolbar_extra_layout.addWidget(widget, stretch=0, alignment=Qt.AlignVCenter)
+
+    save_button = None
+    if save_callback is not None:
+        save_button = QToolButton(parent)
+        save_button.setIcon(parent.style().standardIcon(QStyle.SP_DialogSaveButton))
+        save_button.setToolTip(save_tooltip)
+        save_button.setFixedSize(save_button_size)
+        save_button.setIconSize(save_icon_size)
+        try:
+            save_button.clicked.connect(save_callback)
+        except Exception:
+            pass
+        save_button.setStyleSheet("""
+            QToolButton {
+                background: transparent;
+                background-color: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }
+        """)
+        toolbar_extra_layout.addWidget(save_button, stretch=0, alignment=Qt.AlignVCenter)
+
+    toolbar_layout.addLayout(toolbar_extra_layout)
+
+    return toolbar_box, toolbar_extra_layout, save_button

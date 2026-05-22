@@ -455,8 +455,6 @@ class ImageCanvas(FigureCanvas):
                         else:
                             intensity_text = " | I = NaN"
 
-                dx_text = ""
-                dy_text = ""
                 r_text = ""
 
                 try:
@@ -468,15 +466,13 @@ class ImageCanvas(FigureCanvas):
                         dx = x - parent.edit_xc.value()
                         dy = y - parent.edit_yc.value()
                         r = np.sqrt(dx ** 2 + dy ** 2)
-                        dx_text = f" | Δx = {dx:.2f}"
-                        dy_text = f" | Δy = {dy:.2f}"
                         r_text = f" | r = {r:.2f} px"
                 except Exception:
                     pass
 
-                self.coordinate_label.setText(f"x = {x} | y = {y}{dx_text}{dy_text}{r_text}{intensity_text}")
+                self.coordinate_label.setText(f"x = {x} | y = {y}{r_text}{intensity_text}")
             else:
-                self.coordinate_label.setText("x = - | y = - | Δx = - | Δy = - | r = - | I = -")
+                self.coordinate_label.setText("x = - | y = - | r = - | I = -")
 
         if not self._dragging or event.inaxes != self.ax:
             return

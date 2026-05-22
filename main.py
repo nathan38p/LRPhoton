@@ -611,15 +611,12 @@ class MainWindow(QMainWindow):
                 self.available_update_sha = None
                 return
 
-            self.set_update_button_state("available", f"Update available: {short_sha}")
+            self.set_update_button_state("available", f"Update available")
 
             box = QMessageBox(self)
             box.setWindowTitle("Update available")
             box.setIcon(QMessageBox.Information)
             box.setText("A new version of LRPhoton is available.")
-            box.setInformativeText(
-                "Install the update now or choose Not Now to continue."
-            )
             box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             box.button(QMessageBox.Yes).setText("Install")
             box.button(QMessageBox.No).setText("Not Now")

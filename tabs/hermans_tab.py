@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QLineEdit,
     QSizePolicy,
+    QStackedLayout,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -792,9 +793,16 @@ class HermansTab(QWidget):
         image_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         image_layout.setSpacing(6)
         self.image_column_layout.addWidget(self.image_box, stretch=1)
-        graph_content_layout.addWidget(self.image_column, stretch=0)
 
-        graph_content_layout.addWidget(self.right_panel, stretch=0)
+        self.side_panel = QWidget()
+        self.side_panel.setFixedWidth(FILE_BROWSER_WIDTH)
+        self.side_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.side_layout = QStackedLayout(self.side_panel)
+        self.side_layout.setContentsMargins(0, 0, 0, 0)
+        self.side_layout.setSpacing(0)
+        self.side_layout.addWidget(self.right_panel)
+        self.side_layout.addWidget(self.image_column)
+        graph_content_layout.addWidget(self.side_panel, stretch=0)
 
         content_layout.addWidget(graph_wrapper, stretch=1)
 
@@ -859,6 +867,7 @@ class HermansTab(QWidget):
             "Anisotropy factor (Iv - Ih) / (Iv + Ih)",
         ])
         self.parameter_selector.currentIndexChanged.connect(self.parameter_mode_changed)
+        self.parameter_selector.setCurrentIndex(1)
 
         mode_layout.addWidget(QLabel("Parameter:"), 0, 0)
         mode_layout.addWidget(self.parameter_selector, 0, 1)
@@ -1226,8 +1235,7 @@ class HermansTab(QWidget):
         anisotropy_mode = self.is_anisotropy_mode()
 
         if anisotropy_mode:
-            self.right_panel.setVisible(False)
-            self.image_column.setVisible(True)
+            self.side_layout.setCurrentWidget(self.image_column)
 
             self.move_widget_to_layout(self.mode_box, self.image_column_layout, stretch=0)
             self.image_column_layout.removeWidget(self.mode_box)
@@ -1240,8 +1248,7 @@ class HermansTab(QWidget):
 
             self.move_widget_to_layout(self.params_box, self.center_column_layout, stretch=0)
         else:
-            self.right_panel.setVisible(True)
-            self.image_column.setVisible(False)
+            self.side_layout.setCurrentWidget(self.right_panel)
 
             self.move_widget_to_layout(self.mode_box, self.right_layout, stretch=0)
             self.mode_box.setVisible(True)
@@ -1255,7 +1262,6 @@ class HermansTab(QWidget):
         anisotropy_mode = self.is_anisotropy_mode()
 
         self.graph_box.setTitle("I(q) profiles" if anisotropy_mode else "Azimuthal profile")
-        self.image_column.setVisible(anisotropy_mode)
         self.image_box.setVisible(anisotropy_mode)
 
         hermans_widgets = [
