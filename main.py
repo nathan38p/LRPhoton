@@ -11,8 +11,7 @@ from pathlib import Path
 
 import requests
 
-from PySide6.QtSvgWidgets import QSvgWidget
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSize
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,9 +26,12 @@ from PySide6.QtWidgets import (
     QWidget
 )
 
+from PySide6.QtGui import QColor, QPainter, QPixmap
+
 from tabs.view_tab import ViewTab
 from tabs.centre_tab import CentreTab
 from tabs.cave_tab import CaveTab
+from tabs.average_tab import AverageTab
 from tabs.radial_tab import RadialTab
 from tabs.azimuthal_tab import AzimuthalTab
 from tabs.unfold_tab import UnfoldTab
@@ -37,7 +39,7 @@ from tabs.hermans_tab import HermansTab
 from tabs.datplot_tab import DatPlotTab
 
 
-APP_NAME = "LRPhoton 1"
+APP_NAME = "LRPhoton"
 APP_VERSION = "1.0.2"
 # update test
 GITHUB_OWNER = "nathan38p"
@@ -46,6 +48,47 @@ GITHUB_BRANCH = "main"
 UPDATE_INFO_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits/{GITHUB_BRANCH}"
 SOURCE_ZIP_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
 LOCAL_VERSION_FILE = Path(__file__).resolve().parent / ".lrphoton_commit"
+
+class ColoredTabBar(QTabBar):
+    TAB_COLORS = {
+        0: ("#dbeafe", "#2563eb"),  # View 2D
+        1: ("#dbeafe", "#2563eb"),  # Plot 1D
+        2: ("#fee2e2", "#dc2626"),  # Center
+        3: ("#fee2e2", "#dc2626"),  # Average
+        4: ("#fee2e2", "#dc2626"),  # Cave
+        5: ("#fee2e2", "#dc2626"),  # Unfold
+        6: ("#dcfce7", "#16a34a"),  # Radial
+        7: ("#dcfce7", "#16a34a"),  # Azimuthal
+        8: ("#f3e8ff", "#9333ea"),  # Anisotropy
+    }
+
+    def tabSizeHint(self, index):
+        size = super().tabSizeHint(index)
+        return QSize(size.width() + 10, size.height() + 2)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        for index in range(self.count()):
+            rect = self.tabRect(index).adjusted(1, 1, -1, -1)
+            pastel_color, selected_color = self.TAB_COLORS.get(index, ("#eeeeee", "#007aff"))
+            selected = index == self.currentIndex()
+            enabled = self.isTabEnabled(index)
+
+            background = QColor(selected_color if selected else pastel_color)
+            text_color = QColor("#ffffff" if selected else "#222222")
+
+            if not enabled:
+                background = QColor("#f5f5f5")
+                text_color = QColor("#9a9a9a")
+
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(rect, 8, 8)
+
+            painter.setPen(text_color)
+            painter.drawText(rect, Qt.AlignCenter, self.tabText(index))
 
 
 class MainWindow(QMainWindow):
@@ -67,11 +110,20 @@ class MainWindow(QMainWindow):
         header = QFrame()
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(8, 0, 8, 0)
-        header_layout.setSpacing(20)
+        header_layout.setSpacing(12)
 
-        logo_path = Path(__file__).parent / "assets" / "LRP.svg"
+        logo_path = Path(__file__).parent / "assets" / "LRPhoton.png"
 
-        logo = QSvgWidget(str(logo_path))
+        logo = QLabel()
+        logo_pixmap = QPixmap(str(logo_path))
+        logo.setPixmap(
+            logo_pixmap.scaled(
+                42,
+                42,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        )
         logo.setFixedSize(42, 42)
 
         title = QLabel(APP_NAME)
@@ -104,18 +156,19 @@ class MainWindow(QMainWindow):
         # TAB BAR IN HEADER
         # ============================================================
 
-        self.tab_bar = QTabBar()
+        self.tab_bar = ColoredTabBar()
         self.tab_bar.setExpanding(False)
         self.tab_bar.setMovable(False)
         self.tab_bar.setUsesScrollButtons(True)
 
-        self.tab_bar.addTab("View")
-        self.tab_bar.addTab("Plot")
-        self.tab_bar.addTab("Centre")
+        self.tab_bar.addTab("View 2D")
+        self.tab_bar.addTab("Plot 1D")
+        self.tab_bar.addTab("Center")
+        self.tab_bar.addTab("Average")
         self.tab_bar.addTab("Cave")
+        self.tab_bar.addTab("Unfold")
         self.radial_tab_index = self.tab_bar.addTab("Radial")
         self.tab_bar.addTab("Azimuthal")
-        self.tab_bar.addTab("Unfold")
         self.tab_bar.addTab("Anisotropy")
 
         header_layout.addStretch()
@@ -146,6 +199,7 @@ class MainWindow(QMainWindow):
         self.datplot_tab = DatPlotTab()
         self.centre_tab = CentreTab()
         self.cave_tab = CaveTab()
+        self.average_tab = AverageTab()
         self.radial_tab = RadialTab()
         self.azimuthal_tab = AzimuthalTab()
         self.unfold_tab = UnfoldTab()
@@ -156,10 +210,11 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.view_tab)
         self.pages.addWidget(self.datplot_tab)
         self.pages.addWidget(self.centre_tab)
+        self.pages.addWidget(self.average_tab)
         self.pages.addWidget(self.cave_tab)
+        self.pages.addWidget(self.unfold_tab)
         self.pages.addWidget(self.radial_tab)
         self.pages.addWidget(self.azimuthal_tab)
-        self.pages.addWidget(self.unfold_tab)
         self.pages.addWidget(self.hermans_tab)
 
         # Folder synchronisation between tabs using a folder browser.
@@ -493,16 +548,22 @@ def main():
 
         QGroupBox {
             background-color: #f4f4f4;
-            border: none;
+            border: 0px;
             border-radius: 10px;
             margin-top: 14px;
             padding: 4px;
+            font-family: Arial;
+            font-size: 12px;
         }
 
         QGroupBox::title {
             subcontrol-origin: margin;
+            subcontrol-position: top left;
             left: 8px;
             padding: 0px 4px;
+            color: #222222;
+            font-family: Arial;
+            font-size: 12px;
         }
 
         QTabBar::tab {

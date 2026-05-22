@@ -7,9 +7,9 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QStyle,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -18,6 +18,10 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from .view_tab import ViewTab
+from .ui_style import (
+    MATPLOTLIB_TOOLBAR_ICON_SCALE,
+    MATPLOTLIB_TOOLBAR_MAX_HEIGHT,
+)
 
 
 class UnfoldTab(ViewTab):
@@ -29,42 +33,114 @@ class UnfoldTab(ViewTab):
         self._configure_unfold_right_panel()
 
     def _configure_unfold_toolbar(self):
-        self.unfold_save_button = QPushButton("Save")
-        self.unfold_save_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
-        self.unfold_save_button.clicked.connect(self.save_png_image_only)
+        self.toolbar.coordinates = False
+        self.toolbar.setIconSize(self.toolbar.iconSize() * MATPLOTLIB_TOOLBAR_ICON_SCALE)
+        self.toolbar.setFixedHeight(MATPLOTLIB_TOOLBAR_MAX_HEIGHT)
+        self.toolbar.setFixedWidth(340)
+        self.toolbar.setContentsMargins(0, 0, 0, 0)
+        self.toolbar.setStyleSheet("""
+            QToolBar {
+                background: #f4f4f4;
+                background-color: #f4f4f4;
+                border: none;
+            }
+            QToolButton {
+                background: transparent;
+                background-color: transparent;
+            }
+        """)
 
         for action in list(self.toolbar.actions()):
-            if action.text() == "Save image only":
+            text = action.text().strip().lower()
+            tooltip = action.toolTip().strip().lower()
+            icon_text = action.iconText().strip().lower()
+            if (
+                action.isSeparator()
+                or "save" in text
+                or "save" in tooltip
+                or "save" in icon_text
+            ):
                 self.toolbar.removeAction(action)
+
+        self.unfold_save_button = QToolButton()
+        self.unfold_save_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+        self.unfold_save_button.setToolTip("Save image only")
+        self.unfold_save_button.setFixedSize(
+            MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 10,
+            MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 10,
+        )
+        self.unfold_save_button.setIconSize(self.toolbar.iconSize() * 1.25)
+        self.unfold_save_button.setStyleSheet("""
+            QToolButton {
+                background: transparent;
+                background-color: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }
+        """)
+        self.unfold_save_button.clicked.connect(self.save_png_image_only)
+
+        if hasattr(self, "save_colorbar_checkbox"):
+            self.save_colorbar_checkbox.setText("Save colorbar")
+            self.save_colorbar_checkbox.setEnabled(True)
+            self.save_colorbar_checkbox.setVisible(True)
+            self.save_colorbar_checkbox.setStyleSheet("")
+
+        widgets_to_keep = {
+            self.toolbar,
+            self.log_checkbox,
+            self.keep_ratio_checkbox,
+            self.keep_zoom_checkbox,
+            self.save_colorbar_checkbox,
+            self.unfold_save_button,
+        }
+
+        for old_save_button_name in ["save_button", "save_image_button", "view_save_button"]:
+            old_save_button = getattr(self, old_save_button_name, None)
+            if old_save_button is not None and old_save_button is not self.unfold_save_button:
+                old_save_button.hide()
+                old_save_button.setParent(None)
+
+        while self.toolbar_extra_layout.count():
+            item = self.toolbar_extra_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None and widget not in widgets_to_keep:
+                widget.hide()
+                widget.setParent(None)
+
+        self.toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
+        self.toolbar_extra_layout.setSpacing(8)
+        self.toolbar_extra_layout.addWidget(self.toolbar, stretch=0, alignment=Qt.AlignVCenter)
+        self.toolbar_extra_layout.addStretch(1)
 
         for widget in [
             self.log_checkbox,
             self.keep_ratio_checkbox,
             self.keep_zoom_checkbox,
+            self.save_colorbar_checkbox,
         ]:
-            self.toolbar_extra_layout.addWidget(widget, stretch=0)
+            self.toolbar_extra_layout.addWidget(widget, stretch=0, alignment=Qt.AlignVCenter)
 
-        self.toolbar_extra_layout.addStretch()
-        self.toolbar_extra_layout.addWidget(self.unfold_save_button, stretch=0)
-
-        if hasattr(self, "save_colorbar_checkbox"):
-            self.save_colorbar_checkbox.hide()
+        self.toolbar_extra_layout.addWidget(self.unfold_save_button, stretch=0, alignment=Qt.AlignVCenter)
 
     def _configure_unfold_right_panel(self):
         self.info_box.setTitle("Parameters")
         self.info_text.hide()
         self._reorder_instrument_buttons()
 
-        self.display_box.setTitle("Pattern")
-        self._clear_layout(self.display_box_layout)
+        self.display_box = QGroupBox("Pattern")
+        self.display_box.setStyleSheet(self.panel_box_style)
+        self.display_box_layout = QVBoxLayout(self.display_box)
+        self.display_box_layout.setContentsMargins(10, 22, 10, 10)
+        self.display_box_layout.setSpacing(12)
         self._build_pattern_panel()
 
         self._build_geometry_fields()
 
         self.right_layout.removeWidget(self.info_box)
-        self.right_layout.removeWidget(self.display_box)
-        self.right_layout.insertWidget(0, self.display_box, stretch=1)
-        self.right_layout.insertWidget(1, self.info_box, stretch=0)
+        self.right_layout.insertWidget(0, self.info_box, stretch=0)
+        self.right_layout.insertWidget(1, self.display_box, stretch=1)
 
         self.autoscale_button.setText("Auto")
         self.autoscale_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -77,8 +153,8 @@ class UnfoldTab(ViewTab):
     def _reorder_instrument_buttons(self):
         buttons = [
             self.q_xenocs_button,
-            self.q_id13_button,
             self.q_id02_button,
+            self.q_id13_button,
             self.q_custom_button,
             self.q_manual_button,
         ]
@@ -115,8 +191,8 @@ class UnfoldTab(ViewTab):
 
         self.geometry_fields = {}
         labels = [
-            ("xc", "Centre X"),
-            ("yc", "Centre Y"),
+            ("xc", "Center X"),
+            ("yc", "Center Y"),
             ("distance_m", "Distance (m)"),
             ("pixel_x_mm", "Pixel X (mm)"),
             ("pixel_y_mm", "Pixel Y (mm)"),

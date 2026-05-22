@@ -33,6 +33,16 @@ from .instrument_presets import (
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
 )
+from .ui_style import (
+    BLOCK_SPACING,
+    FILE_BROWSER_WIDTH,
+    FRAME_BUTTON_WIDTH,
+    FRAME_COUNTER_WIDTH,
+    FRAME_NAV_SPACING,
+    FRAME_SPIN_WIDTH,
+    GROUP_BOX_MARGINS,
+    PAGE_MARGINS,
+)
 
 
 # ============================================================
@@ -687,16 +697,17 @@ class CaveTab(QWidget):
 
     def build_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(*PAGE_MARGINS)
+        main_layout.setSpacing(BLOCK_SPACING)
 
         top_layout = QHBoxLayout()
-        top_layout.setSpacing(8)
-        main_layout.addLayout(top_layout)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(BLOCK_SPACING)
+        main_layout.addLayout(top_layout, stretch=1)
 
         original_box = QGroupBox("Original pattern")
         original_layout = QVBoxLayout(original_box)
-        original_layout.setContentsMargins(6, 18, 6, 6)
+        original_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         self.canvas_original = ImageCanvas()
         self.original_coordinate_label = QLabel("Original | x = - | y = - | I = -")
         self.original_coordinate_label.setMinimumHeight(28)
@@ -716,13 +727,14 @@ class CaveTab(QWidget):
         original_layout.addWidget(self.original_coordinate_label, stretch=0)
 
         controls_box = QGroupBox("Cave tools")
+        controls_box.setFixedWidth(FILE_BROWSER_WIDTH)
         controls_layout = QVBoxLayout(controls_box)
-        controls_layout.setContentsMargins(8, 18, 8, 8)
+        controls_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         controls_layout.setSpacing(6)
 
         cave_box = QGroupBox("Cave-filled pattern")
         cave_layout = QVBoxLayout(cave_box)
-        cave_layout.setContentsMargins(6, 18, 6, 6)
+        cave_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         self.canvas_cave = ImageCanvas()
         self.cave_coordinate_label = QLabel("Cave | x = - | y = - | I = -")
         self.cave_coordinate_label.setMinimumHeight(28)
@@ -744,6 +756,9 @@ class CaveTab(QWidget):
         top_layout.addWidget(original_box, stretch=1)
         top_layout.addWidget(controls_box, stretch=0)
         top_layout.addWidget(cave_box, stretch=1)
+        top_layout.setStretch(0, 1)
+        top_layout.setStretch(1, 0)
+        top_layout.setStretch(2, 1)
 
         self.open_button = QPushButton("Open EDF / H5")
         self.open_button.clicked.connect(self.open_file)
@@ -777,8 +792,8 @@ class CaveTab(QWidget):
         self.beamstop_y_spin.setDecimals(0)
         self.beamstop_y_spin.setValue(1376)
 
-        self.centre_x_label = QLabel("Centre X:")
-        self.centre_y_label = QLabel("Centre Y:")
+        self.centre_x_label = QLabel("Center X:")
+        self.centre_y_label = QLabel("Center Y:")
 
         form_layout = QGridLayout()
         form_layout.addWidget(self.centre_x_label, 0, 0)
@@ -822,7 +837,7 @@ class CaveTab(QWidget):
 
         intensity_box = QGroupBox("Display intensity")
         intensity_layout = QGridLayout(intensity_box)
-        intensity_layout.setContentsMargins(6, 18, 6, 6)
+        intensity_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         intensity_layout.setSpacing(4)
 
         self.vmin_slider = QSlider(Qt.Horizontal)
@@ -856,7 +871,7 @@ class CaveTab(QWidget):
 
         self.status = QTextEdit()
         self.status.setReadOnly(True)
-        self.status.setPlaceholderText("Cave processing information will appear here.")
+        self.status.setPlaceholderText("")
         controls_layout.addWidget(self.status, stretch=1)
 
         self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
@@ -876,21 +891,25 @@ class CaveTab(QWidget):
 
         frame_nav = QHBoxLayout()
         frame_nav.setContentsMargins(0, 0, 0, 0)
-        frame_nav.setSpacing(6)
+        frame_nav.setSpacing(FRAME_NAV_SPACING)
 
         self.frame_start_spin = QSpinBox()
         self.frame_start_spin.setRange(1, 1)
         self.frame_start_spin.setValue(1)
+        self.frame_start_spin.setFixedWidth(FRAME_SPIN_WIDTH)
         self.frame_end_spin = QSpinBox()
         self.frame_end_spin.setRange(1, 1)
         self.frame_end_spin.setValue(1)
+        self.frame_end_spin.setFixedWidth(FRAME_SPIN_WIDTH)
         self.prev_frame_button = QPushButton("<")
         self.next_frame_button = QPushButton(">")
-        self.prev_frame_button.setFixedWidth(44)
-        self.next_frame_button.setFixedWidth(44)
+        self.prev_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
+        self.next_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
         self.frame_counter_label = QLabel("1 / 1")
+        self.frame_counter_label.setMinimumWidth(FRAME_COUNTER_WIDTH)
+        self.frame_counter_label.setAlignment(Qt.AlignCenter)
 
-        frame_nav.addWidget(QLabel("From:"))
+        frame_nav.addWidget(QLabel("Start:"))
         frame_nav.addWidget(self.frame_start_spin)
         frame_nav.addWidget(self.prev_frame_button)
         self.frame_slider = QSlider(Qt.Horizontal)
@@ -898,10 +917,10 @@ class CaveTab(QWidget):
         self.frame_slider.setValue(1)
         frame_nav.addWidget(self.frame_slider, stretch=1)
         frame_nav.addWidget(self.next_frame_button)
-        frame_nav.addWidget(QLabel("To:"))
+        frame_nav.addWidget(QLabel("End:"))
         frame_nav.addWidget(self.frame_end_spin)
         frame_nav.addWidget(self.frame_counter_label)
-        main_layout.addLayout(frame_nav)
+        main_layout.addLayout(frame_nav, stretch=0)
 
         self.frame_start_spin.valueChanged.connect(self.update_frame_bounds)
         self.frame_end_spin.valueChanged.connect(self.update_frame_bounds)
@@ -1011,8 +1030,8 @@ class CaveTab(QWidget):
         self.refresh_preview()
 
     def update_centre_warning_labels(self):
-        self.centre_x_label.setText("Centre X:")
-        self.centre_y_label.setText("Centre Y:")
+        self.centre_x_label.setText("Center X:")
+        self.centre_y_label.setText("Center Y:")
 
     def update_beamstop_visibility(self):
         is_id13 = self.instrument_mode == "ID13"
@@ -1029,18 +1048,8 @@ class CaveTab(QWidget):
         self.id13_beamstop_checkbox.blockSignals(False)
 
     def update_frame_selector_visibility(self):
-        is_multiframe_h5 = self.file_type == "H5" and self.h5_n_frames > 1
-
         self.frame_label.setVisible(False)
         self.frame_spin.setVisible(False)
-        self.frame_spin.setEnabled(is_multiframe_h5)
-        self.frame_start_spin.setVisible(is_multiframe_h5)
-        self.frame_end_spin.setVisible(is_multiframe_h5)
-        self.frame_slider.setVisible(is_multiframe_h5)
-        self.prev_frame_button.setVisible(is_multiframe_h5)
-        self.next_frame_button.setVisible(is_multiframe_h5)
-        self.frame_counter_label.setVisible(is_multiframe_h5)
-
         self.update_frame_counter()
 
     def configure_frame_navigation(self, n_frames):
@@ -1110,11 +1119,16 @@ class CaveTab(QWidget):
         total = max(1, self.h5_n_frames)
         self.frame_counter_label.setText(f"{current} / {total}")
         if hasattr(self, "prev_frame_button"):
+            can_navigate = self.file_type == "H5" and total > 1
+            self.frame_spin.setEnabled(can_navigate)
+            self.frame_start_spin.setEnabled(can_navigate)
+            self.frame_end_spin.setEnabled(can_navigate)
+            self.frame_slider.setEnabled(can_navigate)
             self.frame_slider.blockSignals(True)
             self.frame_slider.setValue(current)
             self.frame_slider.blockSignals(False)
-            self.prev_frame_button.setEnabled(self.file_type == "H5" and current > self.frame_start_spin.value())
-            self.next_frame_button.setEnabled(self.file_type == "H5" and current < self.frame_end_spin.value())
+            self.prev_frame_button.setEnabled(can_navigate and current > self.frame_start_spin.value())
+            self.next_frame_button.setEnabled(can_navigate and current < self.frame_end_spin.value())
 
     def previous_frame(self):
         self.frame_spin.setValue(max(self.frame_start_spin.value(), self.frame_spin.value() - 1))

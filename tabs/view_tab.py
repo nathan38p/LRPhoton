@@ -6,7 +6,7 @@ import hdf5plugin
 import numpy as np
 import matplotlib.pyplot as plt
 
-from PySide6.QtCore import Qt, QEvent, QSettings, QSize, Signal
+from PySide6.QtCore import Qt, QEvent, QSettings, Signal, QSize
 
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMessageBox
@@ -26,13 +26,14 @@ from PySide6.QtWidgets import (
     QSlider,
     QCheckBox,
     QDoubleSpinBox,
-    QSplitter,
     QMessageBox,
     QGroupBox,
     QSpinBox,
     QStyle,
     QDialog,
     QDialogButtonBox,
+    QSizePolicy,
+    QToolButton,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -46,34 +47,50 @@ from .instrument_presets import (
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
 )
+from .ui_style import (
+    BLOCK_SPACING,
+    FILE_BROWSER_WIDTH,
+    FRAME_BUTTON_WIDTH,
+    FRAME_COUNTER_WIDTH,
+    FRAME_NAV_SPACING,
+    FRAME_SPIN_WIDTH,
+    GROUP_BOX_MARGINS,
+    MATPLOTLIB_TOOLBAR_ICON_SCALE,
+    MATPLOTLIB_TOOLBAR_MAX_HEIGHT,
+    GROUP_BOX_STYLE,
+    PAGE_MARGINS,
+    PANEL_MARGINS,
+    TOOL_GROUP_BOX_STYLE,
+)
 
 
 class ImageOnlyToolbar(NavigationToolbar):
 
     def __init__(self, canvas, parent):
-
         super().__init__(canvas, parent)
-
+        self.view_tab = parent
         save_icon = parent.style().standardIcon(QStyle.SP_DialogSaveButton)
         save_image_action = QAction(save_icon, "Save image only", self)
         save_image_action.setToolTip("Save image only")
         save_image_action.triggered.connect(parent.save_png_image_only)
 
-        self.addSeparator()
-
-        self.addAction(save_image_action)
 
     def save_figure(self, *args):
-
-        view_tab = self.parent()
-
+        view_tab = getattr(self, "view_tab", None)
         if hasattr(view_tab, "save_png_image_only"):
-
             view_tab.save_png_image_only()
-
         else:
-
             super().save_figure(*args)
+
+
+    def home(self, *args):
+        view_tab = getattr(self, "view_tab", None)
+        if hasattr(view_tab, "reset_image_view"):
+            view_tab.reset_image_view()
+            self.push_current()
+            self.set_history_buttons()
+        else:
+            super().home(*args)
 
 
 class ViewImageCanvas(FigureCanvas):
@@ -191,6 +208,7 @@ class ViewTab(QWidget):
 
         self._saved_xlim = None
         self._saved_ylim = None
+        self._trackpad_view_pushed = False
 
         self.q_geometry_mode = None
         self.q_geometry_source_tab = None
@@ -200,87 +218,143 @@ class ViewTab(QWidget):
 
         self._build_ui()
 
-    def _build_ui(self):
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(2, 2, 2, 2)
-        main_layout.setSpacing(2)
+    def create_matplotlib_toolbar_block(
+        self,
+        title,
+        toolbar,
+        option_widgets=None,
+        save_callback=None,
+        save_tooltip="Save",
+        toolbar_width=340,
+    ):
+        toolbar_box = QGroupBox(title)
+        toolbar_box.setFixedHeight(78)
+        toolbar_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
 
-        splitter = QSplitter(Qt.Horizontal)
-        main_layout.addWidget(splitter)
+        toolbar_layout = QVBoxLayout(toolbar_box)
+        toolbar_layout.setContentsMargins(6, 0, 6, 2)
+        toolbar_layout.setSpacing(0)
+
+        toolbar_icon_size = QSize(24, 24)
+        toolbar_button_size = QSize(32, 32)
+        save_button_size = QSize(MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8, MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8)
+        save_icon_size = QSize(30, 30)
+
+        toolbar.setIconSize(toolbar_icon_size)
+        toolbar.setFixedHeight(MATPLOTLIB_TOOLBAR_MAX_HEIGHT)
+        toolbar.setFixedWidth(toolbar_width)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.coordinates = False
+        toolbar.setStyleSheet("""
+            QToolBar {
+                background: #f4f4f4;
+                background-color: #f4f4f4;
+                border: none;
+                spacing: 6px;
+            }
+            QToolButton {
+                background: transparent;
+                background-color: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+                min-width: 32px;
+                max-width: 32px;
+                min-height: 32px;
+                max-height: 32px;
+            }
+        """)
+
+        for action in list(toolbar.actions()):
+            text = action.text().lower()
+            if action.isSeparator() or text in ["save", "save the figure", "save image only"]:
+                toolbar.removeAction(action)
+
+        for action in toolbar.actions():
+            widget = toolbar.widgetForAction(action)
+            if isinstance(widget, QToolButton):
+                widget.setFixedSize(toolbar_button_size)
+                widget.setIconSize(toolbar_icon_size)
+
+        toolbar_extra_layout = QHBoxLayout()
+        toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_extra_layout.setSpacing(8)
+        toolbar_extra_layout.addWidget(toolbar, stretch=0, alignment=Qt.AlignVCenter)
+        toolbar_extra_layout.addStretch(1)
+
+        if option_widgets:
+            for widget in option_widgets:
+                toolbar_extra_layout.addWidget(widget, stretch=0, alignment=Qt.AlignVCenter)
+
+        save_button = None
+        if save_callback is not None:
+            save_button = QToolButton()
+            save_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+            save_button.setToolTip(save_tooltip)
+            save_button.setFixedSize(save_button_size)
+            save_button.setIconSize(save_icon_size)
+            save_button.clicked.connect(save_callback)
+            save_button.setStyleSheet("""
+                QToolButton {
+                    background: transparent;
+                    background-color: transparent;
+                    border: none;
+                    padding: 0px;
+                    margin: 0px;
+                    min-width: 34px;
+                    max-width: 34px;
+                    min-height: 34px;
+                    max-height: 34px;
+                }
+            """)
+            toolbar_extra_layout.addWidget(save_button, stretch=0, alignment=Qt.AlignVCenter)
+
+        toolbar_layout.addLayout(toolbar_extra_layout)
+
+        return toolbar_box, toolbar_extra_layout, save_button
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(*PAGE_MARGINS)
+        main_layout.setSpacing(BLOCK_SPACING)
+
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(BLOCK_SPACING)
+        main_layout.addLayout(content_layout, stretch=1)
 
         # ============================================================
         # LEFT PANEL
         # ============================================================
 
         left_panel = QWidget()
-        left_panel.setMinimumWidth(280)
-        left_panel.setMaximumWidth(280)
+        left_panel.setFixedWidth(FILE_BROWSER_WIDTH)
 
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(2, 2, 2, 2)
-        left_layout.setSpacing(4)
+        left_layout.setContentsMargins(*PANEL_MARGINS)
+        left_layout.setSpacing(BLOCK_SPACING)
 
-        folder_box = QGroupBox("Folder browser")
-        folder_box.setFixedHeight(86)
-        folder_box.setStyleSheet("""
-            QGroupBox {
-                background-color: #f4f4f4;
-                border: 0px;
-                border-radius: 10px;
-                margin-top: 14px;
-                padding: 4px;
-                font-size: 12px;
-            }
-
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0px 4px;
-                color: #222222;
-                font-size: 12px;
-            }
-
-            QPushButton {
-                background-color: #e2e2e2;
-                border: 0px;
-                border-radius: 5px;
-                padding: 4px;
-            }
-
-            QPushButton:hover {
-                background-color: #d8d8d8;
-            }
-        """)
-        folder_layout = QVBoxLayout(folder_box)
-        folder_layout.setContentsMargins(6, 18, 6, 4)
-        folder_layout.setSpacing(4)
+        file_box = QGroupBox("File browser")
+        file_box.setMinimumHeight(220)
+        file_box.setStyleSheet(GROUP_BOX_STYLE)
+        file_layout = QVBoxLayout(file_box)
+        file_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        file_layout.setSpacing(6)
 
         self.folder_path = QLineEdit(str(self.current_folder))
         self.folder_path.returnPressed.connect(self.refresh_files)
+        file_layout.addWidget(self.folder_path)
 
         browse_button = QPushButton("Browse")
         browse_button.clicked.connect(self.choose_folder)
+        file_layout.addWidget(browse_button)
 
-        folder_layout.addWidget(self.folder_path)
-        folder_layout.addWidget(browse_button)
-
-        filter_box = QGroupBox("File filters")
-        filter_box.setStyleSheet("""
-            QPushButton {
-                background-color: #e2e2e2;
-                border: 0px;
-                border-radius: 5px;
-                padding: 4px;
-            }
-
-            QPushButton:hover {
-                background-color: #d8d8d8;
-            }
-        """)
-        filter_layout = QGridLayout(filter_box)
+        filters_layout = QGridLayout()
 
         self.extension_filter = QLineEdit("*.edf *.h5")
         self.name_filter = QLineEdit("**")
+        self.extension_filter.textChanged.connect(self.refresh_files)
+        self.name_filter.textChanged.connect(self.refresh_files)
 
         self.show_subfolders_checkbox = QCheckBox("Show subfolders")
         self.show_subfolders_checkbox.setChecked(False)
@@ -289,28 +363,23 @@ class ViewTab(QWidget):
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_files)
 
-        filter_layout.addWidget(QLabel("Extensions:"), 0, 0)
-        filter_layout.addWidget(self.extension_filter, 0, 1)
-        filter_layout.addWidget(QLabel("Name:"), 1, 0)
-        filter_layout.addWidget(self.name_filter, 1, 1)
-        filter_layout.addWidget(self.show_subfolders_checkbox, 2, 0, 1, 2)
-        filter_layout.addWidget(refresh_button, 3, 0, 1, 2)
-
-        files_box = QGroupBox("Files")
-        files_layout = QVBoxLayout(files_box)
+        filters_layout.addWidget(QLabel("Name:"), 0, 0)
+        filters_layout.addWidget(self.name_filter, 0, 1)
+        filters_layout.addWidget(QLabel("Extensions:"), 1, 0)
+        filters_layout.addWidget(self.extension_filter, 1, 1)
+        file_layout.addLayout(filters_layout)
+        file_layout.addWidget(self.show_subfolders_checkbox)
+        file_layout.addWidget(refresh_button)
 
         self.file_list = QListWidget()
         self.file_list.currentItemChanged.connect(self.file_selection_changed)
         self.file_list.itemClicked.connect(self.open_selected_file)
         self.file_list.itemDoubleClicked.connect(self.open_selected_file)
+        file_layout.addWidget(self.file_list, stretch=1)
 
-        files_layout.addWidget(self.file_list)
+        left_layout.addWidget(file_box, stretch=1)
 
-        left_layout.addWidget(folder_box)
-        left_layout.addWidget(filter_box)
-        left_layout.addWidget(files_box)
-
-        splitter.addWidget(left_panel)
+        content_layout.addWidget(left_panel, stretch=0)
 
         # ============================================================
         # CENTER PANEL
@@ -318,50 +387,9 @@ class ViewTab(QWidget):
 
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
-        center_layout.setContentsMargins(2, 2, 2, 2)
-        center_layout.setSpacing(4)
+        center_layout.setContentsMargins(*PANEL_MARGINS)
+        center_layout.setSpacing(BLOCK_SPACING)
 
-        toolbar_box = QGroupBox("Image tools")
-        toolbar_box.setFixedHeight(86)
-        toolbar_box.setStyleSheet("""
-            QGroupBox {
-                background-color: #f4f4f4;
-                border: 0px;
-                border-radius: 10px;
-                margin-top: 14px;
-                padding: 4px;
-                font-size: 12px;
-            }
-
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0px 4px;
-                color: #222222;
-                font-size: 12px;
-            }
-
-            QToolBar {
-                background-color: #f4f4f4;
-                border: 0px;
-                spacing: 8px;
-            }
-
-            QToolButton {
-                background-color: #f4f4f4;
-                border: 0px;
-                padding: 4px;
-            }
-
-            QToolButton:hover {
-                background-color: #e5e5e5;
-                border-radius: 5px;
-            }
-        """)
-
-        toolbar_layout = QVBoxLayout(toolbar_box)
-        toolbar_layout.setContentsMargins(6, 22, 6, 8)
-        toolbar_layout.setSpacing(0)
 
         self.fig = Figure()
         self.fig.patch.set_facecolor("white")
@@ -374,30 +402,50 @@ class ViewTab(QWidget):
         self.canvas.setFocus()
 
         self.toolbar = ImageOnlyToolbar(self.canvas, self)
-        self.toolbar.setIconSize(QSize(32, 32))
-        self.toolbar.setFixedHeight(44)
-        self.toolbar.setContentsMargins(0, 0, 0, 0)
-        self.toolbar.coordinates = False
-        # Remove Matplotlib save button for now
-        for action in self.toolbar.actions():
-            if action.text().lower() in ["save", "save the figure"]:
-                self.toolbar.removeAction(action)
+        self.log_checkbox = QCheckBox("Log")
+        self.log_checkbox.setChecked(True)
+        self.log_checkbox.stateChanged.connect(self.update_image)
 
-        self.toolbar_extra_layout = QHBoxLayout()
-        self.toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
-        self.toolbar_extra_layout.setSpacing(8)
-        self.toolbar_extra_layout.addWidget(self.toolbar, stretch=1, alignment=Qt.AlignVCenter)
+        self.keep_ratio_checkbox = QCheckBox("Keep ratio")
+        self.keep_ratio_checkbox.setChecked(True)
+        self.keep_ratio_checkbox.stateChanged.connect(self.update_image)
 
-        toolbar_layout.addLayout(self.toolbar_extra_layout)
+        self.keep_zoom_checkbox = QCheckBox("Keep zoom")
+        self.keep_zoom_checkbox.setChecked(True)
+        self.keep_zoom_checkbox.setToolTip("Keep current zoom and pan when changing file or frame")
+
+        self.save_colorbar_checkbox = QCheckBox("Save colorbar")
+        self.save_colorbar_checkbox.setChecked(
+            self.settings.value("view/save_colorbar", False, type=bool)
+        )
+        self.save_colorbar_checkbox.stateChanged.connect(self.save_colorbar_setting)
+
+        toolbar_box, self.toolbar_extra_layout, self.save_image_button = self.create_matplotlib_toolbar_block(
+            title="Scattering pattern",
+            toolbar=self.toolbar,
+            option_widgets=[
+                self.log_checkbox,
+                self.keep_ratio_checkbox,
+                self.keep_zoom_checkbox,
+                self.save_colorbar_checkbox,
+            ],
+            save_callback=self.save_png_image_only,
+            save_tooltip="Save image only",
+            toolbar_width=340,
+        )
 
         center_layout.addWidget(toolbar_box, alignment=Qt.AlignTop)
 
         image_area = QHBoxLayout()
         image_area.setContentsMargins(0, 0, 0, 0)
         image_area.setSpacing(4)
-        image_area.addWidget(self.canvas)
+        image_area.addWidget(self.canvas, stretch=1)
 
-        slider_box = QVBoxLayout()
+        slider_panel = QWidget()
+        slider_panel.setFixedWidth(110)
+        slider_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+
+        slider_box = QVBoxLayout(slider_panel)
         self.slider_box = slider_box
         slider_box.setContentsMargins(0, 0, 0, 0)
         slider_box.setSpacing(2)
@@ -414,13 +462,43 @@ class ViewTab(QWidget):
         self.min_slider.setValue(0)
         self.min_slider.valueChanged.connect(self.vertical_sliders_changed)
 
-        slider_box.addWidget(QLabel("Max"))
-        slider_box.addWidget(self.max_slider)
-        slider_box.addWidget(QLabel("Min"))
-        slider_box.addWidget(self.min_slider)
+        self.vmin_spin = QDoubleSpinBox()
+        self.vmin_spin.setDecimals(4)
+        self.vmin_spin.setRange(-999999, 999999)
+        self.vmin_spin.setFixedWidth(90)
+        self.vmin_spin.setValue(self.settings.value("view/vmin", 0.0, type=float))
+        self.vmin_spin.valueChanged.connect(self.spin_intensity_changed)
 
-        image_area.addLayout(slider_box)
+        self.vmax_spin = QDoubleSpinBox()
+        self.vmax_spin.setDecimals(4)
+        self.vmax_spin.setRange(-999999, 999999)
+        self.vmax_spin.setFixedWidth(90)
+        self.vmax_spin.setValue(self.settings.value("view/vmax", 5.0, type=float))
+        self.vmax_spin.valueChanged.connect(self.spin_intensity_changed)
+
+        autoscale_button = QPushButton("Auto")
+        self.autoscale_button = autoscale_button
+        autoscale_button.setFixedWidth(90)
+        autoscale_button.clicked.connect(self.auto_intensity)
+
+        max_label = QLabel("Max:")
+        min_label = QLabel("Min:")
+
+        max_label.setAlignment(Qt.AlignCenter)
+        min_label.setAlignment(Qt.AlignCenter)
+
+        slider_box.addWidget(max_label, alignment=Qt.AlignHCenter)
+        slider_box.addWidget(self.vmax_spin, alignment=Qt.AlignHCenter)
+        slider_box.addWidget(self.max_slider, alignment=Qt.AlignHCenter)
+        slider_box.addSpacing(8)
+        slider_box.addWidget(self.min_slider, alignment=Qt.AlignHCenter)
+        slider_box.addWidget(min_label, alignment=Qt.AlignHCenter)
+        slider_box.addWidget(self.vmin_spin, alignment=Qt.AlignHCenter)
+        slider_box.addWidget(autoscale_button, alignment=Qt.AlignHCenter)
+
+        image_area.addWidget(slider_panel, stretch=0, alignment=Qt.AlignRight)
         center_layout.addLayout(image_area)
+
 
         self.cursor_label = QLabel("x = - | y = - | I = -")
         self.cursor_label.setMinimumHeight(28)
@@ -443,11 +521,13 @@ class ViewTab(QWidget):
         self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
 
         nav_layout = QHBoxLayout()
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(FRAME_NAV_SPACING)
 
         self.previous_button = QPushButton("<")
         self.next_button = QPushButton(">")
-        self.previous_button.setFixedWidth(40)
-        self.next_button.setFixedWidth(40)
+        self.previous_button.setFixedWidth(FRAME_BUTTON_WIDTH)
+        self.next_button.setFixedWidth(FRAME_BUTTON_WIDTH)
 
         self.previous_button.clicked.connect(self.previous_image)
         self.next_button.clicked.connect(self.next_image)
@@ -456,12 +536,14 @@ class ViewTab(QWidget):
         self.frame_start_spin.setMinimum(1)
         self.frame_start_spin.setMaximum(1)
         self.frame_start_spin.setValue(1)
+        self.frame_start_spin.setFixedWidth(FRAME_SPIN_WIDTH)
         self.frame_start_spin.valueChanged.connect(self.update_frame_slider_range)
 
         self.frame_end_spin = QSpinBox()
         self.frame_end_spin.setMinimum(1)
         self.frame_end_spin.setMaximum(1)
         self.frame_end_spin.setValue(1)
+        self.frame_end_spin.setFixedWidth(FRAME_SPIN_WIDTH)
         self.frame_end_spin.valueChanged.connect(self.update_frame_slider_range)
 
         self.frame_slider = QSlider(Qt.Horizontal)
@@ -470,105 +552,43 @@ class ViewTab(QWidget):
         self.frame_slider.valueChanged.connect(self.slider_changed)
 
         self.frame_label = QLabel("0 / 0")
+        self.frame_label.setMinimumWidth(FRAME_COUNTER_WIDTH)
+        self.frame_label.setAlignment(Qt.AlignCenter)
 
-        nav_layout.addWidget(QLabel("From:"))
+        nav_layout.addWidget(QLabel("Start:"))
         nav_layout.addWidget(self.frame_start_spin)
 
         nav_layout.addWidget(self.previous_button)
-        nav_layout.addWidget(self.frame_slider)
+        nav_layout.addWidget(self.frame_slider, stretch=1)
         nav_layout.addWidget(self.next_button)
 
-        nav_layout.addWidget(QLabel("To:"))
+        nav_layout.addWidget(QLabel("End:"))
         nav_layout.addWidget(self.frame_end_spin)
         nav_layout.addWidget(self.frame_label)
 
-        display_layout = QHBoxLayout()
 
-        self.log_checkbox = QCheckBox("Log")
-        self.log_checkbox.setChecked(True)
-        self.log_checkbox.stateChanged.connect(self.update_image)
-
-        self.keep_ratio_checkbox = QCheckBox("Keep ratio")
-        self.keep_ratio_checkbox.setChecked(True)
-        self.keep_ratio_checkbox.stateChanged.connect(self.update_image)
-
-        self.keep_zoom_checkbox = QCheckBox("Keep zoom")
-        self.keep_zoom_checkbox.setChecked(False)
-        self.keep_zoom_checkbox.setToolTip("Keep current zoom and pan when changing file or frame")
-
-        self.save_colorbar_checkbox = QCheckBox("Save colorbar")
-        self.save_colorbar_checkbox.setChecked(
-            self.settings.value("view/save_colorbar", False, type=bool)
-        )
-        self.save_colorbar_checkbox.stateChanged.connect(self.save_colorbar_setting)
-
-        self.vmin_spin = QDoubleSpinBox()
-        self.vmin_spin.setDecimals(4)
-        self.vmin_spin.setRange(-999999, 999999)
-        self.vmin_spin.setValue(self.settings.value("view/vmin", 0.0, type=float))
-        self.vmin_spin.valueChanged.connect(self.spin_intensity_changed)
-
-        self.vmax_spin = QDoubleSpinBox()
-        self.vmax_spin.setDecimals(4)
-        self.vmax_spin.setRange(-999999, 999999)
-        self.vmax_spin.setValue(self.settings.value("view/vmax", 5.0, type=float))
-        self.vmax_spin.valueChanged.connect(self.spin_intensity_changed)
-
-        autoscale_button = QPushButton("Auto intensity")
-        self.autoscale_button = autoscale_button
-        autoscale_button.clicked.connect(self.auto_intensity)
-
-        display_layout.addWidget(self.log_checkbox)
-        display_layout.addWidget(self.keep_ratio_checkbox)
-        display_layout.addWidget(self.keep_zoom_checkbox)
-        display_layout.addWidget(self.save_colorbar_checkbox)
-        display_layout.addWidget(QLabel("Min:"))
-        display_layout.addWidget(self.vmin_spin)
-        display_layout.addWidget(QLabel("Max:"))
-        display_layout.addWidget(self.vmax_spin)
-        display_layout.addWidget(autoscale_button)
-
-        center_layout.addLayout(nav_layout)
-        # center_layout.addLayout(display_layout)
-
-        splitter.addWidget(center_panel)
+        content_layout.addWidget(center_panel, stretch=1)
 
         # ============================================================
         # RIGHT PANEL
         # ============================================================
 
         right_panel = QWidget()
+        right_panel.setFixedWidth(FILE_BROWSER_WIDTH)
         right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(2, 2, 2, 2)
-        right_layout.setSpacing(4)
+        right_layout.setContentsMargins(*PANEL_MARGINS)
+        right_layout.setSpacing(BLOCK_SPACING)
 
         info_box = QGroupBox("File information")
         self.info_box = info_box
         self.right_layout = right_layout
         info_box.setMinimumHeight(86)
-        self.panel_box_style = """
-            QGroupBox {
-                background-color: #f4f4f4;
-                border: 0px;
-                border-radius: 10px;
-                margin-top: 14px;
-                padding: 4px;
-                font-size: 12px;
-            }
-
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0px 4px;
-                color: #222222;
-                font-size: 12px;
-            }
-        """
+        self.panel_box_style = GROUP_BOX_STYLE
         info_box.setStyleSheet(self.panel_box_style)
         info_box_layout = QVBoxLayout(info_box)
         self.info_box_layout = info_box_layout
-        info_box_layout.setContentsMargins(6, 18, 6, 4)
-        info_box_layout.setSpacing(4)
+        info_box_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        info_box_layout.setSpacing(6)
 
         self.info_text = QTextEdit()
         self.info_text.setLineWrapMode(QTextEdit.WidgetWidth)
@@ -579,8 +599,6 @@ class ViewTab(QWidget):
         self.dataset_list = QListWidget()
         self.dataset_list.itemDoubleClicked.connect(self.open_selected_dataset)
         self.dataset_list.hide()
-
-        info_box_layout.addWidget(self.info_text)
 
         q_buttons_layout = QHBoxLayout()
         self.q_buttons_layout = q_buttons_layout
@@ -617,77 +635,14 @@ class ViewTab(QWidget):
 
         self.update_q_geometry_button_styles()
         info_box_layout.addLayout(q_buttons_layout)
+        info_box_layout.addWidget(self.info_text)
         right_layout.addWidget(info_box)
 
-        display_box = QGroupBox("Display settings")
-        self.display_box = display_box
-        display_box.setStyleSheet("""
-            QGroupBox {
-                background-color: #f4f4f4;
-                border: 0px;
-                border-radius: 10px;
-                margin-top: 14px;
-                padding: 4px;
-                font-size: 12px;
-            }
-
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0px 4px;
-                color: #222222;
-                font-size: 12px;
-            }
-
-            QPushButton {
-                background-color: #e2e2e2;
-                border: 0px;
-                border-radius: 5px;
-                padding: 4px;
-            }
-
-            QPushButton:hover {
-                background-color: #d8d8d8;
-            }
-        """)
-
-        display_box_layout = QVBoxLayout(display_box)
-        self.display_box_layout = display_box_layout
-        display_box_layout.setContentsMargins(10, 22, 10, 10)
-        display_box_layout.setSpacing(12)
-
-        display_checks_layout = QVBoxLayout()
-        display_checks_layout.setSpacing(8)
-        display_checks_layout.addWidget(self.log_checkbox)
-        display_checks_layout.addWidget(self.keep_ratio_checkbox)
-        display_checks_layout.addWidget(self.keep_zoom_checkbox)
-        display_checks_layout.addWidget(self.save_colorbar_checkbox)
-
-        min_layout = QHBoxLayout()
-        min_layout.setSpacing(10)
-        min_layout.addWidget(QLabel("Min:"))
-        min_layout.addWidget(self.vmin_spin)
-
-        max_layout = QHBoxLayout()
-        max_layout.setSpacing(10)
-        max_layout.addWidget(QLabel("Max:"))
-        max_layout.addWidget(self.vmax_spin)
-
-        display_box_layout.addLayout(display_checks_layout)
-        display_box_layout.addLayout(min_layout)
-        display_box_layout.addLayout(max_layout)
-        display_box_layout.addWidget(autoscale_button)
-
-        right_layout.addWidget(display_box)
-
-        splitter.addWidget(right_panel)
-
-        splitter.setSizes([280, 1000, 260])
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
+        content_layout.addWidget(right_panel, stretch=0)
 
         right_layout.setStretch(0, 1)
+        main_layout.addLayout(nav_layout, stretch=0)
+        self.update_frame_navigation_state()
 
         self.canvas.draw_idle()
 
@@ -848,8 +803,8 @@ class ViewTab(QWidget):
 
         fields = {}
         labels = [
-            ("xc", "Centre X"),
-            ("yc", "Centre Y"),
+            ("xc", "Center X"),
+            ("yc", "Center Y"),
             ("distance_m", "Distance (m)"),
             ("pixel_x_mm", "Pixel X (mm)"),
             ("pixel_y_mm", "Pixel Y (mm)"),
@@ -1275,7 +1230,7 @@ class ViewTab(QWidget):
                 "",
                 "q geometry:",
                 f"Source: {source}",
-                f"Centre: X = {xc:.6g}, Y = {yc:.6g}",
+                f"Center: X = {xc:.6g}, Y = {yc:.6g}",
                 f"Distance: {distance_m:.6g} m",
                 f"Pixel: {pixel_x_mm:.6g} x {pixel_y_mm:.6g} mm",
                 f"Wavelength: {wavelength_nm:.6g} nm",
@@ -1358,6 +1313,7 @@ class ViewTab(QWidget):
         self.frame_slider.blockSignals(False)
 
         self.frame_label.setText(f"1 / {n}")
+        self.update_frame_navigation_state()
 
     def update_frame_slider_range(self):
         if self.is_lazy_h5:
@@ -1380,6 +1336,22 @@ class ViewTab(QWidget):
             self.frame_slider.setValue(start)
         elif self.current_index > end:
             self.frame_slider.setValue(end)
+        else:
+            self.update_frame_navigation_state()
+
+    def update_frame_navigation_state(self):
+        if self.is_lazy_h5:
+            total = self.n_frames
+        elif self.images is not None:
+            total = self.images.shape[0]
+        else:
+            total = 0
+        can_navigate = total > 1
+        self.frame_start_spin.setEnabled(can_navigate)
+        self.frame_end_spin.setEnabled(can_navigate)
+        self.frame_slider.setEnabled(can_navigate)
+        self.previous_button.setEnabled(can_navigate and self.current_index > self.frame_slider.minimum())
+        self.next_button.setEnabled(can_navigate and self.current_index < self.frame_slider.maximum())
 
     def get_current_image(self):
         if self.is_lazy_h5:
@@ -1750,6 +1722,9 @@ class ViewTab(QWidget):
         self.frame_label.setText(f"{self.current_index + 1} / {total}")
 
         self.ax.set_autoscale_on(False)
+        if hasattr(self, "toolbar"):
+            self.toolbar.push_current()
+            self.toolbar.set_history_buttons()
         self.canvas.draw_idle()
 
     def auto_intensity(self):
@@ -1866,6 +1841,7 @@ class ViewTab(QWidget):
     def slider_changed(self, value):
         self.current_index = value
         self.update_image()
+        self.update_frame_navigation_state()
 
 
     def previous_image(self):
@@ -2181,6 +2157,9 @@ class ViewTab(QWidget):
             self._saved_ylim = self.ax.get_ylim()
 
         self.ax.set_autoscale_on(False)
+        if hasattr(self, "toolbar"):
+            self.toolbar.push_current()
+            self.toolbar.set_history_buttons()
         self.canvas.draw_idle()
 
     def reset_image_view(self):
@@ -2196,6 +2175,9 @@ class ViewTab(QWidget):
             self._saved_ylim = self.ax.get_ylim()
 
         self.ax.set_autoscale_on(False)
+        self._trackpad_view_pushed = False
+        if hasattr(self, "toolbar"):
+            self.toolbar.set_history_buttons()
         self.canvas.draw_idle()
 
     def pan_by_trackpad(self, dx, dy):
@@ -2218,6 +2200,9 @@ class ViewTab(QWidget):
             self._saved_ylim = self.ax.get_ylim()
 
         self.ax.set_autoscale_on(False)
+        if hasattr(self, "toolbar"):
+            self.toolbar.push_current()
+            self.toolbar.set_history_buttons()
         self.canvas.draw_idle()
 
     def on_scroll_zoom(self, event):
@@ -2257,6 +2242,10 @@ class ViewTab(QWidget):
         self._pan_start_event = None
         self._pan_start_xlim = None
         self._pan_start_ylim = None
+        self._trackpad_view_pushed = False
+        if hasattr(self, "toolbar"):
+            self.toolbar.push_current()
+            self.toolbar.set_history_buttons()
         self.canvas.setCursor(Qt.ArrowCursor)
 
     def pan_image_from_motion(self, event):
@@ -2278,6 +2267,10 @@ class ViewTab(QWidget):
         x0, x1 = self._pan_start_xlim
         y0, y1 = self._pan_start_ylim
 
+        if hasattr(self, "toolbar") and not self._trackpad_view_pushed:
+            self.toolbar.push_current()
+            self._trackpad_view_pushed = True
+
         self.ax.set_xlim(x0 + dx, x1 + dx)
         self.ax.set_ylim(y0 + dy, y1 + dy)
 
@@ -2286,6 +2279,8 @@ class ViewTab(QWidget):
             self._saved_ylim = self.ax.get_ylim()
 
         self.ax.set_autoscale_on(False)
+        if hasattr(self, "toolbar"):
+            self.toolbar.set_history_buttons()
         self.canvas.draw_idle()
         return True
 
@@ -2299,3 +2294,5 @@ class ViewTab(QWidget):
             return bool(mode)
         except Exception:
             return str(mode).strip() != ""
+
+        # (rest of code continues unchanged)

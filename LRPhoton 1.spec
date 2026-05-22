@@ -21,7 +21,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='LRPhoton 1',
+    name='LRPhoton',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -41,11 +41,11 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='LRPhoton 1',
+    name='LRPhoton',
 )
 app = BUNDLE(
     coll,
-    name='LRPhoton 1.app',
+    name='LRPhoton.app',
     icon='assets/LRPhoton.icns',
     bundle_identifier=None,
 )

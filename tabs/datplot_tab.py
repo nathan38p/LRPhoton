@@ -25,14 +25,32 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QMessageBox,
     QAbstractItemView,
-    QSplitter,
     QFrame,
+    QSpinBox,
+    QSlider,
+    QSizePolicy,
+    QStyle,
+    QToolButton,
 )
 from PySide6.QtGui import QColor
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
+
+from .ui_style import (
+    BLOCK_SPACING,
+    FILE_BROWSER_WIDTH,
+    FRAME_BUTTON_WIDTH,
+    FRAME_COUNTER_WIDTH,
+    FRAME_NAV_SPACING,
+    FRAME_SPIN_WIDTH,
+    GROUP_BOX_MARGINS,
+    GROUP_BOX_STYLE,
+    MATPLOTLIB_TOOLBAR_ICON_SCALE,
+    MATPLOTLIB_TOOLBAR_MAX_HEIGHT,
+    PAGE_MARGINS,
+)
 
 
 # ============================================================
@@ -277,43 +295,134 @@ class DatPlotTab(QWidget):
         self.build_ui()
         self.refresh_files()
 
+    def create_matplotlib_toolbar_block(
+        self,
+        title,
+        toolbar,
+        option_widgets=None,
+        save_callback=None,
+        save_tooltip="Save",
+        toolbar_width=340,
+    ):
+        toolbar_box = QGroupBox(title)
+        toolbar_box.setFixedHeight(78)
+        self.style_top_group_box(toolbar_box)
+
+        toolbar_layout = QVBoxLayout(toolbar_box)
+        toolbar_layout.setContentsMargins(6, 0, 6, 2)
+        toolbar_layout.setSpacing(0)
+
+        # Set icon size using scaling factor, like View 2D toolbar
+        toolbar.setIconSize(toolbar.iconSize() * MATPLOTLIB_TOOLBAR_ICON_SCALE)
+        toolbar.setFixedHeight(MATPLOTLIB_TOOLBAR_MAX_HEIGHT)
+        toolbar.setFixedWidth(toolbar_width)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.coordinates = False
+        toolbar.setStyleSheet("""
+            QToolBar {
+                background: #f4f4f4;
+                background-color: #f4f4f4;
+                border: none;
+            }
+            QToolButton {
+                background: transparent;
+                background-color: transparent;
+            }
+        """)
+
+        for action in list(toolbar.actions()):
+            text = action.text().lower()
+            if action.isSeparator() or text in ["save", "save the figure", "save image only"]:
+                toolbar.removeAction(action)
+
+        toolbar_extra_layout = QHBoxLayout()
+        toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_extra_layout.setSpacing(8)
+        toolbar_extra_layout.addWidget(toolbar, stretch=0, alignment=Qt.AlignVCenter)
+        toolbar_extra_layout.addStretch(1)
+
+        if option_widgets:
+            for widget in option_widgets:
+                toolbar_extra_layout.addWidget(widget, stretch=0, alignment=Qt.AlignVCenter)
+
+        save_button = None
+        if save_callback is not None:
+            save_button = QToolButton()
+            save_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+            save_button.setToolTip(save_tooltip)
+            save_button.setFixedSize(
+                MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8,
+                MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8,
+            )
+            save_button.setIconSize(toolbar.iconSize() * 1.25)
+            save_button.clicked.connect(save_callback)
+            save_button.setStyleSheet("""
+                QToolButton {
+                    background: transparent;
+                    background-color: transparent;
+                    border: none;
+                    padding: 0px;
+                    margin: 0px;
+                }
+            """)
+            toolbar_extra_layout.addWidget(save_button, stretch=0, alignment=Qt.AlignVCenter)
+
+        toolbar_layout.addLayout(toolbar_extra_layout)
+
+        return toolbar_box, toolbar_extra_layout, save_button
+
     def build_ui(self):
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(2, 2, 2, 2)
-        main_layout.setSpacing(8)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(*PAGE_MARGINS)
+        main_layout.setSpacing(BLOCK_SPACING)
+
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(BLOCK_SPACING)
+        main_layout.addLayout(content_layout, stretch=1)
 
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left_scroll.setFixedWidth(280)
+        left_scroll.setFixedWidth(FILE_BROWSER_WIDTH)
         left_scroll.setFrameShape(QFrame.NoFrame)
 
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
+        left_layout.setSpacing(BLOCK_SPACING)
         left_scroll.setWidget(left_panel)
-        main_layout.addWidget(left_scroll, stretch=0)
-
-        left_splitter = QSplitter(Qt.Vertical)
-        left_splitter.setChildrenCollapsible(False)
-        left_layout.addWidget(left_splitter, stretch=1)
+        content_layout.addWidget(left_scroll, stretch=0)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(8)
-        main_layout.addWidget(right_panel, stretch=1)
+        right_layout.setSpacing(4)
+        content_layout.addWidget(right_panel, stretch=1)
+
+        curve_scroll = QScrollArea()
+        curve_scroll.setWidgetResizable(True)
+        curve_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        curve_scroll.setFixedWidth(FILE_BROWSER_WIDTH)
+        curve_scroll.setFrameShape(QFrame.NoFrame)
+
+        curve_panel = QWidget()
+        curve_panel_layout = QVBoxLayout(curve_panel)
+        curve_panel_layout.setContentsMargins(0, 0, 0, 0)
+        curve_panel_layout.setSpacing(BLOCK_SPACING)
+        curve_scroll.setWidget(curve_panel)
+        content_layout.addWidget(curve_scroll, stretch=0)
 
         file_box = QGroupBox("File browser")
         self.style_top_group_box(file_box)
         file_layout = QVBoxLayout(file_box)
-        file_layout.setContentsMargins(8, 18, 8, 8)
+        file_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         file_layout.setSpacing(6)
         file_box.setMinimumHeight(220)
-        left_splitter.addWidget(file_box)
+        left_layout.addWidget(file_box, stretch=1)
 
         self.folder_path = QLineEdit(str(self.current_folder))
+        self.folder_path.returnPressed.connect(self.refresh_files)
         file_layout.addWidget(self.folder_path)
 
         self.browse_button = QPushButton("Browse")
@@ -325,10 +434,10 @@ class DatPlotTab(QWidget):
         self.name_filter = QLineEdit("**")
         self.extensions_filter.textChanged.connect(self.refresh_files)
         self.name_filter.textChanged.connect(self.refresh_files)
-        filters_layout.addWidget(QLabel("Extensions:"), 0, 0)
-        filters_layout.addWidget(self.extensions_filter, 0, 1)
-        filters_layout.addWidget(QLabel("Name:"), 1, 0)
-        filters_layout.addWidget(self.name_filter, 1, 1)
+        filters_layout.addWidget(QLabel("Name:"), 0, 0)
+        filters_layout.addWidget(self.name_filter, 0, 1)
+        filters_layout.addWidget(QLabel("Extensions:"), 1, 0)
+        filters_layout.addWidget(self.extensions_filter, 1, 1)
         file_layout.addLayout(filters_layout)
 
         self.show_subfolders = QCheckBox("Show subfolders")
@@ -374,10 +483,10 @@ class DatPlotTab(QWidget):
         curve_box = QGroupBox("Curves / legend")
         self.style_top_group_box(curve_box)
         curve_layout = QVBoxLayout(curve_box)
-        curve_layout.setContentsMargins(8, 14, 8, 8)
+        curve_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         curve_layout.setSpacing(6)
         curve_box.setMinimumHeight(170)
-        left_splitter.addWidget(curve_box)
+        curve_panel_layout.addWidget(curve_box, stretch=1)
 
         self.curve_table = QTableWidget(0, 4)
         self.curve_table.setMinimumHeight(140)
@@ -396,6 +505,7 @@ class DatPlotTab(QWidget):
         self.curve_table.setAcceptDrops(True)
         self.curve_table.setDropIndicatorShown(True)
         self.curve_table.setDragDropMode(QAbstractItemView.InternalMove)
+        self.curve_table.setDragDropOverwriteMode(False)
         self.curve_table.cellChanged.connect(self.curve_table_changed)
         self.curve_table.cellDoubleClicked.connect(self.curve_table_double_clicked)
         self.curve_table.model().rowsMoved.connect(self.curve_rows_moved)
@@ -422,61 +532,95 @@ class DatPlotTab(QWidget):
         self.curve_table.horizontalHeader().sectionResized.connect(self.update_clear_header_button_position)
         self.update_clear_header_button_position()
 
-        graph_box = QGroupBox("Plot")
-        self.style_top_group_box(graph_box)
-        graph_layout = QVBoxLayout(graph_box)
-        graph_layout.setContentsMargins(6, 18, 6, 6)
-        right_layout.addWidget(graph_box, stretch=1)
 
         self.canvas = PlotCanvas()
+        self.canvas.setContentsMargins(0, 0, 0, 0)
         self.toolbar = NavigationToolbar(self.canvas, self)
-        self.toolbar.setIconSize(self.toolbar.iconSize() * 0.8)
-        self.toolbar.setMaximumHeight(42)
-        self.toolbar.addSeparator()
+
         self.plot_mode.setFixedWidth(120)
-        self.toolbar.addWidget(self.plot_mode)
+
         self.show_legend = QCheckBox("Legend")
         self.show_legend.setChecked(True)
         self.show_legend.stateChanged.connect(self.update_plot)
-        self.toolbar.addWidget(self.show_legend)
-        self.toolbar.setStyleSheet("""
-            QToolBar {
-                background: #f4f4f4;
+
+        graph_box, self.toolbar_extra_layout, self.save_plot_button = self.create_matplotlib_toolbar_block(
+            title="Plot",
+            toolbar=self.toolbar,
+            option_widgets=[
+                self.plot_mode,
+                self.show_legend,
+            ],
+            save_callback=self.toolbar.save_figure,
+            save_tooltip="Save plot",
+            toolbar_width=320,
+        )
+        right_layout.addWidget(graph_box, stretch=0)
+        right_layout.addWidget(self.canvas, stretch=1)
+
+        self.graph_coordinate_label = QLabel("q = - | I = -")
+        self.graph_coordinate_label.setMinimumHeight(28)
+        self.graph_coordinate_label.setAlignment(Qt.AlignCenter)
+        self.graph_coordinate_label.setStyleSheet("""
+            QLabel {
                 background-color: #f4f4f4;
-                border: none;
-                spacing: 6px;
-                padding: 4px;
-            }
-            QToolButton {
-                background: transparent;
-                background-color: transparent;
+                border-radius: 8px;
+                padding: 6px;
+                font-family: Menlo, Monaco, monospace;
+                font-size: 11px;
             }
         """)
-        graph_layout.addWidget(self.toolbar)
-        graph_layout.addWidget(self.canvas)
+        right_layout.addWidget(self.graph_coordinate_label, stretch=0)
+
+        self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
+        self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
+
+        frame_nav = QHBoxLayout()
+        frame_nav.setContentsMargins(0, 0, 0, 0)
+        frame_nav.setSpacing(FRAME_NAV_SPACING)
+
+        self.frame_start_spin = QSpinBox()
+        self.frame_start_spin.setRange(1, 1)
+        self.frame_start_spin.setValue(1)
+        self.frame_start_spin.setFixedWidth(FRAME_SPIN_WIDTH)
+
+        self.frame_end_spin = QSpinBox()
+        self.frame_end_spin.setRange(1, 1)
+        self.frame_end_spin.setValue(1)
+        self.frame_end_spin.setFixedWidth(FRAME_SPIN_WIDTH)
+
+        self.prev_frame_button = QPushButton("<")
+        self.next_frame_button = QPushButton(">")
+        self.prev_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
+        self.next_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
+
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setRange(1, 1)
+        self.frame_slider.setValue(1)
+
+        self.frame_counter_label = QLabel("1 / 1")
+        self.frame_counter_label.setMinimumWidth(FRAME_COUNTER_WIDTH)
+        self.frame_counter_label.setAlignment(Qt.AlignCenter)
+
+        frame_nav.addWidget(QLabel("Start:"))
+        frame_nav.addWidget(self.frame_start_spin)
+        frame_nav.addWidget(self.prev_frame_button)
+        frame_nav.addWidget(self.frame_slider, stretch=1)
+        frame_nav.addWidget(self.next_frame_button)
+        frame_nav.addWidget(QLabel("End:"))
+        frame_nav.addWidget(self.frame_end_spin)
+        frame_nav.addWidget(self.frame_counter_label)
+        main_layout.addLayout(frame_nav, stretch=0)
+
+        for widget in [
+            self.frame_start_spin, self.frame_end_spin, self.prev_frame_button,
+            self.next_frame_button, self.frame_slider,
+        ]:
+            widget.setEnabled(False)
 
         self.update_limit_state()
-        left_splitter.setSizes([340, 260])
 
     def style_top_group_box(self, box):
-        box.setStyleSheet("""
-            QGroupBox {
-                background-color: #f4f4f4;
-                border: 0px;
-                border-radius: 10px;
-                margin-top: 14px;
-                padding: 4px;
-                font-size: 12px;
-            }
-
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0px 4px;
-                color: #222222;
-                font-size: 12px;
-            }
-        """)
+        box.setStyleSheet(GROUP_BOX_STYLE)
 
     def double_spin(self, value):
         spin = QDoubleSpinBox()
@@ -536,6 +680,10 @@ class DatPlotTab(QWidget):
         for file in files:
             display_name = str(file.relative_to(folder)) if self.show_subfolders.isChecked() else file.name
             self.file_list.addItem(display_name)
+            item = self.file_list.item(self.file_list.count() - 1)
+            resolved_path = file.expanduser().resolve()
+            item.setData(Qt.UserRole, str(resolved_path))
+            item.setToolTip(str(resolved_path))
         self.file_list.blockSignals(False)
 
     def selection_changed(self):
@@ -568,7 +716,11 @@ class DatPlotTab(QWidget):
         self.update_plot()
 
     def selected_files(self):
-        return [self.current_folder / item.text() for item in self.file_list.selectedItems()]
+        files = []
+        for item in self.file_list.selectedItems():
+            stored_path = item.data(Qt.UserRole)
+            files.append(Path(stored_path) if stored_path else self.current_folder / item.text())
+        return files
 
     def update_clear_header_button_position(self):
         header = self.curve_table.horizontalHeader()
@@ -707,12 +859,38 @@ class DatPlotTab(QWidget):
         self.curves.clear()
         self.refresh_curve_table()
         self.canvas.ax.clear()
+        self.clear_graph_coordinates()
         self.canvas.draw_idle()
 
     def make_plot_y(self, x, y):
         if self.plot_mode.currentText() == "Kratky":
             return x ** 2 * y
         return y
+
+    def graph_coordinate_labels(self):
+        if self.curves_are_really_0_to_360():
+            return "ψ", "I"
+        if self.plot_mode.currentText() == "Kratky":
+            return "q", "q²I(q)"
+        return "q", "I"
+
+    def update_graph_coordinates(self, event):
+        if event.inaxes != self.canvas.ax or event.xdata is None or event.ydata is None:
+            return
+
+        try:
+            x_name, y_name = self.graph_coordinate_labels()
+            x_suffix = "°" if x_name == "ψ" else ""
+            self.graph_coordinate_label.setText(
+                f"{x_name} = {event.xdata:.6g}{x_suffix} | {y_name} = {event.ydata:.6g}"
+            )
+        except Exception:
+            self.clear_graph_coordinates()
+
+    def clear_graph_coordinates(self, event=None):
+        x_name, y_name = self.graph_coordinate_labels()
+        x_suffix = "°" if x_name == "ψ" else ""
+        self.graph_coordinate_label.setText(f"{x_name} = -{x_suffix} | {y_name} = -")
 
     def curves_are_really_0_to_360(self):
         if not self.curves:
@@ -816,6 +994,7 @@ class DatPlotTab(QWidget):
         ax.clear()
 
         if not self.curves:
+            self.clear_graph_coordinates()
             self.canvas.draw_idle()
             return
 

@@ -6,7 +6,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtWidgets import (
     QWidget, QFileDialog, QMessageBox, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QPushButton, QDoubleSpinBox, QSpinBox, QTextEdit, QGroupBox
+    QPushButton, QDoubleSpinBox, QSpinBox, QTextEdit, QGroupBox, QSlider, QSizePolicy
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -17,6 +17,16 @@ from .instrument_presets import (
     ID13_DEFAULT_DISTANCE_M,
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
+)
+from .ui_style import (
+    BLOCK_SPACING,
+    FILE_BROWSER_WIDTH,
+    FRAME_BUTTON_WIDTH,
+    FRAME_COUNTER_WIDTH,
+    FRAME_NAV_SPACING,
+    FRAME_SPIN_WIDTH,
+    GROUP_BOX_MARGINS,
+    PAGE_MARGINS,
 )
 
 
@@ -263,7 +273,7 @@ def compute_directional_iq_nm_general(img, xc, yc, angle_deg, half_width,
 
 class ImageCanvas(FigureCanvas):
     def __init__(self):
-        self.fig = Figure(figsize=(5, 5), tight_layout=True)
+        self.fig = Figure(figsize=(4.2, 4.2), tight_layout=True)
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
 
@@ -529,7 +539,7 @@ class ImageCanvas(FigureCanvas):
 
 class PlotCanvas(FigureCanvas):
     def __init__(self):
-        self.fig = Figure(figsize=(5, 3), tight_layout=True)
+        self.fig = Figure(figsize=(4.2, 2.6), tight_layout=True)
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -696,27 +706,47 @@ class CentreTab(QWidget):
 
     def _build_ui(self, default_xc, default_yc):
         main = QGridLayout(self)
-        main.setContentsMargins(4, 4, 4, 4)
-        main.setSpacing(6)
+        main.setContentsMargins(*PAGE_MARGINS)
+        main.setSpacing(BLOCK_SPACING)
 
         image_box = QGroupBox("Scattering pattern")
-        control_box = QGroupBox("Centre tools")
-        graph_box = QGroupBox("I(q) directions, log-log")
-        image_box.setMaximumWidth(700)
+        control_box = QGroupBox("Center tools")
+        graph_box = QGroupBox("I(q) directions")
+
+        self.image_box = image_box
+        self.control_box = control_box
+        self.graph_box = graph_box
+
+        image_box.setMinimumWidth(0)
+        image_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        control_box.setFixedWidth(FILE_BROWSER_WIDTH)
+        control_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        graph_box.setMinimumWidth(0)
+        graph_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
 
         main.addWidget(image_box, 0, 0)
-        main.addWidget(control_box, 0, 1)
+        main.addWidget(control_box, 0, 1, alignment=Qt.AlignHCenter)
         main.addWidget(graph_box, 0, 2)
+
+        self.main_grid = main
+
+        main.setColumnMinimumWidth(0, 0)
+        main.setColumnMinimumWidth(1, FILE_BROWSER_WIDTH)
+        main.setColumnMinimumWidth(2, 0)
 
         main.setColumnStretch(0, 1)
         main.setColumnStretch(1, 0)
-        main.setColumnStretch(2, 2)
+        main.setColumnStretch(2, 1)
 
         image_layout = QVBoxLayout(image_box)
-        image_layout.setContentsMargins(6, 18, 6, 6)
+        image_layout.setContentsMargins(*GROUP_BOX_MARGINS)
 
         self.canvas_img = ImageCanvas()
+        self.canvas_img.setMinimumWidth(0)
+        self.canvas_img.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.coordinate_label = QLabel("x = - | y = - | Δx = - | Δy = - | r = - | I = -")
+        self.coordinate_label.setMinimumWidth(0)
+        self.coordinate_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.coordinate_label.setMinimumHeight(28)
         self.coordinate_label.setAlignment(Qt.AlignCenter)
         self.coordinate_label.setStyleSheet("""
@@ -735,17 +765,17 @@ class CentreTab(QWidget):
 
         adjust = QHBoxLayout()
         adjust.setContentsMargins(0, 0, 0, 0)
-        adjust.setSpacing(10)
+        adjust.setSpacing(BLOCK_SPACING)
         image_layout.addLayout(adjust)
 
-        move_box = QGroupBox("Centre position")
+        move_box = QGroupBox("Center position")
         move_layout = QGridLayout(move_box)
-        move_layout.setContentsMargins(6, 18, 6, 6)
+        move_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         move_layout.setSpacing(4)
 
         rotate_box = QGroupBox("Axes rotation")
         rotate_layout = QGridLayout(rotate_box)
-        rotate_layout.setContentsMargins(6, 18, 6, 6)
+        rotate_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         rotate_layout.setSpacing(4)
 
         self.btn_up = QPushButton("↑")
@@ -798,7 +828,7 @@ class CentreTab(QWidget):
         adjust.addWidget(rotate_box, stretch=1)
 
         control = QVBoxLayout(control_box)
-        control.setContentsMargins(8, 18, 8, 8)
+        control.setContentsMargins(*GROUP_BOX_MARGINS)
         control.setSpacing(6)
 
         self.btn_open = QPushButton("Open EDF / H5")
@@ -829,13 +859,13 @@ class CentreTab(QWidget):
 
         self.status = QTextEdit()
         self.status.setReadOnly(True)
-        self.status.setText(f"No file loaded\nUser: {self.user_email}")
+        self.status.setText("")
 
         control.addWidget(self.btn_open)
         control.addWidget(QLabel("Instrument preset:"))
         control.addLayout(preset_layout)
-        self.centre_x_label = QLabel("Centre X:")
-        self.centre_y_label = QLabel("Centre Y:")
+        self.centre_x_label = QLabel("Center X:")
+        self.centre_y_label = QLabel("Center Y:")
         self._add_control(control, self.centre_x_label, self.edit_xc)
         self._add_control(control, self.centre_y_label, self.edit_yc)
         self._add_control(control, "Detector distance (m):", self.edit_distance)
@@ -846,11 +876,58 @@ class CentreTab(QWidget):
         control.addWidget(self.status)
 
         graph_layout = QVBoxLayout(graph_box)
-        graph_layout.setContentsMargins(6, 18, 6, 6)
+        graph_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         self.canvas_h = PlotCanvas()
         self.canvas_v = PlotCanvas()
+        self.canvas_h.setMinimumWidth(0)
+        self.canvas_v.setMinimumWidth(0)
+        self.canvas_h.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.canvas_v.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         graph_layout.addWidget(self.canvas_h)
         graph_layout.addWidget(self.canvas_v)
+
+        frame_nav = QHBoxLayout()
+        frame_nav.setContentsMargins(0, 0, 0, 0)
+        frame_nav.setSpacing(FRAME_NAV_SPACING)
+
+        self.frame_start_spin = QSpinBox()
+        self.frame_start_spin.setRange(1, 1)
+        self.frame_start_spin.setValue(1)
+        self.frame_start_spin.setFixedWidth(FRAME_SPIN_WIDTH)
+
+        self.frame_end_spin = QSpinBox()
+        self.frame_end_spin.setRange(1, 1)
+        self.frame_end_spin.setValue(1)
+        self.frame_end_spin.setFixedWidth(FRAME_SPIN_WIDTH)
+
+        self.prev_frame_button = QPushButton("<")
+        self.next_frame_button = QPushButton(">")
+        self.prev_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
+        self.next_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
+
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setRange(1, 1)
+        self.frame_slider.setValue(1)
+
+        self.frame_counter_label = QLabel("1 / 1")
+        self.frame_counter_label.setMinimumWidth(FRAME_COUNTER_WIDTH)
+        self.frame_counter_label.setAlignment(Qt.AlignCenter)
+
+        frame_nav.addWidget(QLabel("Start:"))
+        frame_nav.addWidget(self.frame_start_spin)
+        frame_nav.addWidget(self.prev_frame_button)
+        frame_nav.addWidget(self.frame_slider, stretch=1)
+        frame_nav.addWidget(self.next_frame_button)
+        frame_nav.addWidget(QLabel("End:"))
+        frame_nav.addWidget(self.frame_end_spin)
+        frame_nav.addWidget(self.frame_counter_label)
+        main.addLayout(frame_nav, 1, 0, 1, 3)
+
+        for widget in [
+            self.frame_start_spin, self.frame_end_spin, self.prev_frame_button,
+            self.next_frame_button, self.frame_slider,
+        ]:
+            widget.setEnabled(False)
 
         self.btn_open.clicked.connect(self.open_image_file)
 
@@ -879,6 +956,7 @@ class CentreTab(QWidget):
 
         self.set_controls_enabled(False)
         self.update_centre_warning_labels()
+        self.update_side_block_widths()
 
     def _double_spin(self, value, decimals=3, minimum=-1e9):
         spin = QDoubleSpinBox()
@@ -947,8 +1025,8 @@ class CentreTab(QWidget):
         self.edit_px_y.setEnabled(False)
 
     def update_centre_warning_labels(self):
-        self.centre_x_label.setText("Centre X:")
-        self.centre_y_label.setText("Centre Y:")
+        self.centre_x_label.setText("Center X:")
+        self.centre_y_label.setText("Center Y:")
 
     def refresh_after_preset_change(self):
         if self.img_raw is None:
@@ -1265,3 +1343,27 @@ class CentreTab(QWidget):
         self.canvas_v.draw_idle()
 
     # Replace any remaining occurrence of "Tous les fichiers (*)" with "All files (*)"
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_side_block_widths()
+
+    def update_side_block_widths(self):
+        if not hasattr(self, "image_box") or not hasattr(self, "graph_box"):
+            return
+
+        margins = self.main_grid.contentsMargins()
+        available_width = (
+            self.width()
+            - margins.left()
+            - margins.right()
+            - FILE_BROWSER_WIDTH
+            - 2 * BLOCK_SPACING
+        )
+        side_width = max(0, available_width // 2)
+
+        self.image_box.setMinimumWidth(0)
+        self.graph_box.setMinimumWidth(0)
+
+        self.image_box.setMaximumWidth(side_width)
+        self.graph_box.setMaximumWidth(side_width)

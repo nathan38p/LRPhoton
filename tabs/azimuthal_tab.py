@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QScrollArea,
+    QFrame,
     QComboBox,
     QSlider,
 )
@@ -36,6 +37,20 @@ from .instrument_presets import (
     ID13_DEFAULT_DISTANCE_M,
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
+)
+from .ui_style import (
+    BLOCK_SPACING,
+    FILE_BROWSER_WIDTH,
+    FRAME_BUTTON_WIDTH,
+    FRAME_COUNTER_WIDTH,
+    FRAME_NAV_SPACING,
+    FRAME_SPIN_WIDTH,
+    GROUP_BOX_MARGINS,
+    GROUP_BOX_STYLE,
+    MATPLOTLIB_TOOLBAR_ICON_SCALE,
+    MATPLOTLIB_TOOLBAR_MAX_HEIGHT,
+    PAGE_MARGINS,
+    PANEL_MARGINS,
 )
 
 
@@ -396,6 +411,7 @@ class ImageCanvas(FigureCanvas):
                 y_index = int(round(event.ydata))
                 value_text = "-"
                 q_text = "-"
+                psi_text = "-"
 
                 if self.raw_image is not None:
                     ny, nx = self.raw_image.shape
@@ -417,12 +433,18 @@ class ImageCanvas(FigureCanvas):
                         if np.isfinite(q_value):
                             q_text = f"{q_value:.6g}"
 
+                if self.last_xc is not None and self.last_yc is not None:
+                    dx = (x_index + 1) - self.last_xc
+                    dy = (y_index + 1) - self.last_yc
+                    psi = np.degrees(np.arctan2(dy, dx)) % 360.0
+                    psi_text = f"{psi:.3f}"
+
                 self.coordinate_label.setText(
                     f"x = {x_index + 1} | y = {y_index + 1}\n"
-                    f"q = {q_text} nm⁻¹ | I = {value_text}"
+                    f"ψ = {psi_text}° | q = {q_text} nm⁻¹ | I = {value_text}"
                 )
             else:
-                self.coordinate_label.setText("x = - | y = -\nq = - | I = -")
+                self.coordinate_label.setText("x = - | y = -\nψ = -° | q = - | I = -")
 
         if not self._dragging or event.inaxes != self.ax:
             return
@@ -543,53 +565,63 @@ class AzimuthalTab(QWidget):
         self.set_controls_enabled(False)
 
     def build_ui(self):
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(8)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(*PAGE_MARGINS)
+        main_layout.setSpacing(BLOCK_SPACING)
 
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left_scroll.setFixedWidth(380)
+        page_layout = QHBoxLayout()
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(BLOCK_SPACING)
+        main_layout.addLayout(page_layout, stretch=1)
 
         left_panel = QWidget()
+        left_panel.setFixedWidth(FILE_BROWSER_WIDTH)
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
-        left_scroll.setWidget(left_panel)
-        main_layout.addWidget(left_scroll, stretch=0)
+        left_layout.setContentsMargins(*PANEL_MARGINS)
+        left_layout.setSpacing(BLOCK_SPACING)
+        page_layout.addWidget(left_panel, stretch=0)
 
         right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
+        right_layout = QHBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
-        main_layout.addWidget(right_panel, stretch=1)
+        right_layout.setSpacing(BLOCK_SPACING)
+        page_layout.addWidget(right_panel, stretch=1)
 
-        content_layout = QHBoxLayout()
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(8)
-        right_layout.addLayout(content_layout, stretch=1)
-
+        # ============================================================
+        # COLUMN 2: I(ψ) GRAPH
+        # ============================================================
         graph_box = QGroupBox("I(ψ) graph")
         graph_layout = QVBoxLayout(graph_box)
-        graph_layout.setContentsMargins(6, 18, 6, 6)
-        content_layout.addWidget(graph_box, stretch=5)
+        graph_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        right_layout.addWidget(graph_box, stretch=1)
+
+        # ============================================================
+        # COLUMN 3: PARAMETERS + SELECTED AREA (IMAGE)
+        # ============================================================
+        right_side_panel = QWidget()
+        right_side_panel.setFixedWidth(FILE_BROWSER_WIDTH)
+        right_side_layout = QVBoxLayout(right_side_panel)
+        right_side_layout.setContentsMargins(0, 0, 0, 0)
+        right_side_layout.setSpacing(BLOCK_SPACING)
+        right_layout.addWidget(right_side_panel, stretch=0)
 
         image_box = QGroupBox("Selected area")
         image_layout = QVBoxLayout(image_box)
-        image_layout.setContentsMargins(6, 18, 6, 6)
-        image_box.setMinimumWidth(320)
-        image_box.setMaximumWidth(430)
-        content_layout.addWidget(image_box, stretch=2)
+        image_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        right_side_layout.addWidget(image_box, stretch=1)
 
         file_box = QGroupBox("File browser")
+        file_box.setMinimumHeight(220)
+        file_box.setStyleSheet(GROUP_BOX_STYLE)
+
         file_layout = QVBoxLayout(file_box)
-        file_layout.setContentsMargins(8, 18, 8, 8)
+        file_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         file_layout.setSpacing(6)
-        left_layout.addWidget(file_box, stretch=0)
-        file_box.setFixedHeight(260)
+
+        left_layout.addWidget(file_box, stretch=1)
 
         self.folder_path = QLineEdit(str(self.current_folder))
+        self.folder_path.returnPressed.connect(self.refresh_files)
         file_layout.addWidget(self.folder_path)
 
         self.browse_button = QPushButton("Browse")
@@ -597,15 +629,25 @@ class AzimuthalTab(QWidget):
         file_layout.addWidget(self.browse_button)
 
         filters_layout = QGridLayout()
+
         self.extensions_filter = QLineEdit("*.edf *.h5")
         self.name_filter = QLineEdit("**")
+
         self.extensions_filter.textChanged.connect(self.refresh_files)
         self.name_filter.textChanged.connect(self.refresh_files)
-        filters_layout.addWidget(QLabel("Extensions:"), 0, 0)
-        filters_layout.addWidget(self.extensions_filter, 0, 1)
-        filters_layout.addWidget(QLabel("Name:"), 1, 0)
-        filters_layout.addWidget(self.name_filter, 1, 1)
+
+        filters_layout.addWidget(QLabel("Name:"), 0, 0)
+        filters_layout.addWidget(self.name_filter, 0, 1)
+
+        filters_layout.addWidget(QLabel("Extensions:"), 1, 0)
+        filters_layout.addWidget(self.extensions_filter, 1, 1)
+
         file_layout.addLayout(filters_layout)
+
+        self.show_subfolders_checkbox = QCheckBox("Show subfolders")
+        self.show_subfolders_checkbox.setChecked(False)
+        self.show_subfolders_checkbox.stateChanged.connect(self.refresh_files)
+        file_layout.addWidget(self.show_subfolders_checkbox)
 
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_files)
@@ -614,13 +656,15 @@ class AzimuthalTab(QWidget):
         self.file_list = QListWidget()
         self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.file_list.itemSelectionChanged.connect(self.selection_changed)
+        self.file_list.setMinimumHeight(180)
+
         file_layout.addWidget(self.file_list, stretch=1)
 
         params_box = QGroupBox("Azimuthal parameters")
         params_layout = QVBoxLayout(params_box)
-        params_layout.setContentsMargins(8, 18, 8, 8)
+        params_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         params_layout.setSpacing(4)
-        left_layout.addWidget(params_box)
+        right_side_layout.insertWidget(0, params_box, stretch=0)
 
         preset_layout = QHBoxLayout()
         self.btn_xenocs = QPushButton("XENOCS")
@@ -650,9 +694,9 @@ class AzimuthalTab(QWidget):
         self.n_points.setValue(360)
         self.n_points.setFixedWidth(130)
 
-        form.addWidget(QLabel("Centre X:"), 0, 0)
+        form.addWidget(QLabel("Center X:"), 0, 0)
         form.addWidget(self.center_x, 0, 1)
-        form.addWidget(QLabel("Centre Y:"), 1, 0)
+        form.addWidget(QLabel("Center Y:"), 1, 0)
         form.addWidget(self.center_y, 1, 1)
         form.addWidget(QLabel("Distance (m):"), 2, 0)
         form.addWidget(self.distance, 2, 1)
@@ -683,15 +727,29 @@ class AzimuthalTab(QWidget):
         self.log_box.setReadOnly(True)
         self.log_box.setVisible(False)
 
+        # ============================================================
+        # TOOLBAR (UNIFORMIZED)
+        # ============================================================
+        toolbar_box = QGroupBox("I(ψ) graph")
+        toolbar_box.setFixedHeight(78)
+        from .ui_style import TOOL_GROUP_BOX_STYLE
+        toolbar_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
+        
+        toolbar_layout = QVBoxLayout(toolbar_box)
+        toolbar_layout.setContentsMargins(6, 0, 6, 2)
+        toolbar_layout.setSpacing(0)
+
         self.canvas = PlotCanvas()
         self.toolbar = NavigationToolbar(self.canvas, self)
+        self.toolbar.coordinates = False
+        self.toolbar.setIconSize(self.toolbar.iconSize() * MATPLOTLIB_TOOLBAR_ICON_SCALE)
+        self.toolbar.setFixedHeight(MATPLOTLIB_TOOLBAR_MAX_HEIGHT)
+        self.toolbar.setContentsMargins(0, 0, 0, 0)
         self.toolbar.setStyleSheet("""
             QToolBar {
                 background: #f4f4f4;
                 background-color: #f4f4f4;
                 border: none;
-                spacing: 6px;
-                padding: 4px;
             }
             QToolButton {
                 background: transparent;
@@ -699,16 +757,19 @@ class AzimuthalTab(QWidget):
             }
         """)
 
+        self.toolbar_extra_layout = QHBoxLayout()
+        self.toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
+        self.toolbar_extra_layout.setSpacing(8)
+        self.toolbar.setFixedWidth(340)
+        self.toolbar_extra_layout.addWidget(self.toolbar, stretch=0, alignment=Qt.AlignVCenter)
+        self.toolbar_extra_layout.addStretch(1)
+
+        toolbar_layout.addLayout(self.toolbar_extra_layout)
+        graph_layout.addWidget(toolbar_box, alignment=Qt.AlignTop)
+
         self.plot_mode = QComboBox()
         self.plot_mode.addItems(["linear linear", "linear log", "log linear", "log log"])
         self.plot_mode.currentTextChanged.connect(self.update_plot_mode)
-
-        toolbar_row = QHBoxLayout()
-        toolbar_row.setContentsMargins(0, 0, 0, 0)
-        toolbar_row.setSpacing(8)
-        toolbar_row.addWidget(self.toolbar, stretch=1)
-        toolbar_row.addWidget(self.plot_mode, stretch=0)
-        graph_layout.addLayout(toolbar_row)
 
         self.graph_coordinate_label = QLabel("ψ = - | I = -")
         self.graph_coordinate_label.setMinimumHeight(26)
@@ -723,12 +784,12 @@ class AzimuthalTab(QWidget):
             }
         """)
 
-        graph_layout.addWidget(self.graph_coordinate_label, stretch=0)
         graph_layout.addWidget(self.canvas, stretch=1)
+        graph_layout.addWidget(self.graph_coordinate_label, stretch=0)
 
         self.image_canvas = ImageCanvas()
-        self.image_coordinate_label = QLabel("x = - | y = -\nq = - | I = -")
-        self.image_coordinate_label.setMinimumHeight(26)
+        self.image_coordinate_label = QLabel("x = - | y = -\nψ = -° | q = - | I = -")
+        self.image_coordinate_label.setMinimumHeight(42)
         self.image_coordinate_label.setAlignment(Qt.AlignCenter)
         self.image_coordinate_label.setStyleSheet("""
             QLabel {
@@ -736,7 +797,7 @@ class AzimuthalTab(QWidget):
                 border-radius: 8px;
                 padding: 5px;
                 font-family: Menlo, Monaco, monospace;
-                font-size: 11px;
+                font-size: 10px;
             }
         """)
         self.image_canvas.set_coordinate_label(self.image_coordinate_label)
@@ -774,41 +835,41 @@ class AzimuthalTab(QWidget):
 
         frame_nav = QHBoxLayout()
         frame_nav.setContentsMargins(0, 0, 0, 0)
-        frame_nav.setSpacing(6)
+        frame_nav.setSpacing(FRAME_NAV_SPACING)
 
         self.frame_start_spin = QSpinBox()
         self.frame_start_spin.setRange(1, 1)
         self.frame_start_spin.setValue(1)
-        self.frame_start_spin.setFixedWidth(70)
+        self.frame_start_spin.setFixedWidth(FRAME_SPIN_WIDTH)
 
         self.frame_end_spin = QSpinBox()
         self.frame_end_spin.setRange(1, 1)
         self.frame_end_spin.setValue(1)
-        self.frame_end_spin.setFixedWidth(70)
+        self.frame_end_spin.setFixedWidth(FRAME_SPIN_WIDTH)
 
         self.prev_frame_button = QPushButton("<")
         self.next_frame_button = QPushButton(">")
-        self.prev_frame_button.setFixedWidth(44)
-        self.next_frame_button.setFixedWidth(44)
+        self.prev_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
+        self.next_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
 
         self.frame_slider = QSlider(Qt.Horizontal)
         self.frame_slider.setRange(1, 1)
         self.frame_slider.setValue(1)
 
         self.frame_counter_label = QLabel("1 / 1")
-        self.frame_counter_label.setMinimumWidth(56)
+        self.frame_counter_label.setMinimumWidth(FRAME_COUNTER_WIDTH)
         self.frame_counter_label.setAlignment(Qt.AlignCenter)
 
-        frame_nav.addWidget(QLabel("From:"))
+        frame_nav.addWidget(QLabel("Start:"))
         frame_nav.addWidget(self.frame_start_spin)
         frame_nav.addWidget(self.prev_frame_button)
         frame_nav.addWidget(self.frame_slider, stretch=1)
         frame_nav.addWidget(self.next_frame_button)
-        frame_nav.addWidget(QLabel("To:"))
+        frame_nav.addWidget(QLabel("End:"))
         frame_nav.addWidget(self.frame_end_spin)
         frame_nav.addWidget(self.frame_counter_label)
 
-        right_layout.addLayout(frame_nav)
+        main_layout.addLayout(frame_nav, stretch=0)
 
         self.frame_start_spin.valueChanged.connect(self.update_frame_bounds)
         self.frame_end_spin.valueChanged.connect(self.update_frame_bounds)
@@ -841,6 +902,16 @@ class AzimuthalTab(QWidget):
             self.image_vmin_slider, self.image_vmax_slider,
         ]:
             widget.setEnabled(enabled)
+        self.update_frame_navigation_state()
+
+    def update_frame_navigation_state(self):
+        can_navigate = bool(self.selected_files()) and self.total_frames > 1
+        current = self.frame_slider.value()
+        self.frame_start_spin.setEnabled(can_navigate)
+        self.frame_end_spin.setEnabled(can_navigate)
+        self.frame_slider.setEnabled(can_navigate)
+        self.prev_frame_button.setEnabled(can_navigate and current > self.frame_slider.minimum())
+        self.next_frame_button.setEnabled(can_navigate and current < self.frame_slider.maximum())
     def update_image_intensity_limits(self):
         if not hasattr(self, "image_canvas") or self.image_canvas.raw_image is None:
             return
@@ -934,8 +1005,9 @@ class AzimuthalTab(QWidget):
             name_filter = "**"
 
         files = []
+        search_method = folder.rglob if getattr(self, "show_subfolders_checkbox", None) and self.show_subfolders_checkbox.isChecked() else folder.glob
         for pattern in patterns:
-            files.extend(folder.glob(pattern))
+            files.extend(search_method(pattern))
 
         from fnmatch import fnmatch
         files = sorted(set(files))
@@ -943,7 +1015,8 @@ class AzimuthalTab(QWidget):
 
         self.file_list.clear()
         for file in files:
-            self.file_list.addItem(file.name)
+            display_name = str(file.relative_to(folder)) if getattr(self, "show_subfolders_checkbox", None) and self.show_subfolders_checkbox.isChecked() else file.name
+            self.file_list.addItem(display_name)
 
         self.set_controls_enabled(bool(self.selected_files()))
 
@@ -1009,6 +1082,7 @@ class AzimuthalTab(QWidget):
         self.frame_start_spin.blockSignals(False)
         self.frame_end_spin.blockSignals(False)
         self.frame_slider.blockSignals(False)
+        self.update_frame_navigation_state()
 
     def update_frame_bounds(self):
         start = self.frame_start_spin.value()
@@ -1028,10 +1102,12 @@ class AzimuthalTab(QWidget):
             self.frame_slider.setValue(start)
         elif self.frame_slider.value() > end:
             self.frame_slider.setValue(end)
+        self.update_frame_navigation_state()
 
     def frame_slider_changed(self, value):
         self.current_frame = value
         self.frame_counter_label.setText(f"{value} / {self.total_frames}")
+        self.update_frame_navigation_state()
 
         if self.selected_files():
             self.integrate_selected_files()

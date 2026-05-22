@@ -23,9 +23,12 @@ from PySide6.QtWidgets import (
     QSlider,
     QCheckBox,
     QComboBox,
+    QLineEdit,
+    QSizePolicy,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 
 from .instrument_presets import (
@@ -34,6 +37,18 @@ from .instrument_presets import (
     ID13_DEFAULT_DISTANCE_M,
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
+)
+from .ui_style import (
+    BLOCK_SPACING,
+    FILE_BROWSER_WIDTH,
+    FRAME_BUTTON_WIDTH,
+    FRAME_COUNTER_WIDTH,
+    FRAME_NAV_SPACING,
+    FRAME_SPIN_WIDTH,
+    GROUP_BOX_MARGINS,
+    GROUP_BOX_STYLE,
+    PAGE_MARGINS,
+    PANEL_MARGINS,
 )
 
 
@@ -471,6 +486,9 @@ class ImageCanvas(FigureCanvas):
         self.raw_image = None
         self.q_map = None
         self.coordinate_label = None
+        self.last_xc = None
+        self.last_yc = None
+        self.reference_angle = 0.0
         self._dragging = False
         self._drag_start = None
         self._xlim_start = None
@@ -531,6 +549,7 @@ class ImageCanvas(FigureCanvas):
                 y_index = int(round(event.ydata))
                 value_text = "-"
                 q_text = "-"
+                psi_text = "-"
 
                 if self.raw_image is not None:
                     ny, nx = self.raw_image.shape
@@ -552,12 +571,18 @@ class ImageCanvas(FigureCanvas):
                         if np.isfinite(q_value):
                             q_text = f"{q_value:.6g}"
 
+                if self.last_xc is not None and self.last_yc is not None:
+                    dx = (x_index + 1) - self.last_xc
+                    dy = (y_index + 1) - self.last_yc
+                    psi = (np.degrees(np.arctan2(dy, dx)) - self.reference_angle) % 360.0
+                    psi_text = f"{psi:.3f}"
+
                 self.coordinate_label.setText(
                     f"x = {x_index + 1} | y = {y_index + 1}\n"
-                    f"q = {q_text} nm⁻¹ | I = {value_text}"
+                    f"ψ = {psi_text}° | q = {q_text} nm⁻¹ | I = {value_text}"
                 )
             else:
-                self.coordinate_label.setText("x = - | y = -\nq = - | I = -")
+                self.coordinate_label.setText("x = - | y = -\nψ = -° | q = - | I = -")
 
         if not self._dragging or event.inaxes != self.ax:
             return
@@ -580,6 +605,9 @@ class ImageCanvas(FigureCanvas):
             previous_ylim = self.ax.get_ylim()
 
         self.raw_image = image
+        self.last_xc = xc
+        self.last_yc = yc
+        self.reference_angle = float(reference_angle)
         self.ax.clear()
         self.ax.set_axis_off()
 
@@ -703,52 +731,126 @@ class HermansTab(QWidget):
         self.current_frame = 1
         self.total_frames = 1
         self._updating_frame_controls = False
-        self.instrument_mode = "Custom"
+        self.instrument_mode = "XENOCS"
 
         self.build_ui()
         self.init_default_folder()
 
     def build_ui(self):
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(8)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(*PAGE_MARGINS)
+        main_layout.setSpacing(BLOCK_SPACING)
+
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(BLOCK_SPACING)
+        main_layout.addLayout(content_layout, stretch=1)
 
         left_panel = QWidget()
+        left_panel.setFixedWidth(FILE_BROWSER_WIDTH)
         controls_layout = QVBoxLayout(left_panel)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(8)
-        main_layout.addWidget(left_panel, stretch=0)
+        controls_layout.setContentsMargins(*PANEL_MARGINS)
+        controls_layout.setSpacing(BLOCK_SPACING)
+        content_layout.addWidget(left_panel, stretch=0)
 
         graph_wrapper = QWidget()
         graph_wrapper_layout = QVBoxLayout(graph_wrapper)
         graph_wrapper_layout.setContentsMargins(0, 0, 0, 0)
-        graph_wrapper_layout.setSpacing(8)
+        graph_wrapper_layout.setSpacing(BLOCK_SPACING)
 
         graph_content_layout = QHBoxLayout()
         graph_content_layout.setContentsMargins(0, 0, 0, 0)
-        graph_content_layout.setSpacing(8)
+        graph_content_layout.setSpacing(BLOCK_SPACING)
         graph_wrapper_layout.addLayout(graph_content_layout, stretch=1)
+
+        self.right_panel = QWidget()
+        self.right_panel.setFixedWidth(FILE_BROWSER_WIDTH)
+        self.right_layout = QVBoxLayout(self.right_panel)
+        self.right_layout.setContentsMargins(*PANEL_MARGINS)
+        self.right_layout.setSpacing(BLOCK_SPACING)
+
+        self.center_column = QWidget()
+        self.center_column_layout = QVBoxLayout(self.center_column)
+        self.center_column_layout.setContentsMargins(0, 0, 0, 0)
+        self.center_column_layout.setSpacing(BLOCK_SPACING)
+        graph_content_layout.addWidget(self.center_column, stretch=5)
 
         self.graph_box = QGroupBox("Azimuthal profile")
         graph_layout = QVBoxLayout(self.graph_box)
-        graph_layout.setContentsMargins(6, 24, 6, 6)
+        graph_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         graph_layout.setSpacing(6)
-        graph_content_layout.addWidget(self.graph_box, stretch=5)
+        self.center_column_layout.addWidget(self.graph_box, stretch=1)
+
+        self.image_column = QWidget()
+        self.image_column.setFixedWidth(FILE_BROWSER_WIDTH)
+        self.image_column_layout = QVBoxLayout(self.image_column)
+        self.image_column_layout.setContentsMargins(*PANEL_MARGINS)
+        self.image_column_layout.setSpacing(BLOCK_SPACING)
 
         self.image_box = QGroupBox("Pattern")
         image_layout = QVBoxLayout(self.image_box)
-        image_layout.setContentsMargins(6, 24, 6, 6)
+        image_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         image_layout.setSpacing(6)
-        self.image_box.setMinimumWidth(320)
-        self.image_box.setMaximumWidth(430)
-        graph_content_layout.addWidget(self.image_box, stretch=2)
+        self.image_column_layout.addWidget(self.image_box, stretch=1)
+        graph_content_layout.addWidget(self.image_column, stretch=0)
 
-        main_layout.addWidget(graph_wrapper, stretch=1)
+        graph_content_layout.addWidget(self.right_panel, stretch=0)
+
+        content_layout.addWidget(graph_wrapper, stretch=1)
+
+        file_browser_box = QGroupBox("File browser")
+        file_browser_box.setMinimumHeight(220)
+        file_browser_box.setStyleSheet(GROUP_BOX_STYLE)
+
+        file_browser_layout = QVBoxLayout(file_browser_box)
+        file_browser_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        file_browser_layout.setSpacing(6)
+
+        controls_layout.addWidget(file_browser_box, stretch=1)
+
+        self.folder_path = QLineEdit("")
+        self.folder_path.returnPressed.connect(self.refresh_files)
+        file_browser_layout.addWidget(self.folder_path)
+
+        self.open_folder_button = QPushButton("Browse")
+        self.open_folder_button.clicked.connect(self.open_folder)
+        file_browser_layout.addWidget(self.open_folder_button)
+
+        filters_layout = QGridLayout()
+
+        self.extensions_filter = QLineEdit("*azimProf.dat")
+        self.name_filter = QLineEdit("**")
+
+        self.extensions_filter.textChanged.connect(self.refresh_files)
+        self.name_filter.textChanged.connect(self.refresh_files)
+
+        filters_layout.addWidget(QLabel("Name:"), 0, 0)
+        filters_layout.addWidget(self.name_filter, 0, 1)
+
+        filters_layout.addWidget(QLabel("Extensions:"), 1, 0)
+        filters_layout.addWidget(self.extensions_filter, 1, 1)
+
+        file_browser_layout.addLayout(filters_layout)
+
+        self.show_subfolders_checkbox = QCheckBox("Show subfolders")
+        self.show_subfolders_checkbox.setChecked(False)
+        self.show_subfolders_checkbox.stateChanged.connect(self.refresh_files)
+        file_browser_layout.addWidget(self.show_subfolders_checkbox)
+
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.refresh_files)
+        file_browser_layout.addWidget(self.refresh_button)
+
+        self.file_list = QListWidget()
+        self.file_list.currentItemChanged.connect(self.load_selected_file)
+        self.file_list.setMinimumHeight(180)
+
+        file_browser_layout.addWidget(self.file_list, stretch=1)
 
         # --- Parameter selection box ---
-        mode_box = QGroupBox("Parameter")
+        mode_box = QGroupBox("Parameter choice")
         mode_layout = QGridLayout(mode_box)
-        mode_layout.setContentsMargins(8, 18, 8, 8)
+        mode_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         mode_layout.setSpacing(6)
 
         self.parameter_selector = QComboBox()
@@ -761,45 +863,31 @@ class HermansTab(QWidget):
         mode_layout.addWidget(QLabel("Parameter:"), 0, 0)
         mode_layout.addWidget(self.parameter_selector, 0, 1)
         mode_layout.setColumnStretch(1, 1)
+        mode_box.setFixedHeight(78)
 
+        self.mode_box = mode_box
         controls_layout.addWidget(mode_box, stretch=0)
-
-        file_browser_box = QGroupBox("File browser")
-        file_browser_layout = QVBoxLayout(file_browser_box)
-        file_browser_layout.setContentsMargins(8, 18, 8, 8)
-        file_browser_layout.setSpacing(6)
-
-        self.open_folder_button = QPushButton("Open folder")
-        self.open_folder_button.clicked.connect(self.open_folder)
-        file_browser_layout.addWidget(self.open_folder_button)
-
-
-
-        self.file_list = QListWidget()
-        self.file_list.currentItemChanged.connect(self.load_selected_file)
-        file_browser_layout.addWidget(self.file_list, stretch=1)
-
-        controls_layout.addWidget(file_browser_box, stretch=1)
-        file_browser_box.setMinimumHeight(320)
 
         results_box = QGroupBox("Results")
         results_layout = QVBoxLayout(results_box)
-        results_layout.setContentsMargins(8, 18, 8, 8)
+        results_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         results_layout.setSpacing(6)
 
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
         results_layout.addWidget(self.results_text)
 
+        self.results_box = results_box
+        self.results_box.setMinimumHeight(190)
         controls_layout.addWidget(results_box, stretch=0)
-        results_box.setFixedHeight(190)
 
         params_box = QGroupBox("Parameters")
         params_layout = QGridLayout(params_box)
-        params_layout.setContentsMargins(6, 18, 6, 6)
+        params_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         params_layout.setSpacing(6)
-        graph_wrapper_layout.addWidget(params_box, stretch=0)
-
+        self.params_box = params_box
+        self.center_column_layout.addWidget(params_box, stretch=0)
+        self.graph_wrapper_layout = graph_wrapper_layout
         self.offset_spin, self.offset_slider = self.add_slider_control(
             params_layout, 0, "Baseline", 0.0, -1.0, 1.0
         )
@@ -809,51 +897,43 @@ class HermansTab(QWidget):
         self.window_spin, self.window_slider = self.add_slider_control(
             params_layout, 2, "Window (°)", 90.0, 10.0, 180.0
         )
-
         self.use_fit_checkbox = QCheckBox("Fit")
         self.use_fit_checkbox.setChecked(True)
         self.use_fit_checkbox.stateChanged.connect(self.update_fit_mode)
         params_layout.addWidget(self.use_fit_checkbox, 3, 0, 1, 5)
-
         self.height_spin, self.height_slider = self.add_slider_control(
             params_layout, 4, "Height", 1.0, 0.0, 10.0
         )
         self.manual_fwhm_spin, self.manual_fwhm_slider = self.add_slider_control(
             params_layout, 5, "FWHM (°)", 90.0, 0.1, 180.0
         )
-
         self.fit_button = QPushButton("Fit")
         self.fit_button.clicked.connect(self.recenter_on_fit)
         self.save_fit_button = QPushButton("Save fit .dat")
         self.save_fit_button.clicked.connect(self.save_gaussian_fit)
         params_layout.addWidget(self.fit_button, 6, 0, 1, 2)
         params_layout.addWidget(self.save_fit_button, 6, 2, 1, 3)
-
         self.anisotropy_param_widgets = []
-
         h_box = QGroupBox("Horizontal sector")
         h_layout = QGridLayout(h_box)
-        h_layout.setContentsMargins(8, 18, 8, 8)
+        h_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         h_layout.setHorizontalSpacing(8)
         h_layout.setVerticalSpacing(6)
-
         v_box = QGroupBox("Vertical sector")
         reference_box = QGroupBox("Reference frame")
         reference_layout = QGridLayout(reference_box)
-        reference_layout.setContentsMargins(8, 18, 8, 8)
+        reference_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         reference_layout.setHorizontalSpacing(8)
         reference_layout.setVerticalSpacing(6)
         v_layout = QGridLayout(v_box)
-        v_layout.setContentsMargins(8, 18, 8, 8)
+        v_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         v_layout.setHorizontalSpacing(8)
         v_layout.setVerticalSpacing(6)
-
         q_range_box = QGroupBox("q range")
         q_range_layout = QGridLayout(q_range_box)
-        q_range_layout.setContentsMargins(8, 18, 8, 8)
+        q_range_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         q_range_layout.setHorizontalSpacing(8)
         q_range_layout.setVerticalSpacing(6)
-
         def add_sector_spin(layout, row, label, value):
             label_widget = QLabel(label)
             spin = QDoubleSpinBox()
@@ -867,162 +947,160 @@ class HermansTab(QWidget):
             layout.setColumnStretch(1, 1)
             self.anisotropy_param_widgets.extend([label_widget, spin])
             return spin
-
         self.h_psi_min = add_sector_spin(h_layout, 0, "ψ min", 350.0)
         self.h_psi_max = add_sector_spin(h_layout, 1, "ψ max", 10.0)
         self.v_psi_min = add_sector_spin(v_layout, 0, "ψ min", 80.0)
         self.v_psi_max = add_sector_spin(v_layout, 1, "ψ max", 100.0)
-
         h_box.setStyleSheet("""
             QGroupBox {
                 background-color: #fff1f1;
                 border: 1px solid #f0a0a0;
-                border-radius: 8px;
+                border-radius: 10px;
                 margin-top: 14px;
+                padding: 4px;
+                font-family: Arial;
+                font-size: 12px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
+                subcontrol-position: top left;
                 left: 8px;
                 padding: 0px 4px;
                 color: #9b1111;
+                font-family: Arial;
+                font-size: 12px;
             }
         """)
         v_box.setStyleSheet("""
             QGroupBox {
                 background-color: #eef4ff;
                 border: 1px solid #9ebcff;
-                border-radius: 8px;
+                border-radius: 10px;
                 margin-top: 14px;
+                padding: 4px;
+                font-family: Arial;
+                font-size: 12px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
+                subcontrol-position: top left;
                 left: 8px;
                 padding: 0px 4px;
                 color: #123f9a;
+                font-family: Arial;
+                font-size: 12px;
             }
         """)
-
         q_range_box = QGroupBox("q range")
         q_range_layout = QGridLayout(q_range_box)
-        q_range_layout.setContentsMargins(8, 18, 8, 8)
+        q_range_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         q_range_layout.setHorizontalSpacing(8)
         q_range_layout.setVerticalSpacing(6)
-
         self.use_q_range = QCheckBox("Use q range")
         self.use_q_range.setChecked(False)
         self.use_q_range.stateChanged.connect(self.calculate_anisotropy)
-
         self.q_min_filter = QDoubleSpinBox()
         self.q_min_filter.setDecimals(4)
         self.q_min_filter.setRange(0, 1000)
         self.q_min_filter.setValue(0.0)
         self.q_min_filter.setSuffix(" nm⁻¹")
         self.q_min_filter.valueChanged.connect(self.calculate_anisotropy)
-
         self.q_max_filter = QDoubleSpinBox()
         self.q_max_filter.setDecimals(4)
         self.q_max_filter.setRange(0, 1000)
         self.q_max_filter.setValue(10.0)
         self.q_max_filter.setSuffix(" nm⁻¹")
         self.q_max_filter.valueChanged.connect(self.calculate_anisotropy)
-
         q_range_layout.addWidget(QLabel("q min"), 0, 0)
         q_range_layout.addWidget(self.q_min_filter, 0, 1)
         q_range_layout.addWidget(QLabel("q max"), 1, 0)
         q_range_layout.addWidget(self.q_max_filter, 1, 1)
         q_range_layout.addWidget(self.use_q_range, 2, 0, 1, 2)
         q_range_layout.setColumnStretch(1, 1)
-
         self.reference_angle = QDoubleSpinBox()
         self.reference_angle.setDecimals(3)
         self.reference_angle.setRange(-180, 180)
         self.reference_angle.setValue(0.0)
         self.reference_angle.setSuffix(" °")
         self.reference_angle.valueChanged.connect(self.calculate_anisotropy)
-
         reference_layout.addWidget(QLabel("0° direction"), 0, 0)
         reference_layout.addWidget(self.reference_angle, 0, 1)
         reference_layout.setColumnStretch(1, 1)
-
         params_layout.addWidget(h_box, 7, 0, 3, 2)
         params_layout.addWidget(v_box, 7, 2, 3, 2)
-        params_layout.addWidget(q_range_box, 7, 4, 3, 2)
-        params_layout.addWidget(reference_box, 7, 6, 3, 2)
+        params_layout.addWidget(q_range_box, 10, 0, 3, 2)
+        params_layout.addWidget(reference_box, 10, 2, 3, 2)
         params_layout.setColumnStretch(0, 1)
         params_layout.setColumnStretch(2, 1)
-        params_layout.setColumnStretch(4, 1)
-        params_layout.setColumnStretch(6, 1)
-
         self.anisotropy_param_widgets.extend([
             h_box, v_box, q_range_box, reference_box,
             self.use_q_range, self.q_min_filter, self.q_max_filter, self.reference_angle,
         ])
-
         frame_nav = QHBoxLayout()
         frame_nav.setContentsMargins(0, 0, 0, 0)
-        frame_nav.setSpacing(6)
-
+        frame_nav.setSpacing(FRAME_NAV_SPACING)
         self.frame_start_spin = QSpinBox()
         self.frame_start_spin.setRange(1, 1)
         self.frame_start_spin.setValue(1)
-        self.frame_start_spin.setFixedWidth(70)
-
+        self.frame_start_spin.setFixedWidth(FRAME_SPIN_WIDTH)
         self.frame_end_spin = QSpinBox()
         self.frame_end_spin.setRange(1, 1)
         self.frame_end_spin.setValue(1)
-        self.frame_end_spin.setFixedWidth(70)
-
+        self.frame_end_spin.setFixedWidth(FRAME_SPIN_WIDTH)
         self.prev_frame_button = QPushButton("<")
         self.next_frame_button = QPushButton(">")
-        self.prev_frame_button.setFixedWidth(44)
-        self.next_frame_button.setFixedWidth(44)
-
+        self.prev_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
+        self.next_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
         self.frame_slider = QSlider(Qt.Horizontal)
         self.frame_slider.setRange(1, 1)
         self.frame_slider.setValue(1)
-
         self.frame_counter_label = QLabel("1 / 1")
-        self.frame_counter_label.setMinimumWidth(56)
+        self.frame_counter_label.setMinimumWidth(FRAME_COUNTER_WIDTH)
         self.frame_counter_label.setAlignment(Qt.AlignCenter)
-
-        frame_nav.addWidget(QLabel("From:"))
+        frame_nav.addWidget(QLabel("Start:"))
         frame_nav.addWidget(self.frame_start_spin)
         frame_nav.addWidget(self.prev_frame_button)
         frame_nav.addWidget(self.frame_slider, stretch=1)
         frame_nav.addWidget(self.next_frame_button)
-        frame_nav.addWidget(QLabel("To:"))
+        frame_nav.addWidget(QLabel("End:"))
         frame_nav.addWidget(self.frame_end_spin)
         frame_nav.addWidget(self.frame_counter_label)
-
-        graph_wrapper_layout.addLayout(frame_nav)
-
+        main_layout.addLayout(frame_nav, stretch=0)
         self.frame_start_spin.valueChanged.connect(self.update_frame_bounds)
         self.frame_end_spin.valueChanged.connect(self.update_frame_bounds)
         self.frame_slider.valueChanged.connect(self.frame_slider_changed)
         self.prev_frame_button.clicked.connect(self.previous_frame)
         self.next_frame_button.clicked.connect(self.next_frame)
-
-
         self.canvas = PlotCanvas()
-        graph_layout.addWidget(self.canvas)
 
-        anisotropy_graph_controls = QHBoxLayout()
-        anisotropy_graph_controls.setContentsMargins(0, 0, 0, 0)
-        anisotropy_graph_controls.setSpacing(6)
+        self.plot_control_bar = QGroupBox()
+        self.plot_control_bar.setStyleSheet(GROUP_BOX_STYLE)
+        plot_control_layout = QHBoxLayout(self.plot_control_bar)
+        plot_control_layout.setContentsMargins(8, 6, 8, 6)
+        plot_control_layout.setSpacing(8)
+
+        self.plot_toolbar = NavigationToolbar(self.canvas, self)
+        plot_control_layout.addWidget(self.plot_toolbar)
+        plot_control_layout.addStretch(1)
+
+        self.anisotropy_plot_mode_label = QLabel("Scale")
+        plot_control_layout.addWidget(self.anisotropy_plot_mode_label)
 
         self.anisotropy_plot_mode = QComboBox()
         self.anisotropy_plot_mode.addItems(["log-log", "lin-lin", "lin-log", "log-lin", "Kratky"])
         self.anisotropy_plot_mode.currentIndexChanged.connect(self.calculate_anisotropy)
+        plot_control_layout.addWidget(self.anisotropy_plot_mode)
 
-        self.save_anisotropy_button = QPushButton("Save .dat")
+        self.show_legend_checkbox = QCheckBox("Legend")
+        self.show_legend_checkbox.setChecked(True)
+        self.show_legend_checkbox.stateChanged.connect(self.calculate)
+        plot_control_layout.addWidget(self.show_legend_checkbox)
+
+        self.save_anisotropy_button = QPushButton("💾")
+        self.save_anisotropy_button.setFixedWidth(36)
+        self.save_anisotropy_button.setToolTip("Save anisotropy profiles .dat")
         self.save_anisotropy_button.clicked.connect(self.save_anisotropy_profiles)
-
-        self.anisotropy_plot_mode_label = QLabel("Scale")
-        anisotropy_graph_controls.addWidget(self.anisotropy_plot_mode_label)
-        anisotropy_graph_controls.addWidget(self.anisotropy_plot_mode)
-        anisotropy_graph_controls.addStretch(1)
-        anisotropy_graph_controls.addWidget(self.save_anisotropy_button)
-        graph_layout.addLayout(anisotropy_graph_controls)
+        plot_control_layout.addWidget(self.save_anisotropy_button)
 
         self.anisotropy_param_widgets.extend([
             self.anisotropy_plot_mode_label,
@@ -1030,52 +1108,91 @@ class HermansTab(QWidget):
             self.save_anisotropy_button,
         ])
 
+        graph_layout.addWidget(self.plot_control_bar, stretch=0)
+        graph_layout.addWidget(self.canvas, stretch=1)
+        self.graph_coordinate_label = QLabel("ψ = -° | I = -")
+        self.graph_coordinate_label.setMinimumHeight(26)
+        self.graph_coordinate_label.setAlignment(Qt.AlignCenter)
+        self.graph_coordinate_label.setStyleSheet("""
+            QLabel {
+                background-color: #f4f4f4;
+                border-radius: 8px;
+                padding: 4px;
+                font-family: Menlo, Monaco, monospace;
+                font-size: 10px;
+            }
+        """)
+        graph_layout.addWidget(self.graph_coordinate_label, stretch=0)
+        self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
+        self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
+        # (anisotropy_graph_controls block removed)
         self.image_canvas = ImageCanvas()
+        self.image_canvas.setMinimumWidth(0)
+        self.image_canvas.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         image_layout.addWidget(self.image_canvas, stretch=1)
-
-        self.image_coordinate_label = QLabel("x = - | y = -\nq = - | I = -")
+        self.image_coordinate_label = QLabel("x = - | y = -\nψ = -° | q = - | I = -")
+        self.image_coordinate_label.setMinimumHeight(42)
         self.image_coordinate_label.setAlignment(Qt.AlignCenter)
-        self.image_coordinate_label.setStyleSheet("font-family: Menlo, monospace;")
+        self.image_coordinate_label.setStyleSheet("""
+            QLabel {
+                background-color: #f4f4f4;
+                border-radius: 8px;
+                padding: 5px;
+                font-family: Menlo, Monaco, monospace;
+                font-size: 10px;
+            }
+        """)
         image_layout.addWidget(self.image_coordinate_label, stretch=0)
         self.image_canvas.set_coordinate_label(self.image_coordinate_label)
-
         # --- Instrument buttons and center controls ---
         instrument_layout = QGridLayout()
         instrument_layout.setContentsMargins(0, 0, 0, 0)
         instrument_layout.setHorizontalSpacing(6)
         instrument_layout.setVerticalSpacing(4)
-
         self.btn_xenocs = QPushButton("XENOCS")
         self.btn_id02 = QPushButton("ID02")
         self.btn_id13 = QPushButton("ID13")
         self.btn_custom = QPushButton("Custom")
-
+        self.btn_xenocs.setCheckable(True)
+        self.btn_id02.setCheckable(True)
+        self.btn_id13.setCheckable(True)
+        self.btn_custom.setCheckable(True)
         self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
         self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
         self.btn_id13.clicked.connect(lambda: self.set_instrument_mode("ID13"))
         self.btn_custom.clicked.connect(lambda: self.set_instrument_mode("Custom"))
+        self.line_params_button = QPushButton("+")
+        self.line_params_button.setFixedWidth(28)
+        self.line_params_button.setToolTip("Show line parameters")
+        self.line_params_button.clicked.connect(lambda: self.params_box.setVisible(not self.params_box.isVisible()))
 
         instrument_layout.addWidget(self.btn_xenocs, 0, 0)
         instrument_layout.addWidget(self.btn_id02, 0, 1)
         instrument_layout.addWidget(self.btn_id13, 0, 2)
-        instrument_layout.addWidget(self.btn_custom, 0, 3)
+        instrument_layout.addWidget(self.line_params_button, 0, 3)
+        instrument_layout.addWidget(self.btn_custom, 1, 0, 1, 4)
 
+        self.btn_xenocs.setMinimumWidth(72)
+        self.btn_id02.setMinimumWidth(62)
+        self.btn_id13.setMinimumWidth(62)
+        self.btn_custom.setMinimumWidth(0)
+        self.line_params_button.setMinimumWidth(28)
+        self.line_params_button.setMaximumWidth(28)
         self.center_x_spin = QDoubleSpinBox()
         self.center_y_spin = QDoubleSpinBox()
-        self.center_x_spin.setDecimals(13)
-        self.center_y_spin.setDecimals(13)
+        self.center_x_spin.setDecimals(3)
+        self.center_y_spin.setDecimals(3)
         self.center_x_spin.setRange(-1e6, 1e6)
         self.center_y_spin.setRange(-1e6, 1e6)
+        self.center_x_spin.setMinimumWidth(90)
+        self.center_y_spin.setMinimumWidth(90)
         self.center_x_spin.valueChanged.connect(self.calculate_anisotropy)
         self.center_y_spin.valueChanged.connect(self.calculate_anisotropy)
-
-        instrument_layout.addWidget(QLabel("Center X"), 1, 0)
-        instrument_layout.addWidget(self.center_x_spin, 1, 1)
-        instrument_layout.addWidget(QLabel("Center Y"), 1, 2)
-        instrument_layout.addWidget(self.center_y_spin, 1, 3)
-
+        instrument_layout.addWidget(QLabel("Center X"), 2, 0)
+        instrument_layout.addWidget(self.center_x_spin, 2, 1, 1, 3)
+        instrument_layout.addWidget(QLabel("Center Y"), 3, 0)
+        instrument_layout.addWidget(self.center_y_spin, 3, 1, 1, 3)
         image_layout.insertLayout(0, instrument_layout)
-
         for widget in [
             self.peak_spin,
             self.window_spin,
@@ -1084,7 +1201,6 @@ class HermansTab(QWidget):
             self.manual_fwhm_spin,
         ]:
             widget.valueChanged.connect(self.calculate)
-
         for slider in [
             self.peak_slider,
             self.window_slider,
@@ -1093,9 +1209,45 @@ class HermansTab(QWidget):
             self.manual_fwhm_slider,
         ]:
             slider.valueChanged.connect(self.slider_changed)
-
         self.update_fit_mode()
+        self.set_instrument_mode("XENOCS")
         self.parameter_mode_changed()
+
+    def move_widget_to_layout(self, widget, layout, stretch=0):
+        if widget.parentWidget() is not None and widget.parentWidget().layout() is not None:
+            widget.parentWidget().layout().removeWidget(widget)
+        layout.addWidget(widget, stretch=stretch)
+        widget.show()
+
+    def apply_parameter_layout_mode(self):
+        if not hasattr(self, "mode_box"):
+            return
+
+        anisotropy_mode = self.is_anisotropy_mode()
+
+        if anisotropy_mode:
+            self.right_panel.setVisible(False)
+            self.image_column.setVisible(True)
+
+            self.move_widget_to_layout(self.mode_box, self.image_column_layout, stretch=0)
+            self.image_column_layout.removeWidget(self.mode_box)
+            self.image_column_layout.insertWidget(0, self.mode_box, stretch=0)
+            self.mode_box.setVisible(True)
+
+            self.move_widget_to_layout(self.results_box, self.image_column_layout, stretch=1)
+            self.image_column_layout.removeWidget(self.results_box)
+            self.image_column_layout.insertWidget(2, self.results_box, stretch=1)
+
+            self.move_widget_to_layout(self.params_box, self.center_column_layout, stretch=0)
+        else:
+            self.right_panel.setVisible(True)
+            self.image_column.setVisible(False)
+
+            self.move_widget_to_layout(self.mode_box, self.right_layout, stretch=0)
+            self.mode_box.setVisible(True)
+
+            self.move_widget_to_layout(self.results_box, self.right_layout, stretch=1)
+            self.move_widget_to_layout(self.params_box, self.center_column_layout, stretch=0)
     def is_anisotropy_mode(self):
         return hasattr(self, "parameter_selector") and self.parameter_selector.currentIndex() == 1
 
@@ -1103,6 +1255,7 @@ class HermansTab(QWidget):
         anisotropy_mode = self.is_anisotropy_mode()
 
         self.graph_box.setTitle("I(q) profiles" if anisotropy_mode else "Azimuthal profile")
+        self.image_column.setVisible(anisotropy_mode)
         self.image_box.setVisible(anisotropy_mode)
 
         hermans_widgets = [
@@ -1128,19 +1281,122 @@ class HermansTab(QWidget):
             widget.setVisible(anisotropy_mode)
 
         for widget in [
-            self.frame_start_spin, self.frame_end_spin, self.prev_frame_button,
-            self.next_frame_button, self.frame_slider, self.frame_counter_label,
             self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom,
+            self.line_params_button,
             self.center_x_spin, self.center_y_spin,
         ]:
             widget.setVisible(anisotropy_mode)
 
+        self.plot_control_bar.setVisible(True)
+        self.anisotropy_plot_mode_label.setVisible(anisotropy_mode)
+        self.anisotropy_plot_mode.setVisible(anisotropy_mode)
+        self.save_anisotropy_button.setVisible(anisotropy_mode)
+
+        self.update_file_filter_for_parameter()
+
+        self.apply_parameter_layout_mode()
+
         if self.folder is not None:
-            self.load_folder(self.folder)
+            self.refresh_files()
         elif anisotropy_mode:
             self.calculate_anisotropy()
         else:
             self.calculate()
+        self.update_frame_navigation_state()
+
+    def update_file_filter_for_parameter(self):
+        if not hasattr(self, "extensions_filter"):
+            return
+
+        desired_filter = "*.edf *.h5 *.hdf5" if self.is_anisotropy_mode() else "*azimProf.dat"
+        if self.extensions_filter.text() == desired_filter:
+            return
+
+        self.extensions_filter.blockSignals(True)
+        self.extensions_filter.setText(desired_filter)
+        self.extensions_filter.blockSignals(False)
+
+    def refresh_files(self):
+        if not hasattr(self, "folder_path"):
+            return
+
+        folder = Path(self.folder_path.text()).expanduser()
+        if not folder.exists() or not folder.is_dir():
+            return
+
+        self.folder = folder
+        self.folder_changed.emit(self.folder)
+
+        patterns = self.extensions_filter.text().split()
+        if not patterns:
+            patterns = ["*.edf", "*.h5", "*.hdf5"] if self.is_anisotropy_mode() else ["*azimProf.dat"]
+
+        name_filter = self.name_filter.text().strip()
+        if not name_filter:
+            name_filter = "**"
+
+        search_method = folder.rglob if self.show_subfolders_checkbox.isChecked() else folder.glob
+        files = []
+        for pattern in patterns:
+            files.extend(search_method(pattern))
+
+        from fnmatch import fnmatch
+        files = sorted(set(files))
+        files = [file for file in files if fnmatch(file.name, name_filter)]
+
+        if self.is_anisotropy_mode():
+            excluded_suffixes = ("_ave.h5", "_aveq_ave.h5", "ave.h5", "polar.edf")
+            edf_stems = {file.stem for file in files if file.suffix.lower() == ".edf"}
+            filtered_files = []
+            for file in files:
+                lower_name = file.name.lower()
+                suffix = file.suffix.lower()
+
+                if lower_name.endswith(excluded_suffixes):
+                    continue
+
+                if suffix in [".h5", ".hdf5"] and file.stem in edf_stems:
+                    continue
+
+                filtered_files.append(file)
+            files = filtered_files
+
+        self.available_files = [
+            str(file.relative_to(folder)) if self.show_subfolders_checkbox.isChecked() else file.name
+            for file in files
+        ]
+
+        current_text = self.file_list.currentItem().text() if self.file_list.currentItem() else None
+
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+        self.file_list.addItems(self.available_files)
+        self.file_list.blockSignals(False)
+
+        if self.available_files:
+            row = self.available_files.index(current_text) if current_text in self.available_files else 0
+            self.file_list.setCurrentRow(row)
+            self.load_file(self.folder / self.available_files[row])
+        else:
+            self.current_file = None
+            self.azimuth = None
+            self.intensity = None
+            self.current_image = None
+            self.current_header = {}
+            self.last_fit = None
+            self.last_anisotropy = None
+            self.results_text.clear()
+            self.canvas.ax.clear()
+            self.canvas.draw_idle()
+
+    def update_frame_navigation_state(self):
+        can_navigate = self.is_anisotropy_mode() and self.current_file is not None and self.total_frames > 1
+        current = self.frame_slider.value()
+        self.frame_start_spin.setEnabled(can_navigate)
+        self.frame_end_spin.setEnabled(can_navigate)
+        self.frame_slider.setEnabled(can_navigate)
+        self.prev_frame_button.setEnabled(can_navigate and current > self.frame_slider.minimum())
+        self.next_frame_button.setEnabled(can_navigate and current < self.frame_slider.maximum())
 
     def configure_frame_navigation(self, n_frames):
         self.total_frames = max(1, int(n_frames))
@@ -1155,6 +1411,7 @@ class HermansTab(QWidget):
         self.frame_slider.setValue(self.current_frame)
         self.frame_counter_label.setText(f"{self.current_frame} / {self.total_frames}")
         self._updating_frame_controls = False
+        self.update_frame_navigation_state()
 
     def update_frame_bounds(self):
         start = self.frame_start_spin.value()
@@ -1173,10 +1430,12 @@ class HermansTab(QWidget):
             self.frame_slider.setValue(start)
         elif self.frame_slider.value() > end:
             self.frame_slider.setValue(end)
+        self.update_frame_navigation_state()
 
     def frame_slider_changed(self, value):
         self.current_frame = int(value)
         self.frame_counter_label.setText(f"{self.current_frame} / {self.total_frames}")
+        self.update_frame_navigation_state()
 
         if not self._updating_frame_controls and self.is_anisotropy_mode() and self.current_file is not None:
             self.load_file(self.current_file)
@@ -1187,8 +1446,44 @@ class HermansTab(QWidget):
     def next_frame(self):
         self.frame_slider.setValue(min(self.frame_slider.maximum(), self.frame_slider.value() + 1))
 
+    def graph_coordinate_labels(self):
+        if self.is_anisotropy_mode():
+            return "q", "I"
+        return "ψ", "I"
+
+    def update_graph_coordinates(self, event):
+        if event.inaxes != self.canvas.ax or event.xdata is None or event.ydata is None:
+            return
+
+        try:
+            x_name, y_name = self.graph_coordinate_labels()
+            x_suffix = "°" if x_name == "ψ" else ""
+            self.graph_coordinate_label.setText(
+                f"{x_name} = {event.xdata:.6g}{x_suffix} | {y_name} = {event.ydata:.6g}"
+            )
+        except Exception:
+            self.clear_graph_coordinates()
+
+    def clear_graph_coordinates(self, event=None):
+        x_name, y_name = self.graph_coordinate_labels()
+        x_suffix = "°" if x_name == "ψ" else ""
+        self.graph_coordinate_label.setText(f"{x_name} = -{x_suffix} | {y_name} = -")
+
     def set_instrument_mode(self, mode):
         self.instrument_mode = mode
+
+        buttons = {
+            "XENOCS": self.btn_xenocs,
+            "ID02": self.btn_id02,
+            "ID13": self.btn_id13,
+            "Custom": self.btn_custom,
+        }
+
+        for name, button in buttons.items():
+            active = name == mode
+            button.setChecked(active)
+            button.setStyleSheet("")
+
         self.apply_instrument_preset()
         self.calculate_anisotropy()
 
@@ -1377,56 +1672,18 @@ class HermansTab(QWidget):
         self.load_folder(folder)
 
     def open_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Open azimuthal folder", "")
+        folder = QFileDialog.getExistingDirectory(self, "Open folder", str(self.folder or Path.cwd()))
         if folder:
             self.load_folder(Path(folder))
 
     def load_folder(self, folder):
         self.folder = Path(folder)
-        self.folder_changed.emit(self.folder)
-
-        if self.is_anisotropy_mode():
-            files = []
-            for pattern in ["*.edf", "*.h5", "*.hdf5"]:
-                files.extend(self.folder.glob(pattern))
-
-            excluded_suffixes = ("_ave.h5", "_aveq_ave.h5", "polar.edf")
-            unique_files = sorted(set(files))
-            edf_stems = {file.stem for file in unique_files if file.suffix.lower() == ".edf"}
-
-            self.available_files = []
-            for file in unique_files:
-                lower_name = file.name.lower()
-                suffix = file.suffix.lower()
-
-                if lower_name.endswith(excluded_suffixes):
-                    continue
-
-                if suffix in [".h5", ".hdf5"] and file.stem in edf_stems:
-                    continue
-
-                self.available_files.append(file.name)
-        else:
-            self.available_files = sorted(
-                file.name for file in self.folder.glob("*_cave*_azimProf.dat")
-            )
-
-        self.file_list.blockSignals(True)
-        self.file_list.clear()
-        self.file_list.addItems(self.available_files)
-        self.file_list.blockSignals(False)
-
-        if self.available_files:
-            self.file_list.setCurrentRow(0)
-            self.load_file(self.folder / self.available_files[0])
-        else:
-            self.current_file = None
-            self.azimuth = None
-            self.intensity = None
-            self.last_fit = None
-            self.results_text.clear()
-            self.canvas.ax.clear()
-            self.canvas.draw_idle()
+        if hasattr(self, "folder_path"):
+            self.folder_path.blockSignals(True)
+            self.folder_path.setText(str(self.folder))
+            self.folder_path.blockSignals(False)
+        self.update_file_filter_for_parameter()
+        self.refresh_files()
 
     
 

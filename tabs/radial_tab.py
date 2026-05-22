@@ -23,8 +23,11 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QScrollArea,
+    QFrame,
     QComboBox,
     QSlider,
+    QToolButton,
+    QStyle,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -37,6 +40,20 @@ from .instrument_presets import (
     ID13_DEFAULT_DISTANCE_M,
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
+)
+from .ui_style import (
+    BLOCK_SPACING,
+    FILE_BROWSER_WIDTH,
+    FRAME_BUTTON_WIDTH,
+    FRAME_COUNTER_WIDTH,
+    FRAME_NAV_SPACING,
+    FRAME_SPIN_WIDTH,
+    GROUP_BOX_MARGINS,
+    GROUP_BOX_STYLE,
+    MATPLOTLIB_TOOLBAR_ICON_SCALE,
+    MATPLOTLIB_TOOLBAR_MAX_HEIGHT,
+    PAGE_MARGINS,
+    PANEL_MARGINS,
 )
 
 
@@ -1303,53 +1320,63 @@ class RadialTab(QWidget):
         self.image_vmax_label.setText(f"Max: {self.image_canvas.display_vmax:.3g}")
 
     def build_ui(self):
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(8)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(*PAGE_MARGINS)
+        main_layout.setSpacing(BLOCK_SPACING)
 
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left_scroll.setFixedWidth(380)
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(BLOCK_SPACING)
+        main_layout.addLayout(content_layout, stretch=1)
 
         left_panel = QWidget()
+        left_panel.setFixedWidth(FILE_BROWSER_WIDTH)
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
-        left_scroll.setWidget(left_panel)
-        main_layout.addWidget(left_scroll, stretch=0)
+        left_layout.setContentsMargins(*PANEL_MARGINS)
+        left_layout.setSpacing(BLOCK_SPACING)
+        content_layout.addWidget(left_panel, stretch=0)
 
         right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
+        right_layout = QHBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
-        main_layout.addWidget(right_panel, stretch=1)
+        right_layout.setSpacing(BLOCK_SPACING)
+        content_layout.addWidget(right_panel, stretch=1)
 
-        view_row = QHBoxLayout()
-        view_row.setContentsMargins(0, 0, 0, 0)
-        view_row.setSpacing(8)
-        right_layout.addLayout(view_row, stretch=1)
-
+        # ============================================================
+        # COLUMN 2: I(q) GRAPH
+        # ============================================================
         graph_box = QGroupBox("I(q) graph")
         graph_layout = QVBoxLayout(graph_box)
-        graph_layout.setContentsMargins(6, 18, 6, 6)
-        view_row.addWidget(graph_box, stretch=5)
+        graph_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        right_layout.addWidget(graph_box, stretch=1)
+
+        # ============================================================
+        # COLUMN 3: PARAMETERS + SELECTED AREA (IMAGE)
+        # ============================================================
+        right_side_panel = QWidget()
+        right_side_panel.setFixedWidth(FILE_BROWSER_WIDTH)
+        right_side_layout = QVBoxLayout(right_side_panel)
+        right_side_layout.setContentsMargins(0, 0, 0, 0)
+        right_side_layout.setSpacing(BLOCK_SPACING)
+        right_layout.addWidget(right_side_panel, stretch=0)
 
         image_box = QGroupBox("Selected area")
         image_layout = QVBoxLayout(image_box)
-        image_layout.setContentsMargins(6, 18, 6, 6)
-        image_box.setMinimumWidth(320)
-        image_box.setMaximumWidth(430)
-        view_row.addWidget(image_box, stretch=2)
+        image_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        right_side_layout.addWidget(image_box, stretch=1)
 
         file_box = QGroupBox("File browser")
+        file_box.setMinimumHeight(220)
+        file_box.setStyleSheet(GROUP_BOX_STYLE)
+
         file_layout = QVBoxLayout(file_box)
-        file_layout.setContentsMargins(8, 18, 8, 8)
+        file_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         file_layout.setSpacing(6)
-        left_layout.addWidget(file_box, stretch=0)
-        file_box.setFixedHeight(285)
+
+        left_layout.addWidget(file_box, stretch=1)
 
         self.folder_path = QLineEdit(str(self.current_folder))
+        self.folder_path.returnPressed.connect(self.refresh_files)
         file_layout.addWidget(self.folder_path)
 
         self.browse_button = QPushButton("Browse")
@@ -1357,15 +1384,25 @@ class RadialTab(QWidget):
         file_layout.addWidget(self.browse_button)
 
         filters_layout = QGridLayout()
+
         self.extensions_filter = QLineEdit("*.edf *.h5")
         self.name_filter = QLineEdit("**")
+
         self.extensions_filter.textChanged.connect(self.refresh_files)
         self.name_filter.textChanged.connect(self.refresh_files)
-        filters_layout.addWidget(QLabel("Extensions:"), 0, 0)
-        filters_layout.addWidget(self.extensions_filter, 0, 1)
-        filters_layout.addWidget(QLabel("Name:"), 1, 0)
-        filters_layout.addWidget(self.name_filter, 1, 1)
+
+        filters_layout.addWidget(QLabel("Name:"), 0, 0)
+        filters_layout.addWidget(self.name_filter, 0, 1)
+
+        filters_layout.addWidget(QLabel("Extensions:"), 1, 0)
+        filters_layout.addWidget(self.extensions_filter, 1, 1)
+
         file_layout.addLayout(filters_layout)
+
+        self.show_subfolders_checkbox = QCheckBox("Show subfolders")
+        self.show_subfolders_checkbox.setChecked(False)
+        self.show_subfolders_checkbox.stateChanged.connect(self.refresh_files)
+        file_layout.addWidget(self.show_subfolders_checkbox)
 
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_files)
@@ -1374,13 +1411,15 @@ class RadialTab(QWidget):
         self.file_list = QListWidget()
         self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.file_list.itemSelectionChanged.connect(self.selection_changed)
+        self.file_list.setMinimumHeight(180)
+
         file_layout.addWidget(self.file_list, stretch=1)
 
         params_box = QGroupBox("Radial parameters")
         params_layout = QVBoxLayout(params_box)
-        params_layout.setContentsMargins(8, 18, 8, 8)
+        params_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         params_layout.setSpacing(4)
-        left_layout.addWidget(params_box)
+        right_side_layout.insertWidget(0, params_box, stretch=0)
 
         preset_layout = QHBoxLayout()
         self.btn_xenocs = QPushButton("XENOCS")
@@ -1410,7 +1449,7 @@ class RadialTab(QWidget):
         self.q_max = self.double_spin(0, decimals=6, minimum=0)
         self.use_id13_pyfai_comparison = QCheckBox("ID13 pyFAI comparison")
         self.use_id13_pyfai_comparison.setChecked(False)
-        self.use_id13_pyfai_comparison.stateChanged.connect(self.update_id13_comparison)
+        self.use_id13_pyfai_comparison.setVisible(False)
 
         self.use_sector = QCheckBox("Use azimuthal sector")
         self.use_sector.setChecked(False)
@@ -1425,9 +1464,9 @@ class RadialTab(QWidget):
         self.plot_mode.setCurrentText("log log")
         self.plot_mode.currentTextChanged.connect(self.update_plot_mode)
 
-        form.addWidget(QLabel("Centre X:"), 0, 0)
+        form.addWidget(QLabel("Center X:"), 0, 0)
         form.addWidget(self.center_x, 0, 1)
-        form.addWidget(QLabel("Centre Y:"), 1, 0)
+        form.addWidget(QLabel("Center Y:"), 1, 0)
         form.addWidget(self.center_y, 1, 1)
         form.addWidget(QLabel("Distance (m):"), 2, 0)
         form.addWidget(self.distance, 2, 1)
@@ -1437,7 +1476,6 @@ class RadialTab(QWidget):
         form.addWidget(self.pixel_y, 4, 1)
         form.addWidget(QLabel("Wavelength (Å):"), 5, 0)
         form.addWidget(self.wavelength, 5, 1)
-        form.addWidget(self.use_id13_pyfai_comparison, 6, 0, 1, 2)
 
         self.frame_label = QLabel("H5 frame:")
         self.frame_spin = QSpinBox()
@@ -1467,25 +1505,36 @@ class RadialTab(QWidget):
         button_layout = QHBoxLayout()
         self.integrate_button = QPushButton("Integrate I(q)")
         self.integrate_button.clicked.connect(self.integrate_selected_files)
-        self.save_button = QPushButton("Save .dat")
-        self.save_button.clicked.connect(self.save_results)
         button_layout.addWidget(self.integrate_button)
-        button_layout.addWidget(self.save_button)
         params_layout.addLayout(button_layout)
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setVisible(False)
 
+        # ============================================================
+        # TOOLBAR (UNIFORMIZED)
+        # ============================================================
+        toolbar_box = QGroupBox("I(q) graph")
+        toolbar_box.setFixedHeight(78)
+        from .ui_style import TOOL_GROUP_BOX_STYLE
+        toolbar_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
+        
+        toolbar_layout = QVBoxLayout(toolbar_box)
+        toolbar_layout.setContentsMargins(6, 0, 6, 2)
+        toolbar_layout.setSpacing(0)
+
         self.canvas = PlotCanvas()
         self.toolbar = NavigationToolbar(self.canvas, self)
+        self.toolbar.coordinates = False
+        self.toolbar.setIconSize(self.toolbar.iconSize() * MATPLOTLIB_TOOLBAR_ICON_SCALE)
+        self.toolbar.setFixedHeight(MATPLOTLIB_TOOLBAR_MAX_HEIGHT)
+        self.toolbar.setContentsMargins(0, 0, 0, 0)
         self.toolbar.setStyleSheet("""
             QToolBar {
                 background: #f4f4f4;
                 background-color: #f4f4f4;
                 border: none;
-                spacing: 6px;
-                padding: 4px;
             }
             QToolButton {
                 background: transparent;
@@ -1493,12 +1542,53 @@ class RadialTab(QWidget):
             }
         """)
 
-        toolbar_row = QHBoxLayout()
-        toolbar_row.setContentsMargins(0, 0, 0, 0)
-        toolbar_row.setSpacing(8)
-        toolbar_row.addWidget(self.toolbar, stretch=1)
-        toolbar_row.addWidget(self.plot_mode, stretch=0)
-        graph_layout.addLayout(toolbar_row)
+        self.toolbar_extra_layout = QHBoxLayout()
+        self.toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
+        self.toolbar_extra_layout.setSpacing(8)
+        self.toolbar.setFixedWidth(340)
+
+        for action in list(self.toolbar.actions()):
+            text = action.text().strip().lower()
+            tooltip = action.toolTip().strip().lower()
+            icon_text = action.iconText().strip().lower()
+            if (
+                action.isSeparator()
+                or "save" in text
+                or "save" in tooltip
+                or "save" in icon_text
+            ):
+                self.toolbar.removeAction(action)
+
+        self.toolbar_extra_layout.addWidget(self.toolbar, stretch=0, alignment=Qt.AlignVCenter)
+        self.toolbar_extra_layout.addStretch(1)
+
+        self.save_graph_button = QToolButton()
+        self.save_graph_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+        self.save_graph_button.setToolTip("Save graph (.dat, .png or .tiff)")
+        self.save_graph_button.setFixedSize(
+            MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8,
+            MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8,
+        )
+        self.save_graph_button.setIconSize(self.toolbar.iconSize() * 1.25)
+        self.save_graph_button.setStyleSheet("""
+            QToolButton {
+                background: transparent;
+                background-color: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }
+        """)
+        self.save_graph_button.clicked.connect(self.save_results)
+
+        self.toolbar_extra_layout.addWidget(
+            self.save_graph_button,
+            stretch=0,
+            alignment=Qt.AlignVCenter,
+        )
+
+        toolbar_layout.addLayout(self.toolbar_extra_layout)
+        graph_layout.addWidget(toolbar_box, alignment=Qt.AlignTop)
 
         self.graph_coordinate_label = QLabel("q = - | I = -")
         self.graph_coordinate_label.setMinimumHeight(26)
@@ -1513,9 +1603,12 @@ class RadialTab(QWidget):
             }
         """)
 
-        graph_layout.addWidget(self.graph_coordinate_label, stretch=0)
         graph_layout.addWidget(self.canvas, stretch=1)
+        graph_layout.addWidget(self.graph_coordinate_label, stretch=0)
 
+        # ============================================================
+        # IMAGE CANVAS
+        # ============================================================
         self.image_canvas = ImageCanvas()
         self.image_coordinate_label = QLabel("x = - | y = -\nq = - | I = -")
         self.image_coordinate_label.setMinimumHeight(42)
@@ -1532,6 +1625,7 @@ class RadialTab(QWidget):
         self.image_canvas.set_coordinate_label(self.image_coordinate_label)
         image_layout.addWidget(self.image_canvas, stretch=1)
         image_layout.addWidget(self.image_coordinate_label, stretch=0)
+        
         image_limits_layout = QGridLayout()
         image_limits_layout.setContentsMargins(0, 0, 0, 0)
         image_limits_layout.setHorizontalSpacing(6)
@@ -1562,43 +1656,47 @@ class RadialTab(QWidget):
         self.canvas.mpl_connect("button_press_event", self.on_graph_right_click)
         self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
         self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
+
+        # ============================================================
+        # FRAME NAVIGATION (at bottom)
+        # ============================================================
         frame_nav = QHBoxLayout()
         frame_nav.setContentsMargins(0, 0, 0, 0)
-        frame_nav.setSpacing(6)
+        frame_nav.setSpacing(FRAME_NAV_SPACING)
 
         self.frame_start_spin = QSpinBox()
         self.frame_start_spin.setRange(1, 1)
         self.frame_start_spin.setValue(1)
-        self.frame_start_spin.setFixedWidth(70)
+        self.frame_start_spin.setFixedWidth(FRAME_SPIN_WIDTH)
 
         self.frame_end_spin = QSpinBox()
         self.frame_end_spin.setRange(1, 1)
         self.frame_end_spin.setValue(1)
-        self.frame_end_spin.setFixedWidth(70)
+        self.frame_end_spin.setFixedWidth(FRAME_SPIN_WIDTH)
 
         self.prev_frame_button = QPushButton("<")
         self.next_frame_button = QPushButton(">")
-        self.prev_frame_button.setFixedWidth(44)
-        self.next_frame_button.setFixedWidth(44)
+        self.prev_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
+        self.next_frame_button.setFixedWidth(FRAME_BUTTON_WIDTH)
 
         self.frame_slider = QSlider(Qt.Horizontal)
         self.frame_slider.setRange(1, 1)
         self.frame_slider.setValue(1)
 
         self.frame_counter_label = QLabel("1 / 1")
-        self.frame_counter_label.setMinimumWidth(56)
+        self.frame_counter_label.setMinimumWidth(FRAME_COUNTER_WIDTH)
         self.frame_counter_label.setAlignment(Qt.AlignCenter)
 
-        frame_nav.addWidget(QLabel("From:"))
+        frame_nav.addWidget(QLabel("Start:"))
         frame_nav.addWidget(self.frame_start_spin)
         frame_nav.addWidget(self.prev_frame_button)
         frame_nav.addWidget(self.frame_slider, stretch=1)
         frame_nav.addWidget(self.next_frame_button)
-        frame_nav.addWidget(QLabel("To:"))
+        frame_nav.addWidget(QLabel("End:"))
         frame_nav.addWidget(self.frame_end_spin)
         frame_nav.addWidget(self.frame_counter_label)
 
-        right_layout.addLayout(frame_nav)
+        main_layout.addLayout(frame_nav, stretch=0)
 
         self.frame_start_spin.valueChanged.connect(self.update_frame_bounds)
         self.frame_end_spin.valueChanged.connect(self.update_frame_bounds)
@@ -1637,11 +1735,14 @@ class RadialTab(QWidget):
             self.wavelength, self.frame_spin, self.frame_start_spin, self.frame_end_spin,
             self.frame_slider, self.prev_frame_button, self.next_frame_button,
             self.use_q_range, self.q_min, self.q_max, self.use_sector,
-            self.sector_min, self.sector_max, self.use_id13_pyfai_comparison,
-            self.n_bins, self.plot_mode, self.integrate_button, self.save_button,
+            self.sector_min, self.sector_max,
+            self.n_bins, self.plot_mode, self.integrate_button,
             self.image_vmin_slider, self.image_vmax_slider,
         ]:
             widget.setEnabled(enabled)
+
+        if hasattr(self, "save_graph_button"):
+            self.save_graph_button.setEnabled(enabled)
 
         self.plot_mode.setCurrentText("log log")
         self.update_frame_selector_visibility()
@@ -1743,11 +1844,15 @@ class RadialTab(QWidget):
         current = self.frame_spin.value()
         total = max(1, self.h5_n_frames)
         self.frame_counter_label.setText(f"{current} / {total}")
+        can_navigate = self.h5_n_frames > 1
+        self.frame_start_spin.setEnabled(can_navigate)
+        self.frame_end_spin.setEnabled(can_navigate)
+        self.frame_slider.setEnabled(can_navigate)
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(current)
         self.frame_slider.blockSignals(False)
-        self.prev_frame_button.setEnabled(self.h5_n_frames > 1 and current > self.frame_start_spin.value())
-        self.next_frame_button.setEnabled(self.h5_n_frames > 1 and current < self.frame_end_spin.value())
+        self.prev_frame_button.setEnabled(can_navigate and current > self.frame_start_spin.value())
+        self.next_frame_button.setEnabled(can_navigate and current < self.frame_end_spin.value())
 
     def previous_frame(self):
         self.frame_slider.setValue(max(self.frame_start_spin.value(), self.frame_slider.value() - 1))
@@ -1804,8 +1909,9 @@ class RadialTab(QWidget):
             name_filter = "**"
 
         files = []
+        search_method = folder.rglob if getattr(self, "show_subfolders_checkbox", None) and self.show_subfolders_checkbox.isChecked() else folder.glob
         for pattern in patterns:
-            files.extend(folder.glob(pattern))
+            files.extend(search_method(pattern))
 
         from fnmatch import fnmatch
         files = sorted(set(files))
@@ -1813,7 +1919,8 @@ class RadialTab(QWidget):
 
         self.file_list.clear()
         for file in files:
-            self.file_list.addItem(file.name)
+            display_name = str(file.relative_to(folder)) if getattr(self, "show_subfolders_checkbox", None) and self.show_subfolders_checkbox.isChecked() else file.name
+            self.file_list.addItem(display_name)
 
         self.set_controls_enabled(bool(self.selected_files()))
 
@@ -2011,7 +2118,7 @@ class RadialTab(QWidget):
                 self.last_results[file_path.stem] = (q, intensity, counts)
 
                 comparison_message = None
-                if self.use_id13_pyfai_comparison.isChecked():
+                if False:
                     try:
                         q_id13, intensity_id13, counts_id13, id13_config = id13_pyfai_like_average(
                             image,
