@@ -540,14 +540,14 @@ class MainWindow(QMainWindow):
             local_sha = self.get_local_commit()
 
             if local_sha == remote_sha:
-                self.version_label.setText(up_to_date_text)
+                self.version_label.setVisible(False)
                 self.version_label.setEnabled(False)
                 self.available_update_sha = None
                 return
 
             if self.current_sources_match_github():
                 self.save_local_commit(remote_sha)
-                self.version_label.setText(up_to_date_text)
+                self.version_label.setVisible(False)
                 self.version_label.setEnabled(False)
                 self.available_update_sha = None
                 return
@@ -567,8 +567,32 @@ class MainWindow(QMainWindow):
                 self.available_update_sha = None
                 return
 
-            self.version_label.setText("Update now")
+            self.version_label.setText(f"Update available: {short_sha}")
             self.version_label.setEnabled(True)
+
+            box = QMessageBox(self)
+            box.setWindowTitle("Update available")
+            box.setIcon(QMessageBox.Information)
+            box.setText("A new version of LRPhoton is available.")
+            box.setInformativeText(
+                "Download the update now or choose Not Now to continue."
+            )
+            box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            box.button(QMessageBox.Yes).setText("Download")
+            box.button(QMessageBox.No).setText("Not Now")
+            box.setDefaultButton(QMessageBox.Yes)
+
+            result = box.exec()
+            if result == QMessageBox.Yes:
+                self.version_label.setText("Updating…")
+                self.version_label.setEnabled(False)
+                QApplication.processEvents()
+                try:
+                    self.install_update_from_github(remote_sha)
+                    self.version_label.setText("Update installed")
+                except Exception:
+                    self.version_label.setText("Update failed")
+                self.available_update_sha = None
             return
 
         except Exception as error:
