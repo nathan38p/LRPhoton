@@ -243,6 +243,10 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.update_button)
 
         self.available_update_sha = None
+        self.silent_update_test = (
+            "--silent-update-test" in sys.argv
+            or os.getenv("LRPHOTON_SILENT_UPDATE_TEST") in ("1", "true", "True", "TRUE")
+        )
 
         main_layout.addWidget(header)
 
@@ -531,7 +535,7 @@ class MainWindow(QMainWindow):
         app_dir = Path(__file__).resolve().parent
         return app_dir.exists() and not self.is_development_copy()
 
-    def check_for_updates(self):
+    def check_for_updates(self, silent=False):
         try:
             if not self.can_check_for_updates():
                 self.version_label.setText("DEV")
@@ -569,6 +573,19 @@ class MainWindow(QMainWindow):
             short_sha = remote_sha[:7]
             self.version_label.setText(f"Update available: {short_sha}")
             self.available_update_sha = remote_sha
+
+            if silent or self.silent_update_test:
+                self.version_label.setText("Updating…")
+                QApplication.processEvents()
+                try:
+                    self.install_update_from_github(remote_sha)
+                    self.version_label.setText("Update installed")
+                except Exception as error:
+                    self.version_label.setText("Update failed")
+                self.update_button.setVisible(False)
+                self.available_update_sha = None
+                return
+
             self.update_button.setText("Update now")
             self.update_button.setVisible(True)
             return
@@ -731,7 +748,7 @@ def main():
     window = MainWindow()
     window.show()
     if window.can_check_for_updates():
-        QTimer.singleShot(1200, window.check_for_updates)
+        QTimer.singleShot(1200, lambda: window.check_for_updates(silent=window.silent_update_test))
     else:
         window.version_label.setText("DEV")
         window.update_button.setVisible(False)
