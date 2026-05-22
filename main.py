@@ -203,13 +203,16 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.report_button)
 
         self.version_label = QLabel("Checking for updates…")
+        self.version_label.setFixedHeight(28)
+        self.version_label.setAlignment(Qt.AlignCenter)
         self.version_label.setStyleSheet("""
             QLabel {
                 font-size: 11px;
-                color: #777777;
-                padding: 4px 8px;
+                color: #444444;
+                padding: 4px 10px;
                 border-radius: 8px;
-                background: #f2f2f2;
+                border: 1px solid #dddddd;
+                background: #f8f8f8;
             }
         """)
         header_layout.addWidget(self.version_label)
