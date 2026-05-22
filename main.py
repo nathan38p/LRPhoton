@@ -618,10 +618,10 @@ class MainWindow(QMainWindow):
             box.setIcon(QMessageBox.Information)
             box.setText("A new version of LRPhoton is available.")
             box.setInformativeText(
-                "Download the update now or choose Not Now to continue."
+                "Install the update now or choose Not Now to continue."
             )
             box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-            box.button(QMessageBox.Yes).setText("Download")
+            box.button(QMessageBox.Yes).setText("Install")
             box.button(QMessageBox.No).setText("Not Now")
             box.setDefaultButton(QMessageBox.Yes)
 
@@ -632,9 +632,12 @@ class MainWindow(QMainWindow):
                 try:
                     self.install_update_from_github(remote_sha)
                     self.set_update_button_state("disabled", "Update installed")
+                    self.available_update_sha = None
+                    self.relaunch_application()
+                    return
                 except Exception:
                     self.set_update_button_state("disabled", "Update failed")
-                self.available_update_sha = None
+                    self.available_update_sha = None
             return
 
         except Exception as error:
@@ -657,39 +660,7 @@ class MainWindow(QMainWindow):
             self.install_update_from_github(self.available_update_sha)
             self.set_update_button_state("disabled", "Update installed")
             self.available_update_sha = None
-
-            close_box = QMessageBox(self)
-            close_box.setWindowTitle("LRPhoton updated")
-            close_box.setIcon(QMessageBox.Information)
-            close_box.setText("The update has been installed.")
-            close_box.setInformativeText("Close LRPhoton and open it again to apply the new files.")
-            close_box.setStandardButtons(QMessageBox.Ok)
-            close_box.button(QMessageBox.Ok).setText("Close")
-            close_box.exec()
-
-            app_dir = Path(__file__).resolve().parent
-            try:
-                if sys.platform == "darwin":
-                    launcher = app_dir / "LRPhoton.command"
-                    if launcher.exists():
-                        subprocess.Popen(["open", str(launcher)])
-                    else:
-                        subprocess.Popen([sys.executable, str(app_dir / "main.py")], cwd=str(app_dir))
-
-                elif sys.platform.startswith("win"):
-                    launcher = app_dir / "Lancer LRPhoton.bat"
-                    if launcher.exists():
-                        subprocess.Popen([str(launcher)], cwd=str(app_dir), shell=True)
-                    else:
-                        subprocess.Popen([sys.executable, str(app_dir / "main.py")], cwd=str(app_dir))
-
-                else:
-                    subprocess.Popen([sys.executable, str(app_dir / "main.py")], cwd=str(app_dir))
-            except Exception:
-                pass
-
-            self.close()
-            QApplication.instance().quit()
+            self.relaunch_application()
         except Exception as error:
             self.set_update_button_state("disabled", "Update failed")
             QMessageBox.warning(
@@ -697,6 +668,38 @@ class MainWindow(QMainWindow):
                 "Update error",
                 f"Impossible to install the update:\n{error}"
             )
+        except Exception as error:
+            self.set_update_button_state("disabled", "Update failed")
+            QMessageBox.warning(
+                self,
+                "Update error",
+                f"Impossible to install the update:\n{error}"
+            )
+
+    def relaunch_application(self):
+        app_dir = Path(__file__).resolve().parent
+        try:
+            if sys.platform == "darwin":
+                launcher = app_dir / "LRPhoton.command"
+                if launcher.exists():
+                    subprocess.Popen(["open", str(launcher)])
+                else:
+                    subprocess.Popen([sys.executable, str(app_dir / "main.py")], cwd=str(app_dir))
+
+            elif sys.platform.startswith("win"):
+                launcher = app_dir / "Lancer LRPhoton.bat"
+                if launcher.exists():
+                    subprocess.Popen([str(launcher)], cwd=str(app_dir), shell=True)
+                else:
+                    subprocess.Popen([sys.executable, str(app_dir / "main.py")], cwd=str(app_dir))
+
+            else:
+                subprocess.Popen([sys.executable, str(app_dir / "main.py")], cwd=str(app_dir))
+        except Exception:
+            pass
+
+        self.close()
+        QApplication.instance().quit()
 
 
 def main():
