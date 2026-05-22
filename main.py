@@ -143,6 +143,29 @@ class MainWindow(QMainWindow):
             }
         """)
 
+        self.dev_label = QLabel("BETA")
+        self.dev_label.setStyleSheet("""
+            QLabel {
+                font-size: 10px;
+                font-weight: 700;
+                color: #155724;
+                background: #d4edda;
+                border: 1px solid #c3e6cb;
+                border-radius: 5px;
+                padding: 0px 5px;
+                min-height: 18px;
+            }
+        """)
+        self.dev_label.setFixedHeight(18)
+        self.dev_label.setVisible(self.is_development_copy())
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        title_row.addWidget(title)
+        title_row.addWidget(self.dev_label)
+        title_row.addStretch()
+
         subtitle = QLabel("SAXS / WAXS data processing")
         subtitle.setStyleSheet("""
             QLabel {
@@ -154,7 +177,7 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout()
         title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(0)
-        title_box.addWidget(title)
+        title_box.addLayout(title_row)
         title_box.addWidget(subtitle)
 
         header_layout.addWidget(logo)
@@ -521,7 +544,7 @@ class MainWindow(QMainWindow):
     def check_for_updates(self, silent=False):
         try:
             if not self.can_check_for_updates():
-                self.version_label.setText("DEV")
+                self.version_label.setVisible(False)
                 self.version_label.setEnabled(False)
                 self.available_update_sha = None
                 return
@@ -731,7 +754,7 @@ def main():
     if window.can_check_for_updates():
         QTimer.singleShot(1200, lambda: window.check_for_updates(silent=window.silent_update_test))
     else:
-        window.version_label.setText("DEV")
+        window.version_label.setVisible(False)
         window.version_label.setEnabled(False)
 
     sys.exit(app.exec())
