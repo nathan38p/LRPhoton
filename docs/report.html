@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-=======
-
-
->>>>>>> 5dbbb76 (update 2026-05-22 19:17:43)
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -162,6 +157,14 @@
 
 <script>
     const attachmentInput = document.getElementById("attachment");
+    const descriptionInput = document.getElementById("description");
+    const urlParams = new URLSearchParams(window.location.search);
+    const messageFromUrl = urlParams.get("message");
+
+    if (messageFromUrl) {
+        descriptionInput.value = messageFromUrl;
+    }
+
     const preview = document.getElementById("preview");
     const previewImage = document.getElementById("previewImage");
 
@@ -186,8 +189,4 @@
 </script>
 
 </body>
-<<<<<<< HEAD
 </html>
-=======
-</html>
->>>>>>> 5dbbb76 (update 2026-05-22 19:17:43)
