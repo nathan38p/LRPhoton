@@ -6,10 +6,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QLabel,
-    QStyle,
     QSizePolicy,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -18,10 +15,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from .view_tab import ViewTab
-from .ui_style import (
-    MATPLOTLIB_TOOLBAR_ICON_SCALE,
-    MATPLOTLIB_TOOLBAR_MAX_HEIGHT,
-)
+from .ui_style import make_matplotlib_toolbar_block
 
 
 class UnfoldTab(ViewTab):
@@ -34,52 +28,6 @@ class UnfoldTab(ViewTab):
 
     def _configure_unfold_toolbar(self):
         self.toolbar.coordinates = False
-        self.toolbar.setIconSize(self.toolbar.iconSize() * MATPLOTLIB_TOOLBAR_ICON_SCALE)
-        self.toolbar.setFixedHeight(MATPLOTLIB_TOOLBAR_MAX_HEIGHT)
-        self.toolbar.setFixedWidth(340)
-        self.toolbar.setContentsMargins(0, 0, 0, 0)
-        self.toolbar.setStyleSheet("""
-            QToolBar {
-                background: #f4f4f4;
-                background-color: #f4f4f4;
-                border: none;
-            }
-            QToolButton {
-                background: transparent;
-                background-color: transparent;
-            }
-        """)
-
-        for action in list(self.toolbar.actions()):
-            text = action.text().strip().lower()
-            tooltip = action.toolTip().strip().lower()
-            icon_text = action.iconText().strip().lower()
-            if (
-                action.isSeparator()
-                or "save" in text
-                or "save" in tooltip
-                or "save" in icon_text
-            ):
-                self.toolbar.removeAction(action)
-
-        self.unfold_save_button = QToolButton()
-        self.unfold_save_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
-        self.unfold_save_button.setToolTip("Save image only")
-        self.unfold_save_button.setFixedSize(
-            MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 10,
-            MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 10,
-        )
-        self.unfold_save_button.setIconSize(self.toolbar.iconSize() * 1.25)
-        self.unfold_save_button.setStyleSheet("""
-            QToolButton {
-                background: transparent;
-                background-color: transparent;
-                border: none;
-                padding: 0px;
-                margin: 0px;
-            }
-        """)
-        self.unfold_save_button.clicked.connect(self.save_png_image_only)
 
         if hasattr(self, "save_colorbar_checkbox"):
             self.save_colorbar_checkbox.setText("Save colorbar")
@@ -87,42 +35,70 @@ class UnfoldTab(ViewTab):
             self.save_colorbar_checkbox.setVisible(True)
             self.save_colorbar_checkbox.setStyleSheet("")
 
-        widgets_to_keep = {
-            self.toolbar,
+        option_widgets = [
             self.log_checkbox,
             self.keep_ratio_checkbox,
             self.keep_zoom_checkbox,
             self.save_colorbar_checkbox,
-            self.unfold_save_button,
-        }
+        ]
+
+        toolbar_result = make_matplotlib_toolbar_block(
+            self,
+            "Controls",
+            self.toolbar,
+            option_widgets=option_widgets,
+            save_callback=self.save_png_image_only,
+            save_tooltip="Save image only",
+            toolbar_width=340,
+        )
+        if isinstance(toolbar_result, tuple):
+            toolbar_block = toolbar_result[0]
+            if len(toolbar_result) > 1:
+                self.unfold_save_button = toolbar_result[1]
+        else:
+            toolbar_block = toolbar_result
 
         for old_save_button_name in ["save_button", "save_image_button", "view_save_button"]:
             old_save_button = getattr(self, old_save_button_name, None)
-            if old_save_button is not None and old_save_button is not self.unfold_save_button:
+            if old_save_button is not None:
                 old_save_button.hide()
                 old_save_button.setParent(None)
 
         while self.toolbar_extra_layout.count():
             item = self.toolbar_extra_layout.takeAt(0)
             widget = item.widget()
-            if widget is not None and widget not in widgets_to_keep:
+            if widget is not None:
                 widget.hide()
                 widget.setParent(None)
 
         self.toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
         self.toolbar_extra_layout.setSpacing(8)
-        self.toolbar_extra_layout.addWidget(self.toolbar, stretch=0, alignment=Qt.AlignVCenter)
-        self.toolbar_extra_layout.addStretch(1)
 
-        for widget in [
-            self.log_checkbox,
-            self.keep_ratio_checkbox,
-            self.keep_zoom_checkbox,
-            self.save_colorbar_checkbox,
-        ]:
-            self.toolbar_extra_layout.addWidget(widget, stretch=0, alignment=Qt.AlignVCenter)
-
-        self.toolbar_extra_layout.addWidget(self.unfold_save_button, stretch=0, alignment=Qt.AlignVCenter)
+        if isinstance(toolbar_block, QGroupBox):
+            toolbar_block.setTitle("")
+            toolbar_block.setStyleSheet("QToolButton { min-width: 32px; min-height: 32px; }")
+            block_layout = toolbar_block.layout()
+            if block_layout is not None:
+                extracted_layout = QHBoxLayout()
+                extracted_layout.setContentsMargins(0, 0, 0, 0)
+                extracted_layout.setSpacing(8)
+                while block_layout.count():
+                    item = block_layout.takeAt(0)
+                    widget = item.widget()
+                    child_layout = item.layout()
+                    spacer = item.spacerItem()
+                    if widget is not None:
+                        if hasattr(widget, "setIconSize") and hasattr(self.toolbar, "iconSize"):
+                            widget.setIconSize(self.toolbar.iconSize())
+                        extracted_layout.addWidget(widget, stretch=0, alignment=Qt.AlignVCenter)
+                    elif child_layout is not None:
+                        extracted_layout.addLayout(child_layout)
+                    elif spacer is not None:
+                        extracted_layout.addSpacerItem(spacer)
+                self.toolbar_extra_layout.addLayout(extracted_layout)
+            toolbar_block.deleteLater()
+        else:
+            self.toolbar_extra_layout.addWidget(toolbar_block, stretch=0, alignment=Qt.AlignVCenter)
 
     def _configure_unfold_right_panel(self):
         self.info_box.setTitle("Parameters")

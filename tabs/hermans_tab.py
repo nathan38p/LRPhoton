@@ -855,6 +855,7 @@ class HermansTab(QWidget):
 
         file_browser_layout.addWidget(self.file_list, stretch=1)
 
+        self.anisotropy_param_widgets = []
         # --- Parameter selection box ---
         mode_box = QGroupBox("Parameter choice")
         mode_layout = QGridLayout(mode_box)
@@ -922,7 +923,6 @@ class HermansTab(QWidget):
         self.save_fit_button.clicked.connect(self.save_gaussian_fit)
         params_layout.addWidget(self.fit_button, 6, 0, 1, 2)
         params_layout.addWidget(self.save_fit_button, 6, 2, 1, 3)
-        self.anisotropy_param_widgets = []
         h_box = QGroupBox("Horizontal sector")
         h_layout = QGridLayout(h_box)
         h_layout.setContentsMargins(*GROUP_BOX_MARGINS)
@@ -1297,20 +1297,30 @@ class HermansTab(QWidget):
             if widget is not None:
                 widget.setVisible(not anisotropy_mode)
 
-        for widget in self.anisotropy_param_widgets:
-            widget.setVisible(anisotropy_mode)
+        for widget in getattr(self, "anisotropy_param_widgets", []):
+            if widget is not None:
+                widget.setVisible(anisotropy_mode)
 
         for widget in [
-            self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom,
-            self.line_params_button,
-            self.center_x_spin, self.center_y_spin,
+            getattr(self, "btn_xenocs", None),
+            getattr(self, "btn_id02", None),
+            getattr(self, "btn_id13", None),
+            getattr(self, "btn_custom", None),
+            getattr(self, "line_params_button", None),
+            getattr(self, "center_x_spin", None),
+            getattr(self, "center_y_spin", None),
         ]:
-            widget.setVisible(anisotropy_mode)
+            if widget is not None:
+                widget.setVisible(anisotropy_mode)
 
-        self.plot_control_bar.setVisible(True)
-        self.anisotropy_plot_mode_label.setVisible(anisotropy_mode)
-        self.anisotropy_plot_mode.setVisible(anisotropy_mode)
-        self.save_anisotropy_button.setVisible(anisotropy_mode)
+        if hasattr(self, "plot_control_bar"):
+            self.plot_control_bar.setVisible(True)
+        if hasattr(self, "anisotropy_plot_mode_label"):
+            self.anisotropy_plot_mode_label.setVisible(anisotropy_mode)
+        if hasattr(self, "anisotropy_plot_mode"):
+            self.anisotropy_plot_mode.setVisible(anisotropy_mode)
+        if hasattr(self, "save_anisotropy_button"):
+            self.save_anisotropy_button.setVisible(anisotropy_mode)
 
         self.update_file_filter_for_parameter()
 
