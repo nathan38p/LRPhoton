@@ -1574,6 +1574,9 @@ class HermansTab(QWidget):
             self.clear_graph_coordinates()
 
     def clear_graph_coordinates(self, event=None):
+        if not hasattr(self, "graph_coordinate_label"):
+            return
+
         if self.is_anisotropy_mode():
             self.graph_coordinate_label.setText("q = - nm⁻¹ | I = -")
         else:
