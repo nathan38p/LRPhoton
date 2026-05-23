@@ -1,21 +1,20 @@
 import numpy as np
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
+    QPushButton,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+from .ui_style import style_q_geometry_buttons
 from .view_tab import ViewTab
-from .ui_style import make_matplotlib_toolbar_block
 
 
 class UnfoldTab(ViewTab):
@@ -31,81 +30,21 @@ class UnfoldTab(ViewTab):
 
         if hasattr(self, "save_colorbar_checkbox"):
             self.save_colorbar_checkbox.setText("Save colorbar")
-            self.save_colorbar_checkbox.setEnabled(True)
+            self.save_colorbar_checkbox.setEnabled(self.current_file is not None)
             self.save_colorbar_checkbox.setVisible(True)
             self.save_colorbar_checkbox.setStyleSheet("")
-
-        option_widgets = [
-            self.log_checkbox,
-            self.keep_ratio_checkbox,
-            self.keep_zoom_checkbox,
-            self.save_colorbar_checkbox,
-        ]
-
-        toolbar_result = make_matplotlib_toolbar_block(
-            self,
-            "Controls",
-            self.toolbar,
-            option_widgets=option_widgets,
-            save_callback=self.save_png_image_only,
-            save_tooltip="Save image only",
-            toolbar_width=340,
-        )
-        if isinstance(toolbar_result, tuple):
-            toolbar_block = toolbar_result[0]
-            if len(toolbar_result) > 1:
-                self.unfold_save_button = toolbar_result[1]
-        else:
-            toolbar_block = toolbar_result
-
-        for old_save_button_name in ["save_button", "save_image_button", "view_save_button"]:
-            old_save_button = getattr(self, old_save_button_name, None)
-            if old_save_button is not None:
-                old_save_button.hide()
-                old_save_button.setParent(None)
-
-        while self.toolbar_extra_layout.count():
-            item = self.toolbar_extra_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.hide()
-                widget.setParent(None)
-
-        self.toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
-        self.toolbar_extra_layout.setSpacing(8)
-
-        if isinstance(toolbar_block, QGroupBox):
-            toolbar_block.setTitle("")
-            toolbar_block.setStyleSheet("QToolButton { min-width: 32px; min-height: 32px; }")
-            block_layout = toolbar_block.layout()
-            if block_layout is not None:
-                extracted_layout = QHBoxLayout()
-                extracted_layout.setContentsMargins(0, 0, 0, 0)
-                extracted_layout.setSpacing(8)
-                while block_layout.count():
-                    item = block_layout.takeAt(0)
-                    widget = item.widget()
-                    child_layout = item.layout()
-                    spacer = item.spacerItem()
-                    if widget is not None:
-                        if hasattr(widget, "setIconSize") and hasattr(self.toolbar, "iconSize"):
-                            widget.setIconSize(self.toolbar.iconSize())
-                        extracted_layout.addWidget(widget, stretch=0, alignment=Qt.AlignVCenter)
-                    elif child_layout is not None:
-                        extracted_layout.addLayout(child_layout)
-                    elif spacer is not None:
-                        extracted_layout.addSpacerItem(spacer)
-                self.toolbar_extra_layout.addLayout(extracted_layout)
-            toolbar_block.deleteLater()
-        else:
-            self.toolbar_extra_layout.addWidget(toolbar_block, stretch=0, alignment=Qt.AlignVCenter)
+        self.unfold_save_button = getattr(self, "save_image_button", None)
 
     def _configure_unfold_right_panel(self):
         self.info_box.setTitle("Parameters")
+        self.info_box.setMinimumHeight(0)
+        self.info_box.setFixedHeight(72)
         self.info_text.hide()
-        self._reorder_instrument_buttons()
-
-        self.display_box = QGroupBox("Pattern")
+        
+        # Reorganize geometry buttons to match radial_tab style
+        self._reorganize_geometry_buttons()
+        
+        self.display_box = QGroupBox("Scattering pattern")
         self.display_box.setStyleSheet(self.panel_box_style)
         self.display_box_layout = QVBoxLayout(self.display_box)
         self.display_box_layout.setContentsMargins(10, 22, 10, 10)
@@ -118,26 +57,41 @@ class UnfoldTab(ViewTab):
         self.right_layout.insertWidget(0, self.info_box, stretch=0)
         self.right_layout.insertWidget(1, self.display_box, stretch=1)
 
-        self.autoscale_button.setText("Auto")
-        self.autoscale_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.slider_box.addWidget(self.autoscale_button)
-
-        self.vmin_spin.hide()
-        self.vmax_spin.hide()
         self.set_q_geometry_mode("ID13")
 
-    def _reorder_instrument_buttons(self):
-        buttons = [
-            self.q_xenocs_button,
-            self.q_id02_button,
-            self.q_id13_button,
-            self.q_custom_button,
+    def _reorganize_geometry_buttons(self):
+        """Reorganize geometry buttons to match radial_tab layout."""
+        # Clear the existing info_box_layout
+        self._clear_layout(self.info_box_layout)
+        
+        # Create a fresh layout for geometry buttons like radial_tab
+        preset_layout = QHBoxLayout()
+        preset_layout.setSpacing(4)
+        preset_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Add the buttons in order
+        preset_layout.addWidget(self.q_xenocs_button)
+        preset_layout.addWidget(self.q_id02_button)
+        preset_layout.addWidget(self.q_id13_button)
+        preset_layout.addWidget(self.q_custom_button)
+        preset_layout.addWidget(self.q_manual_button)
+        
+        # Apply the same styling as radial_tab
+        style_q_geometry_buttons(
+            {
+                "XENOCS": self.q_xenocs_button,
+                "ID02": self.q_id02_button,
+                "ID13": self.q_id13_button,
+                "Custom": self.q_custom_button,
+            },
+            "ID13",
             self.q_manual_button,
-        ]
-        for button in buttons:
-            self.q_buttons_layout.removeWidget(button)
-        for button in buttons:
-            self.q_buttons_layout.addWidget(button)
+        )
+        
+        # Add layout to info_box
+        self.info_box_layout.setContentsMargins(8, 20, 8, 8)
+        self.info_box_layout.setSpacing(6)
+        self.info_box_layout.addLayout(preset_layout)
 
     def _clear_layout(self, layout):
         while layout.count():
@@ -160,8 +114,8 @@ class UnfoldTab(ViewTab):
         self.update_pattern_preview()
 
     def _build_geometry_fields(self):
-        fields_box = QWidget()
-        form = QFormLayout(fields_box)
+        self.geometry_fields_box = QWidget()
+        form = QFormLayout(self.geometry_fields_box)
         form.setContentsMargins(0, 4, 0, 0)
         form.setSpacing(5)
 
@@ -184,7 +138,7 @@ class UnfoldTab(ViewTab):
             self.geometry_fields[key] = spin
             form.addRow(label, spin)
 
-        self.info_box_layout.addWidget(fields_box)
+        self.geometry_fields_box.hide()
         self.sync_geometry_fields()
 
     def _geometry_field_changed(self):
@@ -259,7 +213,6 @@ class UnfoldTab(ViewTab):
                 fraction=0.046,
                 pad=0.04,
             )
-            self.fig.subplots_adjust(left=0.08, right=0.92, top=0.98, bottom=0.08)
         else:
             self.image_artist.set_data(self.display_img)
             self.image_artist.set_extent(extent)
@@ -268,6 +221,8 @@ class UnfoldTab(ViewTab):
             self.ax.set_xlabel("q (nm⁻¹)")
             self.ax.set_ylabel("Angle (°)")
             self.ax.set_axis_on()
+
+        self._apply_unfold_figure_margins()
 
         if self.keep_zoom_checkbox.isChecked() and self._saved_xlim is not None and self._saved_ylim is not None:
             self.ax.set_xlim(self._saved_xlim)
@@ -282,6 +237,9 @@ class UnfoldTab(ViewTab):
         self.ax.set_autoscale_on(False)
         self.canvas.draw_idle()
         self.update_pattern_preview()
+
+    def _apply_unfold_figure_margins(self):
+        self.fig.subplots_adjust(left=0.13, right=0.90, top=0.98, bottom=0.14)
 
     def draw_center_cross(self):
         super().draw_center_cross()
@@ -403,16 +361,6 @@ class UnfoldTab(ViewTab):
         image = self.get_current_image()
 
         if image is None:
-            self.pattern_ax.text(
-                0.5,
-                0.5,
-                "No file loaded",
-                ha="center",
-                va="center",
-                fontsize=10,
-                color="#555555",
-                transform=self.pattern_ax.transAxes,
-            )
             self.pattern_canvas.draw_idle()
             return
 

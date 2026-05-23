@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from PySide6.QtCore import Qt, QEvent, Signal
+from PySide6.QtCore import Qt, QEvent, Signal, QMimeData, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QToolButton,
 )
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QDrag
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
@@ -47,11 +47,13 @@ from .ui_style import (
     FRAME_SPIN_WIDTH,
     GROUP_BOX_MARGINS,
     GROUP_BOX_STYLE,
-    MATPLOTLIB_TOOLBAR_ICON_SCALE,
-    MATPLOTLIB_TOOLBAR_MAX_HEIGHT,
     PAGE_MARGINS,
+    apply_plot_display_style,
+    clear_plot_canvas,
+    finalize_plot_canvas,
+    make_matplotlib_toolbar_block,
+    make_plot_legend,
 )
-from .ui_style import make_matplotlib_toolbar_block
 
 
 # ============================================================
@@ -108,6 +110,57 @@ def default_color(index):
         "#000000", "#ff9800", "#009688", "#795548", "#607d8b",
     ]
     return palette[index % len(palette)]
+
+
+# ============================================================
+# ======================== CUSTOM TABLE =======================
+# ============================================================
+
+class CurveTableWidget(QTableWidget):
+    """Custom table widget with better drag-drop handling for curves."""
+    
+    def __init__(self, rows, cols, parent=None):
+        super().__init__(rows, cols, parent)
+        self._drag_row = None
+        # Enable drag-drop
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setDragDropOverwriteMode(False)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+    
+    def mousePressEvent(self, event):
+        """Record which row is being dragged."""
+        index = self.indexAt(event.pos())
+        if index.isValid():
+            self._drag_row = index.row()
+        super().mousePressEvent(event)
+    
+    def dragMoveEvent(self, event):
+        """Allow drop on rows."""
+        if event.source() is self:
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+        else:
+            super().dragMoveEvent(event)
+    
+    def dropEvent(self, event):
+        """Handle drop and trigger cleanup."""
+        if event.source() is self:
+            # Get parent tab to refresh
+            parent_tab = self.parent()
+            while parent_tab and not hasattr(parent_tab, 'refresh_curve_table'):
+                parent_tab = parent_tab.parent()
+            
+            # Do the default drop
+            super().dropEvent(event)
+            
+            # Force a complete refresh if we found the tab
+            if parent_tab and hasattr(parent_tab, 'refresh_curve_table'):
+                # Schedule refresh for next event loop to ensure drop is complete
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, parent_tab.refresh_curve_table)
+        else:
+            super().dropEvent(event)
 
 
 # ============================================================
@@ -416,7 +469,7 @@ class DatPlotTab(QWidget):
         for spin in [self.x_min, self.x_max, self.y_min, self.y_max]:
             spin.valueChanged.connect(self.update_plot)
 
-        curve_box = QGroupBox("Curves / legend")
+        curve_box = QGroupBox("Curves")
         self.style_top_group_box(curve_box)
         curve_layout = QVBoxLayout(curve_box)
         curve_layout.setContentsMargins(*GROUP_BOX_MARGINS)
@@ -424,7 +477,7 @@ class DatPlotTab(QWidget):
         curve_box.setMinimumHeight(170)
         curve_panel_layout.addWidget(curve_box, stretch=1)
 
-        self.curve_table = QTableWidget(0, 4)
+        self.curve_table = CurveTableWidget(0, 4)
         self.curve_table.setMinimumHeight(140)
         self.curve_table.setHorizontalHeaderLabels(["File", "Legend", "Color", ""])
         self.curve_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -437,11 +490,7 @@ class DatPlotTab(QWidget):
         self.curve_table.verticalHeader().setDefaultSectionSize(28)
         self.curve_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.curve_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.curve_table.setDragEnabled(True)
-        self.curve_table.setAcceptDrops(True)
         self.curve_table.setDropIndicatorShown(True)
-        self.curve_table.setDragDropMode(QAbstractItemView.InternalMove)
-        self.curve_table.setDragDropOverwriteMode(False)
         self.curve_table.cellChanged.connect(self.curve_table_changed)
         self.curve_table.cellDoubleClicked.connect(self.curve_table_double_clicked)
         self.curve_table.model().rowsMoved.connect(self.curve_rows_moved)
@@ -471,6 +520,7 @@ class DatPlotTab(QWidget):
 
         self.canvas = PlotCanvas()
         self.canvas.setContentsMargins(0, 0, 0, 0)
+        clear_plot_canvas(self.canvas)
         self.toolbar = NavigationToolbar(self.canvas, self)
 
         self.plot_mode.setFixedWidth(120)
@@ -506,6 +556,7 @@ class DatPlotTab(QWidget):
             }
         """)
         right_layout.addWidget(self.graph_coordinate_label, stretch=0)
+        self.update_graph_toolbar_enabled()
 
         self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
         self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
@@ -625,6 +676,7 @@ class DatPlotTab(QWidget):
     def selection_changed(self):
         selected = self.selected_files()
         if not selected:
+            self.update_graph_toolbar_enabled()
             return
 
         for file_path in selected:
@@ -744,25 +796,35 @@ class DatPlotTab(QWidget):
 
         self.update_plot()
 
-    def curve_rows_moved(self, *args):
+    def curve_rows_moved(self, parent, start, end, destination, row):
+        """Handle curve reordering when dragged in the table."""
         if self._refreshing_curve_table:
             return
 
+        # Rebuild the curves dict based on the current table order
         reordered_curves = {}
-        for row in range(self.curve_table.rowCount()):
-            file_item = self.curve_table.item(row, 0)
+        
+        # Iterate through all rows in the table and preserve their order
+        for table_row in range(self.curve_table.rowCount()):
+            file_item = self.curve_table.item(table_row, 0)
+            
+            # Skip if item is None
             if file_item is None:
                 continue
-
+            
             key = file_item.text()
+            
+            # Only add keys that actually exist in our curves dict
             if key in self.curves:
                 reordered_curves[key] = self.curves[key]
-
-        for key, curve in self.curves.items():
-            if key not in reordered_curves:
-                reordered_curves[key] = curve
-
+        
+        # Update the curves dict
         self.curves = reordered_curves
+        
+        # Clear selection to fix visual glitches
+        self.curve_table.clearSelection()
+        
+        # Update the plot
         self.update_plot()
 
     def curve_table_double_clicked(self, row, column):
@@ -794,9 +856,19 @@ class DatPlotTab(QWidget):
     def clear_curves(self):
         self.curves.clear()
         self.refresh_curve_table()
-        self.canvas.ax.clear()
+        clear_plot_canvas(self.canvas)
         self.clear_graph_coordinates()
-        self.canvas.draw_idle()
+        self.update_graph_toolbar_enabled()
+
+    def update_graph_toolbar_enabled(self):
+        enabled = bool(self.curves)
+        for widget in [
+            getattr(self, "plot_mode", None),
+            getattr(self, "show_legend", None),
+            getattr(self, "save_plot_button", None),
+        ]:
+            if widget is not None:
+                widget.setEnabled(enabled)
 
     def make_plot_y(self, x, y):
         if self.plot_mode.currentText() == "Kratky":
@@ -931,8 +1003,12 @@ class DatPlotTab(QWidget):
 
         if not self.curves:
             self.clear_graph_coordinates()
-            self.canvas.draw_idle()
+            clear_plot_canvas(self.canvas)
+            self.update_graph_toolbar_enabled()
             return
+
+        ax.set_axis_on()
+        self.update_graph_toolbar_enabled()
 
         mode = self.plot_mode.currentText()
         if self.auto_limits.isChecked():
@@ -976,11 +1052,9 @@ class DatPlotTab(QWidget):
             ax.set_xlabel(self.x_label.text() or default_x_label)
         ax.set_ylabel("q²I(q)" if mode == "Kratky" else (self.y_label.text() or "Intensity / a.u."))
         ax.set_title(self.title_edit.text())
-        ax.grid(True, linewidth=0.5, alpha=0.35)
-        ax.tick_params(axis="both", labelsize=10)
+        apply_plot_display_style(ax)
         if self.show_legend.isChecked():
-            legend = ax.legend(loc="best", frameon=True, fontsize=9)
-            legend.set_draggable(True)
+            make_plot_legend(ax)
 
         if not self.auto_limits.isChecked():
             if self.x_max.value() > self.x_min.value():
@@ -988,5 +1062,4 @@ class DatPlotTab(QWidget):
             if self.y_max.value() > self.y_min.value():
                 ax.set_ylim(self.y_min.value(), self.y_max.value())
 
-        self.canvas.fig.tight_layout()
-        self.canvas.draw_idle()
+        finalize_plot_canvas(self.canvas)

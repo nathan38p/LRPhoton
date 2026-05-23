@@ -69,6 +69,82 @@ MATPLOTLIB_TOOLBAR_ICON_SCALE = 0.8
 MATPLOTLIB_TOOLBAR_MAX_HEIGHT = 42
 
 
+Q_GEOMETRY_BUTTON_STYLE = """
+    QPushButton {
+        background-color: #e2e2e2;
+        color: #222222;
+        border: 0px;
+        border-radius: 5px;
+        padding: 4px;
+    }
+    QPushButton:hover {
+        background-color: #d8d8d8;
+    }
+"""
+
+
+Q_GEOMETRY_BUTTON_ACTIVE_STYLE = """
+    QPushButton {
+        background-color: #007aff;
+        color: white;
+        border: 0px;
+        border-radius: 5px;
+        padding: 4px;
+    }
+"""
+
+
+def style_q_geometry_buttons(buttons, active_mode=None, manual_button=None):
+    minimum_widths = {
+        "XENOCS": 72,
+        "ID02": 56,
+        "ID13": 56,
+        "Custom": 68,
+    }
+
+    for mode, button in buttons.items():
+        active = mode == active_mode
+        button.setCheckable(True)
+        button.setMinimumWidth(minimum_widths.get(mode, 56))
+        button.blockSignals(True)
+        button.setChecked(active)
+        button.blockSignals(False)
+        button.setStyleSheet(
+            Q_GEOMETRY_BUTTON_ACTIVE_STYLE if active else Q_GEOMETRY_BUTTON_STYLE
+        )
+
+    if manual_button is not None:
+        manual_button.setFixedWidth(28)
+        manual_button.setStyleSheet(Q_GEOMETRY_BUTTON_STYLE)
+
+
+def apply_plot_display_style(ax):
+    ax.grid(True, linewidth=0.5, alpha=0.35)
+    ax.tick_params(axis="both", labelsize=10)
+
+
+def make_plot_legend(ax):
+    legend = ax.legend(loc="best", frameon=True, fontsize=9)
+    legend.set_draggable(True)
+    return legend
+
+
+def finalize_plot_canvas(canvas):
+    try:
+        canvas.fig.tight_layout()
+    except Exception:
+        pass
+    canvas.draw_idle()
+
+
+def clear_plot_canvas(canvas):
+    canvas.fig.patch.set_facecolor("white")
+    canvas.ax.clear()
+    canvas.ax.set_facecolor("white")
+    canvas.ax.set_axis_off()
+    canvas.draw_idle()
+
+
 def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, save_callback=None, save_tooltip="Save", toolbar_width=340):
     toolbar_box = QGroupBox(title)
     toolbar_box.setFixedHeight(78)

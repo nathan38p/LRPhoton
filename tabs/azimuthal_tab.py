@@ -25,6 +25,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QComboBox,
     QSlider,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -47,10 +50,14 @@ from .ui_style import (
     FRAME_SPIN_WIDTH,
     GROUP_BOX_MARGINS,
     GROUP_BOX_STYLE,
-    MATPLOTLIB_TOOLBAR_ICON_SCALE,
-    MATPLOTLIB_TOOLBAR_MAX_HEIGHT,
+    apply_plot_display_style,
+    clear_plot_canvas,
+    finalize_plot_canvas,
+    make_plot_legend,
+    make_matplotlib_toolbar_block,
     PAGE_MARGINS,
     PANEL_MARGINS,
+    style_q_geometry_buttons,
 )
 
 
@@ -307,10 +314,11 @@ def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelen
 
 class PlotCanvas(FigureCanvas):
     def __init__(self):
-        self.fig = Figure()
+        self.fig = Figure(dpi=150)
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
-        self.fig.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.20)
+        self.fig.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.18)
+        self.setMinimumSize(620, 420)
 
 
 class ImageCanvas(FigureCanvas):
@@ -440,11 +448,10 @@ class ImageCanvas(FigureCanvas):
                     psi_text = f"{psi:.3f}"
 
                 self.coordinate_label.setText(
-                    f"x = {x_index + 1} | y = {y_index + 1}\n"
                     f"ψ = {psi_text}° | q = {q_text} nm⁻¹ | I = {value_text}"
                 )
             else:
-                self.coordinate_label.setText("x = - | y = -\nψ = -° | q = - | I = -")
+                self.coordinate_label.setText("ψ = -° | q = - | I = -")
 
         if not self._dragging or event.inaxes != self.ax:
             return
@@ -590,10 +597,11 @@ class AzimuthalTab(QWidget):
         # ============================================================
         # COLUMN 2: I(ψ) GRAPH
         # ============================================================
-        graph_box = QGroupBox("I(ψ) graph")
-        graph_layout = QVBoxLayout(graph_box)
-        graph_layout.setContentsMargins(*GROUP_BOX_MARGINS)
-        right_layout.addWidget(graph_box, stretch=1)
+        center_column = QWidget()
+        center_column_layout = QVBoxLayout(center_column)
+        center_column_layout.setContentsMargins(0, 0, 0, 0)
+        center_column_layout.setSpacing(4)
+        right_layout.addWidget(center_column, stretch=1)
 
         # ============================================================
         # COLUMN 3: PARAMETERS + SELECTED AREA (IMAGE)
@@ -671,15 +679,31 @@ class AzimuthalTab(QWidget):
         self.btn_id02 = QPushButton("ID02")
         self.btn_id13 = QPushButton("ID13")
         self.btn_custom = QPushButton("Custom")
+        self.q_manual_button = QPushButton("+")
+        self.q_manual_button.clicked.connect(self.open_geometry_dialog)
         for button in [self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom]:
             button.setCheckable(True)
             preset_layout.addWidget(button)
+        preset_layout.addWidget(self.q_manual_button)
         self.btn_xenocs.setChecked(True)
+        style_q_geometry_buttons(
+            {
+                "XENOCS": self.btn_xenocs,
+                "ID02": self.btn_id02,
+                "ID13": self.btn_id13,
+                "Custom": self.btn_custom,
+            },
+            "XENOCS",
+            self.q_manual_button,
+        )
         params_layout.addLayout(preset_layout)
 
         form = QGridLayout()
-        form.setVerticalSpacing(3)
-        form.setHorizontalSpacing(6)
+        form.setVerticalSpacing(6)
+        form.setHorizontalSpacing(10)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setColumnStretch(0, 0)
+        form.setColumnStretch(1, 1)
 
         self.center_x = self.double_spin(0, decimals=13)
         self.center_y = self.double_spin(0, decimals=13)
@@ -687,109 +711,78 @@ class AzimuthalTab(QWidget):
         self.pixel_x = self.double_spin(0.075000, decimals=6, minimum=0)
         self.pixel_y = self.double_spin(0.075000, decimals=6, minimum=0)
         self.wavelength = self.double_spin(0, decimals=16, minimum=0)
+        self.use_q_range = QCheckBox("Use q range")
+        self.use_q_range.setChecked(True)
+        self.use_q_range.stateChanged.connect(self.update_q_range_state)
         self.q_min = self.double_spin(0.1, decimals=8, minimum=0)
         self.q_max = self.double_spin(1.0, decimals=8, minimum=0)
         self.n_points = QSpinBox()
         self.n_points.setRange(10, 10000)
         self.n_points.setValue(360)
-        self.n_points.setFixedWidth(130)
+        self.n_points.setFixedHeight(24)
 
-        form.addWidget(QLabel("Center X:"), 0, 0)
-        form.addWidget(self.center_x, 0, 1)
-        form.addWidget(QLabel("Center Y:"), 1, 0)
-        form.addWidget(self.center_y, 1, 1)
-        form.addWidget(QLabel("Distance (m):"), 2, 0)
-        form.addWidget(self.distance, 2, 1)
-        form.addWidget(QLabel("Pixel X (mm):"), 3, 0)
-        form.addWidget(self.pixel_x, 3, 1)
-        form.addWidget(QLabel("Pixel Y (mm):"), 4, 0)
-        form.addWidget(self.pixel_y, 4, 1)
-        form.addWidget(QLabel("Wavelength (Å):"), 5, 0)
-        form.addWidget(self.wavelength, 5, 1)
-        form.addWidget(QLabel("q min (nm⁻¹):"), 6, 0)
-        form.addWidget(self.q_min, 6, 1)
-        form.addWidget(QLabel("q max (nm⁻¹):"), 7, 0)
-        form.addWidget(self.q_max, 7, 1)
-        form.addWidget(QLabel("ψ points:"), 8, 0)
-        form.addWidget(self.n_points, 8, 1)
+        parameter_field_width = 130
+        self.q_min.setMinimumWidth(parameter_field_width)
+        self.q_max.setMinimumWidth(parameter_field_width)
+        self.n_points.setMinimumWidth(parameter_field_width)
+
+        form.addWidget(self.use_q_range, 0, 0, 1, 2)
+        form.addWidget(QLabel("q min (nm⁻¹):"), 1, 0)
+        form.addWidget(self.q_min, 1, 1)
+        form.addWidget(QLabel("q max (nm⁻¹):"), 2, 0)
+        form.addWidget(self.q_max, 2, 1)
+        form.addWidget(QLabel("ψ points:"), 3, 0)
+        form.addWidget(self.n_points, 3, 1)
         params_layout.addLayout(form)
 
-        button_layout = QHBoxLayout()
         self.integrate_button = QPushButton("Integrate I(ψ)")
         self.integrate_button.clicked.connect(self.integrate_selected_files)
-        self.save_button = QPushButton("Save .dat")
-        self.save_button.clicked.connect(self.save_results)
-        button_layout.addWidget(self.integrate_button)
-        button_layout.addWidget(self.save_button)
-        params_layout.addLayout(button_layout)
+        params_layout.addWidget(self.integrate_button)
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setVisible(False)
 
-        # ============================================================
-        # TOOLBAR (UNIFORMIZED)
-        # ============================================================
-        toolbar_box = QGroupBox("I(ψ) graph")
-        toolbar_box.setFixedHeight(78)
-        from .ui_style import TOOL_GROUP_BOX_STYLE
-        toolbar_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
-        
-        toolbar_layout = QVBoxLayout(toolbar_box)
-        toolbar_layout.setContentsMargins(6, 0, 6, 2)
-        toolbar_layout.setSpacing(0)
+        self.show_legend = QCheckBox("Legend")
+        self.show_legend.setChecked(True)
+        self.show_legend.stateChanged.connect(self.update_legend_visibility)
 
         self.canvas = PlotCanvas()
+        self.canvas.setContentsMargins(0, 0, 0, 0)
+        clear_plot_canvas(self.canvas)
         self.toolbar = NavigationToolbar(self.canvas, self)
-        self.toolbar.coordinates = False
-        self.toolbar.setIconSize(self.toolbar.iconSize() * MATPLOTLIB_TOOLBAR_ICON_SCALE)
-        self.toolbar.setFixedHeight(MATPLOTLIB_TOOLBAR_MAX_HEIGHT)
-        self.toolbar.setContentsMargins(0, 0, 0, 0)
-        self.toolbar.setStyleSheet("""
-            QToolBar {
-                background: #f4f4f4;
-                background-color: #f4f4f4;
-                border: none;
-            }
-            QToolButton {
-                background: transparent;
-                background-color: transparent;
-            }
-        """)
-
-        self.toolbar_extra_layout = QHBoxLayout()
-        self.toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
-        self.toolbar_extra_layout.setSpacing(8)
-        self.toolbar.setFixedWidth(340)
-        self.toolbar_extra_layout.addWidget(self.toolbar, stretch=0, alignment=Qt.AlignVCenter)
-        self.toolbar_extra_layout.addStretch(1)
-
-        toolbar_layout.addLayout(self.toolbar_extra_layout)
-        graph_layout.addWidget(toolbar_box, alignment=Qt.AlignTop)
-
-        self.plot_mode = QComboBox()
-        self.plot_mode.addItems(["linear linear", "linear log", "log linear", "log log"])
-        self.plot_mode.currentTextChanged.connect(self.update_plot_mode)
+        toolbar_box, self.toolbar_extra_layout, self.save_graph_button = make_matplotlib_toolbar_block(
+            self,
+            "I(ψ) graph",
+            self.toolbar,
+            option_widgets=[
+                self.show_legend,
+            ],
+            save_callback=self.toolbar.save_figure,
+            save_tooltip="Save graph",
+            toolbar_width=320,
+        )
+        center_column_layout.addWidget(toolbar_box, stretch=0)
 
         self.graph_coordinate_label = QLabel("ψ = - | I = -")
-        self.graph_coordinate_label.setMinimumHeight(26)
+        self.graph_coordinate_label.setMinimumHeight(28)
         self.graph_coordinate_label.setAlignment(Qt.AlignCenter)
         self.graph_coordinate_label.setStyleSheet("""
             QLabel {
                 background-color: #f4f4f4;
                 border-radius: 8px;
-                padding: 4px;
+                padding: 6px;
                 font-family: Menlo, Monaco, monospace;
-                font-size: 10px;
+                font-size: 11px;
             }
         """)
 
-        graph_layout.addWidget(self.canvas, stretch=1)
-        graph_layout.addWidget(self.graph_coordinate_label, stretch=0)
+        center_column_layout.addWidget(self.canvas, stretch=1)
+        center_column_layout.addWidget(self.graph_coordinate_label, stretch=0)
 
         self.image_canvas = ImageCanvas()
-        self.image_coordinate_label = QLabel("x = - | y = -\nψ = -° | q = - | I = -")
-        self.image_coordinate_label.setMinimumHeight(42)
+        self.image_coordinate_label = QLabel("ψ = -° | q = - | I = -")
+        self.image_coordinate_label.setMinimumHeight(28)
         self.image_coordinate_label.setAlignment(Qt.AlignCenter)
         self.image_coordinate_label.setStyleSheet("""
             QLabel {
@@ -880,7 +873,7 @@ class AzimuthalTab(QWidget):
         self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
         self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
         self.btn_id13.clicked.connect(lambda: self.set_instrument_mode("ID13"))
-        self.btn_custom.clicked.connect(lambda: self.set_instrument_mode("Custom"))
+        self.btn_custom.clicked.connect(self.open_geometry_dialog)
 
     def double_spin(self, value, decimals=3, minimum=-1e9):
         spin = QDoubleSpinBox()
@@ -888,21 +881,40 @@ class AzimuthalTab(QWidget):
         spin.setRange(minimum, 1e12)
         spin.setValue(value)
         spin.setFixedHeight(24)
-        spin.setFixedWidth(130)
+        spin.setMinimumWidth(130)
         return spin
 
     def set_controls_enabled(self, enabled):
         for widget in [
-            self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom,
             self.center_x, self.center_y, self.distance, self.pixel_x, self.pixel_y,
-            self.wavelength, self.q_min, self.q_max, self.n_points,
-            self.integrate_button, self.save_button, self.plot_mode,
+            self.wavelength, self.use_q_range, self.q_min, self.q_max, self.n_points,
+            self.integrate_button, self.show_legend,
             self.frame_start_spin, self.frame_end_spin, self.prev_frame_button,
             self.next_frame_button, self.frame_slider,
+            self.image_vmin_label, self.image_vmax_label,
             self.image_vmin_slider, self.image_vmax_slider,
         ]:
             widget.setEnabled(enabled)
+
+        for widget in [
+            self.btn_xenocs,
+            self.btn_id02,
+            self.btn_id13,
+            self.btn_custom,
+            self.q_manual_button,
+        ]:
+            widget.setEnabled(True)
+
+        if hasattr(self, "save_graph_button"):
+            self.save_graph_button.setEnabled(enabled)
         self.update_frame_navigation_state()
+        self.update_q_range_state()
+
+    def update_q_range_state(self):
+        use_q_range = self.use_q_range.isChecked()
+        enabled = self.use_q_range.isEnabled() and use_q_range
+        self.q_min.setEnabled(enabled)
+        self.q_max.setEnabled(enabled)
 
     def update_frame_navigation_state(self):
         can_navigate = bool(self.selected_files()) and self.total_frames > 1
@@ -1018,7 +1030,12 @@ class AzimuthalTab(QWidget):
             display_name = str(file.relative_to(folder)) if getattr(self, "show_subfolders_checkbox", None) and self.show_subfolders_checkbox.isChecked() else file.name
             self.file_list.addItem(display_name)
 
-        self.set_controls_enabled(bool(self.selected_files()))
+        selected = self.selected_files()
+        self.set_controls_enabled(bool(selected))
+        if not selected:
+            self.last_results = {}
+            self.clear_graph_coordinates()
+            clear_plot_canvas(self.canvas)
 
     def selection_changed(self):
         selected = self.selected_files()
@@ -1027,8 +1044,16 @@ class AzimuthalTab(QWidget):
         if selected:
             self.apply_preset_from_file(selected[0])
             self.update_frame_controls_from_file(selected[0])
+            self.display_selected_file_preview(selected[0])
         else:
             self.update_frame_controls_from_file(None)
+            self.last_results = {}
+            self.clear_graph_coordinates()
+            self.image_canvas.raw_image = None
+            self.image_canvas.set_q_map(None)
+            self.image_coordinate_label.setText("ψ = -° | q = - | I = -")
+            clear_plot_canvas(self.canvas)
+            clear_plot_canvas(self.image_canvas)
 
     def selected_files(self):
         return [self.current_folder / item.text() for item in self.file_list.selectedItems()]
@@ -1128,13 +1153,48 @@ class AzimuthalTab(QWidget):
             "ID13": self.btn_id13,
             "Custom": self.btn_custom,
         }
-        for key, button in buttons.items():
-            button.blockSignals(True)
-            button.setChecked(key == mode)
-            button.blockSignals(False)
+        style_q_geometry_buttons(buttons, mode, self.q_manual_button)
 
         selected = self.selected_files()
         self.apply_preset_from_file(selected[0] if selected else None)
+
+    def open_geometry_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Geometry")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+
+        fields = [
+            ("center_x", "Center X", self.center_x),
+            ("center_y", "Center Y", self.center_y),
+            ("distance", "Distance (m)", self.distance),
+            ("pixel_x", "Pixel X (mm)", self.pixel_x),
+            ("pixel_y", "Pixel Y (mm)", self.pixel_y),
+            ("wavelength", "Wavelength (Å)", self.wavelength),
+        ]
+        dialog_spins = {}
+        for key, label, source in fields:
+            spin = self.double_spin(source.value(), decimals=source.decimals(), minimum=source.minimum())
+            spin.setFixedWidth(150)
+            dialog_spins[key] = spin
+            form.addRow(label, spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self.center_x.setValue(dialog_spins["center_x"].value())
+        self.center_y.setValue(dialog_spins["center_y"].value())
+        self.distance.setValue(dialog_spins["distance"].value())
+        self.pixel_x.setValue(dialog_spins["pixel_x"].value())
+        self.pixel_y.setValue(dialog_spins["pixel_y"].value())
+        self.wavelength.setValue(dialog_spins["wavelength"].value())
+        self.set_instrument_mode("Custom")
 
     def apply_preset_from_file(self, file_path=None):
         header = {}
@@ -1182,6 +1242,7 @@ class AzimuthalTab(QWidget):
             self.pixel_x.setValue(ID13_DEFAULT_PIXEL_MM)
             self.pixel_y.setValue(ID13_DEFAULT_PIXEL_MM)
             self.wavelength.setValue(ID13_DEFAULT_WAVELENGTH_A)
+            self.use_q_range.setChecked(True)
             self.q_min.setValue(0.1)
             self.q_max.setValue(1.0)
             return
@@ -1189,16 +1250,26 @@ class AzimuthalTab(QWidget):
     def integrate_selected_files(self):
         files = self.selected_files()
         if not files:
+            self.last_results = {}
+            self.clear_graph_coordinates()
+            clear_plot_canvas(self.canvas)
             return
 
         self.last_results = {}
         ax = self.canvas.ax
         ax.clear()
+        ax.set_axis_on()
 
         messages = []
         for file_path in files:
             try:
                 image, _ = read_image_file(file_path, frame_index=self.current_frame - 1)
+                if self.use_q_range.isChecked():
+                    q_min = self.q_min.value()
+                    q_max = self.q_max.value()
+                else:
+                    q_min = 0
+                    q_max = np.inf
 
                 psi, intensity, counts, mask, q_map = azimuthal_average(
                     image,
@@ -1208,8 +1279,8 @@ class AzimuthalTab(QWidget):
                     self.pixel_x.value(),
                     self.pixel_y.value(),
                     self.wavelength.value(),
-                    self.q_min.value(),
-                    self.q_max.value(),
+                    q_min,
+                    q_max,
                     self.n_points.value(),
                 )
 
@@ -1222,44 +1293,42 @@ class AzimuthalTab(QWidget):
                     self.sync_image_intensity_sliders()
 
                 messages.append(
-                    f"Integrated: {file_path.name} ({psi.size} ψ points) | q crown = {self.q_min.value():.8g} -> {self.q_max.value():.8g} nm⁻¹"
+                    f"Integrated: {file_path.name} ({psi.size} ψ points) | q crown = {q_min:.8g} -> {q_max:.8g} nm⁻¹"
                 )
 
             except Exception as error:
                 messages.append(f"Error: {file_path.name}: {error}")
 
         self.apply_plot_axes()
-        ax.grid(True)
+        apply_plot_display_style(ax)
         ax.set_xlim(0, 360)
-        if self.last_results:
-            self.legend = ax.legend(loc="best")
-        self.canvas.draw_idle()
+        if self.last_results and self.show_legend.isChecked():
+            self.legend = make_plot_legend(ax)
+        finalize_plot_canvas(self.canvas)
         self.log_box.setPlainText("\n".join(messages))
 
     def apply_plot_axes(self):
         ax = self.canvas.ax
-        mode = self.plot_mode.currentText()
         ax.set_xlabel("ψ / °")
-        ax.xaxis.labelpad = 10
-        ax.tick_params(axis="x", labelsize=9, pad=6)
         ax.set_ylabel("Intensity / a.u.")
+        ax.set_xscale("linear")
+        ax.set_yscale("linear")
 
-        if mode == "linear linear":
-            ax.set_xscale("linear")
-            ax.set_yscale("linear")
-        elif mode == "linear log":
-            ax.set_xscale("linear")
-            ax.set_yscale("log")
-        elif mode == "log linear":
-            ax.set_xscale("log")
-            ax.set_yscale("linear")
-        elif mode == "log log":
-            ax.set_xscale("log")
-            ax.set_yscale("log")
+    def update_legend_visibility(self, redraw=True):
+        legend = self.canvas.ax.get_legend()
+        if self.show_legend.isChecked():
+            lines = [
+                line for line in self.canvas.ax.get_lines()
+                if not line.get_label().startswith("_")
+            ]
+            if lines:
+                self.legend = make_plot_legend(self.canvas.ax)
+        elif legend is not None:
+            legend.remove()
+            self.legend = None
 
-    def update_plot_mode(self):
-        self.apply_plot_axes()
-        self.canvas.draw_idle()
+        if redraw:
+            finalize_plot_canvas(self.canvas)
 
     def update_graph_coordinates(self, event):
         if event.inaxes != self.canvas.ax or event.xdata is None or event.ydata is None:
@@ -1293,8 +1362,8 @@ class AzimuthalTab(QWidget):
             return
 
         axis_lines[0].set_label(new_label.strip())
-        self.legend = self.canvas.ax.legend(loc="best")
-        self.canvas.draw_idle()
+        self.legend = make_plot_legend(self.canvas.ax)
+        finalize_plot_canvas(self.canvas)
 
     def ask_text(self, title, label, text):
         from PySide6.QtWidgets import QInputDialog
@@ -1305,7 +1374,10 @@ class AzimuthalTab(QWidget):
             QMessageBox.warning(self, "No results", "No azimuthal integration result to save.")
             return
 
-        range_suffix = f"_q{self.q_min.value():.8g}-{self.q_max.value():.8g}nm-1"
+        if self.use_q_range.isChecked():
+            range_suffix = f"_q{self.q_min.value():.8g}-{self.q_max.value():.8g}nm-1"
+        else:
+            range_suffix = "_qfull"
 
         for filename, (psi, intensity, counts) in self.last_results.items():
             source_stem = Path(filename).stem
@@ -1316,3 +1388,28 @@ class AzimuthalTab(QWidget):
                 np.savetxt(file, data, fmt="%.8e %.8e %d")
 
         QMessageBox.information(self, "Saved", "Azimuthal profiles saved in the current folder.")
+
+    def display_selected_file_preview(self, file_path):
+        try:
+            image, _ = read_image_file(file_path, frame_index=self.current_frame - 1)
+
+            y, x = np.indices(image.shape)
+            dx_px = x + 1 - self.center_x.value()
+            dy_px = y + 1 - self.center_y.value()
+            dx_m = dx_px * self.pixel_x.value() * 1e-3
+            dy_m = dy_px * self.pixel_y.value() * 1e-3
+            r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+            two_theta = np.arctan2(r_m, self.distance.value())
+            theta = two_theta / 2
+            wavelength_nm = self.wavelength.value() * 0.1
+            q_map = (4 * np.pi / wavelength_nm) * np.sin(theta)
+
+            self.image_canvas.set_q_map(q_map)
+            self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=None)
+            self.sync_image_intensity_sliders()
+            self.image_coordinate_label.setText("ψ = -° | q = - | I = -")
+        except Exception as error:
+            self.image_canvas.raw_image = None
+            self.image_canvas.set_q_map(None)
+            self.image_coordinate_label.setText("ψ = -° | q = - | I = -")
+            QMessageBox.warning(self, "Preview error", str(error))

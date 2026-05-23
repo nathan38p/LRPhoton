@@ -27,6 +27,8 @@ from .ui_style import (
     FRAME_SPIN_WIDTH,
     GROUP_BOX_MARGINS,
     PAGE_MARGINS,
+    clear_plot_canvas,
+    style_q_geometry_buttons,
 )
 
 
@@ -300,6 +302,23 @@ class ImageCanvas(FigureCanvas):
 
     def set_coordinate_label(self, label):
         self.coordinate_label = label
+
+    def clear_image(self):
+        self.raw_image = None
+        self.im = None
+        if self.cbar is not None:
+            try:
+                self.cbar.remove()
+            except Exception:
+                pass
+            self.cbar = None
+        self.fig.patch.set_facecolor("white")
+        self.ax.clear()
+        self.ax.set_facecolor("white")
+        self.ax.set_axis_off()
+        if self.coordinate_label is not None:
+            self.coordinate_label.setText("x = - | y = - | r = - | I = -")
+        self.draw_idle()
 
     def event(self, event):
         if event.type() == QEvent.NativeGesture and self.raw_image is not None:
@@ -740,6 +759,7 @@ class CentreTab(QWidget):
         self.canvas_img = ImageCanvas()
         self.canvas_img.setMinimumWidth(0)
         self.canvas_img.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.canvas_img.clear_image()
         self.coordinate_label = QLabel("x = - | y = - | Δx = - | Δy = - | r = - | I = -")
         self.coordinate_label.setMinimumWidth(0)
         self.coordinate_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
@@ -836,12 +856,25 @@ class CentreTab(QWidget):
         self.btn_id02 = QPushButton("ID02")
         self.btn_id13 = QPushButton("ID13")
         self.btn_custom = QPushButton("Custom")
+        self.q_manual_button = QPushButton("+")
+        self.q_manual_button.clicked.connect(lambda: self.set_instrument_mode("Custom"))
 
         for btn in [self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom]:
             btn.setCheckable(True)
             preset_layout.addWidget(btn)
+        preset_layout.addWidget(self.q_manual_button)
 
         self.btn_xenocs.setChecked(True)
+        style_q_geometry_buttons(
+            {
+                "XENOCS": self.btn_xenocs,
+                "ID02": self.btn_id02,
+                "ID13": self.btn_id13,
+                "Custom": self.btn_custom,
+            },
+            "XENOCS",
+            self.q_manual_button,
+        )
 
         self.edit_xc = self._double_spin(0, decimals=13)
         self.edit_yc = self._double_spin(0, decimals=13)
@@ -858,7 +891,6 @@ class CentreTab(QWidget):
         self.status.setText("")
 
         control.addWidget(self.btn_open)
-        control.addWidget(QLabel("Instrument preset:"))
         control.addLayout(preset_layout)
         self.centre_x_label = QLabel("Center X:")
         self.centre_y_label = QLabel("Center Y:")
@@ -875,6 +907,8 @@ class CentreTab(QWidget):
         graph_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         self.canvas_h = PlotCanvas()
         self.canvas_v = PlotCanvas()
+        clear_plot_canvas(self.canvas_h)
+        clear_plot_canvas(self.canvas_v)
         self.canvas_h.setMinimumWidth(0)
         self.canvas_v.setMinimumWidth(0)
         self.canvas_h.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -969,10 +1003,14 @@ class CentreTab(QWidget):
         layout.addWidget(widget)
 
     def set_controls_enabled(self, enabled):
-        self.btn_xenocs.setEnabled(enabled)
-        self.btn_id02.setEnabled(enabled)
-        self.btn_id13.setEnabled(enabled)
-        self.btn_custom.setEnabled(enabled)
+        for widget in [
+            self.btn_xenocs,
+            self.btn_id02,
+            self.btn_id13,
+            self.btn_custom,
+            self.q_manual_button,
+        ]:
+            widget.setEnabled(True)
 
         self.btn_up.setEnabled(enabled)
         self.btn_down.setEnabled(enabled)
@@ -1006,10 +1044,7 @@ class CentreTab(QWidget):
             "Custom": self.btn_custom,
         }
 
-        for key, btn in buttons.items():
-            btn.blockSignals(True)
-            btn.setChecked(key == mode)
-            btn.blockSignals(False)
+        style_q_geometry_buttons(buttons, mode, self.q_manual_button)
 
         self.update_custom_editing_state()
         self.update_centre_warning_labels()
@@ -1026,6 +1061,9 @@ class CentreTab(QWidget):
 
     def refresh_after_preset_change(self):
         if self.img_raw is None:
+            self.canvas_img.clear_image()
+            clear_plot_canvas(self.canvas_h)
+            clear_plot_canvas(self.canvas_v)
             return
 
         self.xc = self.edit_xc.value()
@@ -1204,6 +1242,10 @@ class CentreTab(QWidget):
 
     def update_masked_image(self):
         if self.img_raw is None:
+            self.img = None
+            self.canvas_img.clear_image()
+            clear_plot_canvas(self.canvas_h)
+            clear_plot_canvas(self.canvas_v)
             return
 
         self.img = self.img_raw.copy()
@@ -1217,6 +1259,7 @@ class CentreTab(QWidget):
 
     def show_center_image(self):
         if self.img is None:
+            self.canvas_img.clear_image()
             return
 
         self.canvas_img.show_image(self.img, self.xc, self.yc, "", None, None)
@@ -1291,6 +1334,8 @@ class CentreTab(QWidget):
 
     def update_plots(self):
         if self.img is None:
+            clear_plot_canvas(self.canvas_h)
+            clear_plot_canvas(self.canvas_v)
             return
 
         self.xc = self.edit_xc.value()
@@ -1315,6 +1360,8 @@ class CentreTab(QWidget):
 
         self.canvas_h.ax.clear()
         self.canvas_v.ax.clear()
+        self.canvas_h.ax.set_axis_on()
+        self.canvas_v.ax.set_axis_on()
 
         valid = np.isfinite(q1) & np.isfinite(i1) & (q1 > 0) & (i1 > 0)
         self.canvas_h.ax.loglog(q1[valid], i1[valid], "-", color="red", linewidth=1.3, label="H +")

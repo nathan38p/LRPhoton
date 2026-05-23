@@ -26,8 +26,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QComboBox,
     QSlider,
-    QToolButton,
-    QStyle,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -50,10 +51,14 @@ from .ui_style import (
     FRAME_SPIN_WIDTH,
     GROUP_BOX_MARGINS,
     GROUP_BOX_STYLE,
-    MATPLOTLIB_TOOLBAR_ICON_SCALE,
-    MATPLOTLIB_TOOLBAR_MAX_HEIGHT,
+    apply_plot_display_style,
+    clear_plot_canvas,
+    finalize_plot_canvas,
+    make_plot_legend,
+    make_matplotlib_toolbar_block,
     PAGE_MARGINS,
     PANEL_MARGINS,
+    style_q_geometry_buttons,
 )
 
 
@@ -691,12 +696,13 @@ def radial_average(
 
 class PlotCanvas(FigureCanvas):
     def __init__(self):
-        self.fig = Figure()
+        self.fig = Figure(dpi=150)
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
-        self.fig.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.20)
+        self.fig.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.18)
 
         self.setFocusPolicy(Qt.StrongFocus)
+        self.setMinimumSize(620, 420)
         self.setMouseTracking(True)
         self.grabGesture(Qt.PinchGesture)
 
@@ -889,6 +895,8 @@ class ImageCanvas(FigureCanvas):
         self.display_data_min = 0.0
         self.display_data_max = 1.0
         self.q_map = None
+        self.last_xc = None
+        self.last_yc = None
 
         self.mpl_connect("scroll_event", self._on_scroll)
         self.mpl_connect("button_press_event", self._on_press)
@@ -1081,6 +1089,7 @@ class ImageCanvas(FigureCanvas):
                 y_index = int(round(event.ydata))
                 value_text = "-"
                 q_text = "-"
+                psi_text = "-"
 
                 if self.raw_image is not None:
                     ny, nx = self.raw_image.shape
@@ -1100,11 +1109,17 @@ class ImageCanvas(FigureCanvas):
                             if np.isfinite(q_value):
                                 q_text = f"{q_value:.6g} nm⁻¹"
 
+                        if self.last_xc is not None and self.last_yc is not None:
+                            dx = (x_index + 1) - self.last_xc
+                            dy = (y_index + 1) - self.last_yc
+                            psi = np.degrees(np.arctan2(dy, dx)) % 360.0
+                            psi_text = f"{psi:.3f}°"
+
                 self.coordinate_label.setText(
-                    f"x = {x_index + 1} | y = {y_index + 1}\nq = {q_text} | I = {value_text}"
+                    f"ψ = {psi_text} | q = {q_text} | I = {value_text}"
                 )
             else:
-                self.coordinate_label.setText("x = - | y = -\nq = - | I = -")
+                self.coordinate_label.setText("ψ = - | q = - | I = -")
 
         if not self._dragging or event.inaxes != self.ax:
             return
@@ -1123,6 +1138,8 @@ class ImageCanvas(FigureCanvas):
         current_ylim = self.ax.get_ylim()
         had_image = len(self.ax.images) > 0
         self.raw_image = image
+        self.last_xc = xc
+        self.last_yc = yc
 
         self.ax.clear()
         self.ax.set_axis_off()
@@ -1334,10 +1351,11 @@ class RadialTab(QWidget):
         # ============================================================
         # COLUMN 2: I(q) GRAPH
         # ============================================================
-        graph_box = QGroupBox("I(q) graph")
-        graph_layout = QVBoxLayout(graph_box)
-        graph_layout.setContentsMargins(*GROUP_BOX_MARGINS)
-        right_layout.addWidget(graph_box, stretch=1)
+        graph_panel = QWidget()
+        graph_layout = QVBoxLayout(graph_panel)
+        graph_layout.setContentsMargins(0, 0, 0, 0)
+        graph_layout.setSpacing(4)
+        right_layout.addWidget(graph_panel, stretch=1)
 
         # ============================================================
         # COLUMN 3: PARAMETERS + SELECTED AREA (IMAGE)
@@ -1415,27 +1433,37 @@ class RadialTab(QWidget):
         self.btn_id02 = QPushButton("ID02")
         self.btn_id13 = QPushButton("ID13")
         self.btn_custom = QPushButton("Custom")
+        self.q_manual_button = QPushButton("+")
+        self.q_manual_button.clicked.connect(self.open_geometry_dialog)
         for button in [self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom]:
             button.setCheckable(True)
             preset_layout.addWidget(button)
+        preset_layout.addWidget(self.q_manual_button)
         self.btn_xenocs.setChecked(True)
-        # params_layout.addWidget(QLabel("Instrument preset:"))
+        style_q_geometry_buttons(
+            {
+                "XENOCS": self.btn_xenocs,
+                "ID02": self.btn_id02,
+                "ID13": self.btn_id13,
+                "Custom": self.btn_custom,
+            },
+            "XENOCS",
+            self.q_manual_button,
+        )
         params_layout.addLayout(preset_layout)
 
         form = QGridLayout()
-        form.setVerticalSpacing(3)
-        form.setHorizontalSpacing(6)
+        form.setVerticalSpacing(6)
+        form.setHorizontalSpacing(10)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setColumnStretch(0, 0)
+        form.setColumnStretch(1, 1)
         self.center_x = self.double_spin(0, decimals=13)
         self.center_y = self.double_spin(0, decimals=13)
         self.distance = self.double_spin(0, decimals=16, minimum=0)
         self.pixel_x = self.double_spin(0.075000, decimals=6, minimum=0)
         self.pixel_y = self.double_spin(0.075000, decimals=6, minimum=0)
         self.wavelength = self.double_spin(0, decimals=16, minimum=0)
-        self.use_q_range = QCheckBox("Use q range")
-        self.use_q_range.setChecked(False)
-        self.use_q_range.stateChanged.connect(self.update_mask_parameter_state)
-        self.q_min = self.double_spin(0, decimals=6, minimum=0)
-        self.q_max = self.double_spin(0, decimals=6, minimum=0)
         self.use_id13_pyfai_comparison = QCheckBox("ID13 pyFAI comparison")
         self.use_id13_pyfai_comparison.setChecked(False)
         self.use_id13_pyfai_comparison.setVisible(False)
@@ -1448,23 +1476,16 @@ class RadialTab(QWidget):
         self.n_bins = QSpinBox()
         self.n_bins.setRange(10, 10000)
         self.n_bins.setValue(200)
+        self.n_bins.setMinimumWidth(130)
+        self.n_bins.setFixedHeight(24)
         self.plot_mode = QComboBox()
         self.plot_mode.addItems(["linear linear", "linear log", "log log", "log linear", "Kratky", "2θ linear", "2θ log"])
         self.plot_mode.setCurrentText("log log")
+        self.plot_mode.setFixedWidth(120)
         self.plot_mode.currentTextChanged.connect(self.update_plot_mode)
-
-        form.addWidget(QLabel("Center X:"), 0, 0)
-        form.addWidget(self.center_x, 0, 1)
-        form.addWidget(QLabel("Center Y:"), 1, 0)
-        form.addWidget(self.center_y, 1, 1)
-        form.addWidget(QLabel("Distance (m):"), 2, 0)
-        form.addWidget(self.distance, 2, 1)
-        form.addWidget(QLabel("Pixel X (mm):"), 3, 0)
-        form.addWidget(self.pixel_x, 3, 1)
-        form.addWidget(QLabel("Pixel Y (mm):"), 4, 0)
-        form.addWidget(self.pixel_y, 4, 1)
-        form.addWidget(QLabel("Wavelength (Å):"), 5, 0)
-        form.addWidget(self.wavelength, 5, 1)
+        self.show_legend = QCheckBox("Legend")
+        self.show_legend.setChecked(True)
+        self.show_legend.stateChanged.connect(self.update_legend_visibility)
 
         self.frame_label = QLabel("H5 frame:")
         self.frame_spin = QSpinBox()
@@ -1475,120 +1496,52 @@ class RadialTab(QWidget):
         self.frame_spin.hide()
         self.frame_spin.valueChanged.connect(self.update_selected_h5_frame)
 
-        form.addWidget(self.use_q_range, 7, 0, 1, 2)
-        form.addWidget(QLabel("q min (nm⁻¹):"), 8, 0)
-        form.addWidget(self.q_min, 8, 1)
-        form.addWidget(QLabel("q max (nm⁻¹):"), 9, 0)
-        form.addWidget(self.q_max, 9, 1)
+        form.addWidget(self.use_sector, 0, 0, 1, 2)
+        form.addWidget(QLabel("Sector min ψ (°):"), 1, 0)
+        form.addWidget(self.sector_min, 1, 1)
+        form.addWidget(QLabel("Sector max ψ (°):"), 2, 0)
+        form.addWidget(self.sector_max, 2, 1)
 
-        form.addWidget(self.use_sector, 10, 0, 1, 2)
-        form.addWidget(QLabel("Sector min ψ (°):"), 11, 0)
-        form.addWidget(self.sector_min, 11, 1)
-        form.addWidget(QLabel("Sector max ψ (°):"), 12, 0)
-        form.addWidget(self.sector_max, 12, 1)
-
-        form.addWidget(QLabel("Bins:"), 13, 0)
-        form.addWidget(self.n_bins, 13, 1)
+        form.addWidget(QLabel("Bins:"), 3, 0)
+        form.addWidget(self.n_bins, 3, 1)
         params_layout.addLayout(form)
 
-        button_layout = QHBoxLayout()
         self.integrate_button = QPushButton("Integrate I(q)")
         self.integrate_button.clicked.connect(self.integrate_selected_files)
-        button_layout.addWidget(self.integrate_button)
-        params_layout.addLayout(button_layout)
+        params_layout.addWidget(self.integrate_button)
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setVisible(False)
 
-        # ============================================================
-        # TOOLBAR (UNIFORMIZED)
-        # ============================================================
-        toolbar_box = QGroupBox("I(q) graph")
-        toolbar_box.setFixedHeight(78)
-        from .ui_style import TOOL_GROUP_BOX_STYLE
-        toolbar_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
-        
-        toolbar_layout = QVBoxLayout(toolbar_box)
-        toolbar_layout.setContentsMargins(6, 0, 6, 2)
-        toolbar_layout.setSpacing(0)
-
         self.canvas = PlotCanvas()
+        self.canvas.setContentsMargins(0, 0, 0, 0)
+        clear_plot_canvas(self.canvas)
         self.toolbar = NavigationToolbar(self.canvas, self)
-        self.toolbar.coordinates = False
-        self.toolbar.setIconSize(self.toolbar.iconSize() * MATPLOTLIB_TOOLBAR_ICON_SCALE)
-        self.toolbar.setFixedHeight(MATPLOTLIB_TOOLBAR_MAX_HEIGHT)
-        self.toolbar.setContentsMargins(0, 0, 0, 0)
-        self.toolbar.setStyleSheet("""
-            QToolBar {
-                background: #f4f4f4;
-                background-color: #f4f4f4;
-                border: none;
-            }
-            QToolButton {
-                background: transparent;
-                background-color: transparent;
-            }
-        """)
-
-        self.toolbar_extra_layout = QHBoxLayout()
-        self.toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
-        self.toolbar_extra_layout.setSpacing(8)
-        self.toolbar.setFixedWidth(340)
-
-        for action in list(self.toolbar.actions()):
-            text = action.text().strip().lower()
-            tooltip = action.toolTip().strip().lower()
-            icon_text = action.iconText().strip().lower()
-            if (
-                action.isSeparator()
-                or "save" in text
-                or "save" in tooltip
-                or "save" in icon_text
-            ):
-                self.toolbar.removeAction(action)
-
-        self.toolbar_extra_layout.addWidget(self.toolbar, stretch=0, alignment=Qt.AlignVCenter)
-        self.toolbar_extra_layout.addStretch(1)
-
-        self.save_graph_button = QToolButton()
-        self.save_graph_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
-        self.save_graph_button.setToolTip("Save graph (.dat, .png or .tiff)")
-        self.save_graph_button.setFixedSize(
-            MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8,
-            MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8,
+        toolbar_box, self.toolbar_extra_layout, self.save_graph_button = make_matplotlib_toolbar_block(
+            self,
+            "I(q) graph",
+            self.toolbar,
+            option_widgets=[
+                self.plot_mode,
+                self.show_legend,
+            ],
+            save_callback=self.save_results,
+            save_tooltip="Save graph (.dat, .png or .tiff)",
+            toolbar_width=320,
         )
-        self.save_graph_button.setIconSize(self.toolbar.iconSize() * 1.25)
-        self.save_graph_button.setStyleSheet("""
-            QToolButton {
-                background: transparent;
-                background-color: transparent;
-                border: none;
-                padding: 0px;
-                margin: 0px;
-            }
-        """)
-        self.save_graph_button.clicked.connect(self.save_results)
-
-        self.toolbar_extra_layout.addWidget(
-            self.save_graph_button,
-            stretch=0,
-            alignment=Qt.AlignVCenter,
-        )
-
-        toolbar_layout.addLayout(self.toolbar_extra_layout)
         graph_layout.addWidget(toolbar_box, alignment=Qt.AlignTop)
 
         self.graph_coordinate_label = QLabel("q = - | I = -")
-        self.graph_coordinate_label.setMinimumHeight(26)
+        self.graph_coordinate_label.setMinimumHeight(28)
         self.graph_coordinate_label.setAlignment(Qt.AlignCenter)
         self.graph_coordinate_label.setStyleSheet("""
             QLabel {
                 background-color: #f4f4f4;
                 border-radius: 8px;
-                padding: 4px;
+                padding: 6px;
                 font-family: Menlo, Monaco, monospace;
-                font-size: 10px;
+                font-size: 11px;
             }
         """)
 
@@ -1599,8 +1552,8 @@ class RadialTab(QWidget):
         # IMAGE CANVAS
         # ============================================================
         self.image_canvas = ImageCanvas()
-        self.image_coordinate_label = QLabel("x = - | y = -\nq = - | I = -")
-        self.image_coordinate_label.setMinimumHeight(42)
+        self.image_coordinate_label = QLabel("ψ = - | q = - | I = -")
+        self.image_coordinate_label.setMinimumHeight(28)
         self.image_coordinate_label.setAlignment(Qt.AlignCenter)
         self.image_coordinate_label.setStyleSheet("""
             QLabel {
@@ -1696,14 +1649,10 @@ class RadialTab(QWidget):
         self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
         self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
         self.btn_id13.clicked.connect(lambda: self.set_instrument_mode("ID13"))
-        self.btn_custom.clicked.connect(lambda: self.set_instrument_mode("Custom"))
+        self.btn_custom.clicked.connect(self.open_geometry_dialog)
         self.update_mask_parameter_state()
 
     def update_mask_parameter_state(self):
-        use_q_range = self.use_q_range.isChecked()
-        self.q_min.setEnabled(use_q_range)
-        self.q_max.setEnabled(use_q_range)
-
         use_sector = self.use_sector.isChecked()
         self.sector_min.setEnabled(use_sector)
         self.sector_max.setEnabled(use_sector)
@@ -1719,16 +1668,25 @@ class RadialTab(QWidget):
 
     def set_controls_enabled(self, enabled):
         for widget in [
-            self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom,
             self.center_x, self.center_y, self.distance, self.pixel_x, self.pixel_y,
             self.wavelength, self.frame_spin, self.frame_start_spin, self.frame_end_spin,
             self.frame_slider, self.prev_frame_button, self.next_frame_button,
-            self.use_q_range, self.q_min, self.q_max, self.use_sector,
+            self.use_sector,
             self.sector_min, self.sector_max,
-            self.n_bins, self.plot_mode, self.integrate_button,
+            self.n_bins, self.plot_mode, self.show_legend, self.integrate_button,
+            self.image_vmin_label, self.image_vmax_label,
             self.image_vmin_slider, self.image_vmax_slider,
         ]:
             widget.setEnabled(enabled)
+
+        for widget in [
+            self.btn_xenocs,
+            self.btn_id02,
+            self.btn_id13,
+            self.btn_custom,
+            self.q_manual_button,
+        ]:
+            widget.setEnabled(True)
 
         if hasattr(self, "save_graph_button"):
             self.save_graph_button.setEnabled(enabled)
@@ -1738,8 +1696,6 @@ class RadialTab(QWidget):
         self.update_mask_parameter_state()
 
         if not enabled:
-            self.q_min.setEnabled(False)
-            self.q_max.setEnabled(False)
             self.sector_min.setEnabled(False)
             self.sector_max.setEnabled(False)
             self.prev_frame_button.setEnabled(False)
@@ -1911,7 +1867,12 @@ class RadialTab(QWidget):
             display_name = str(file.relative_to(folder)) if getattr(self, "show_subfolders_checkbox", None) and self.show_subfolders_checkbox.isChecked() else file.name
             self.file_list.addItem(display_name)
 
-        self.set_controls_enabled(bool(self.selected_files()))
+        selected = self.selected_files()
+        self.set_controls_enabled(bool(selected))
+        if not selected:
+            self.last_results = {}
+            self.clear_graph_coordinates()
+            clear_plot_canvas(self.canvas)
 
     def selection_changed(self):
         selected = self.selected_files()
@@ -1940,9 +1901,17 @@ class RadialTab(QWidget):
 
             self.update_frame_selector_visibility()
             self.apply_preset_from_file(selected[0])
+            self.display_selected_file_preview(selected[0])
         else:
             self.configure_frame_navigation(1)
             self.update_frame_selector_visibility()
+            self.last_results = {}
+            self.clear_graph_coordinates()
+            self.image_canvas.raw_image = None
+            self.image_canvas.set_q_map(None)
+            self.image_coordinate_label.setText("ψ = - | q = - | I = -")
+            clear_plot_canvas(self.canvas)
+            clear_plot_canvas(self.image_canvas)
 
     def selected_files(self):
         return [self.current_folder / item.text() for item in self.file_list.selectedItems()]
@@ -1956,13 +1925,48 @@ class RadialTab(QWidget):
             "ID13": self.btn_id13,
             "Custom": self.btn_custom,
         }
-        for key, button in buttons.items():
-            button.blockSignals(True)
-            button.setChecked(key == mode)
-            button.blockSignals(False)
+        style_q_geometry_buttons(buttons, mode, self.q_manual_button)
 
         selected = self.selected_files()
         self.apply_preset_from_file(selected[0] if selected else None)
+
+    def open_geometry_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Geometry")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+
+        fields = [
+            ("center_x", "Center X", self.center_x),
+            ("center_y", "Center Y", self.center_y),
+            ("distance", "Distance (m)", self.distance),
+            ("pixel_x", "Pixel X (mm)", self.pixel_x),
+            ("pixel_y", "Pixel Y (mm)", self.pixel_y),
+            ("wavelength", "Wavelength (Å)", self.wavelength),
+        ]
+        dialog_spins = {}
+        for key, label, source in fields:
+            spin = self.double_spin(source.value(), decimals=source.decimals(), minimum=source.minimum())
+            spin.setFixedWidth(150)
+            dialog_spins[key] = spin
+            form.addRow(label, spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self.center_x.setValue(dialog_spins["center_x"].value())
+        self.center_y.setValue(dialog_spins["center_y"].value())
+        self.distance.setValue(dialog_spins["distance"].value())
+        self.pixel_x.setValue(dialog_spins["pixel_x"].value())
+        self.pixel_y.setValue(dialog_spins["pixel_y"].value())
+        self.wavelength.setValue(dialog_spins["wavelength"].value())
+        self.set_instrument_mode("Custom")
 
     def apply_preset_from_file(self, file_path=None):
         header = {}
@@ -2029,13 +2033,44 @@ class RadialTab(QWidget):
             self.wavelength.setValue(ID13_DEFAULT_WAVELENGTH_A)
             return
 
+    def display_selected_file_preview(self, file_path):
+        try:
+            h5_dataset_name = self.h5_dataset_name if file_path.suffix.lower() in [".h5", ".hdf5"] else None
+            h5_frame_index = self.frame_spin.value() - 1 if file_path.suffix.lower() in [".h5", ".hdf5"] else 0
+            image, _ = read_image_file(file_path, h5_dataset_name, h5_frame_index)
+
+            ny, nx = image.shape
+            yy, xx = np.indices(image.shape)
+
+            dx_px = xx - float(self.center_x.value())
+            dy_px = yy - float(self.center_y.value())
+            dx_m = dx_px * float(self.pixel_x.value()) * 1e-3
+            dy_m = dy_px * float(self.pixel_y.value()) * 1e-3
+            r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+            two_theta_map = np.arctan2(r_m, float(self.distance.value()))
+            wavelength_nm_map = wavelength_to_nm(float(self.wavelength.value()))
+            q_map = (4.0 * np.pi / wavelength_nm_map) * np.sin(two_theta_map / 2.0)
+
+            self.image_canvas.set_q_map(q_map)
+            self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=None)
+            self.sync_image_intensity_sliders()
+            self.image_coordinate_label.setText("ψ = - | q = - | I = -")
+        except Exception as error:
+            self.image_canvas.raw_image = None
+            self.image_canvas.set_q_map(None)
+            self.image_coordinate_label.setText("ψ = - | q = - | I = -")
+
     def integrate_selected_files(self):
         files = self.selected_files()
         if not files:
+            self.last_results = {}
+            self.clear_graph_coordinates()
+            clear_plot_canvas(self.canvas)
             return
 
         preserve_view = self._changing_h5_frame
         ax = self.canvas.ax
+        ax.set_axis_on()
 
         previous_xlim = tuple(ax.get_xlim()) if preserve_view else None
         previous_ylim = tuple(ax.get_ylim()) if preserve_view else None
@@ -2052,8 +2087,8 @@ class RadialTab(QWidget):
                 h5_dataset_name = self.h5_dataset_name if file_path.suffix.lower() in [".h5", ".hdf5"] else None
                 h5_frame_index = self.frame_spin.value() - 1 if file_path.suffix.lower() in [".h5", ".hdf5"] else 0
                 image, _ = read_image_file(file_path, h5_dataset_name, h5_frame_index)
-                q_min = self.q_min.value() if self.use_q_range.isChecked() else 0
-                q_max = self.q_max.value() if self.use_q_range.isChecked() else 0
+                q_min = 0
+                q_max = 0
                 sector_min = self.sector_min.value() if self.use_sector.isChecked() else 0
                 sector_max = self.sector_max.value() if self.use_sector.isChecked() else 360
                 use_log_bins = self.plot_mode.currentText() in ["log log", "log linear", "Kratky"]
@@ -2172,10 +2207,10 @@ class RadialTab(QWidget):
         else:
             ax.set_autoscale_on(True)
 
-        ax.grid(True)
-        if self.last_results:
-            self.legend = ax.legend(loc="best")
-        self.canvas.draw_idle()
+        apply_plot_display_style(ax)
+        if self.last_results and self.show_legend.isChecked():
+            self.legend = make_plot_legend(ax)
+        finalize_plot_canvas(self.canvas)
         self.log_box.setPlainText("\n".join(messages))
 
 
@@ -2200,8 +2235,6 @@ class RadialTab(QWidget):
         else:
             ax.set_xlabel("q / nm⁻¹")
 
-        ax.xaxis.labelpad = 10
-        ax.tick_params(axis="x", labelsize=9, pad=6)
         ax.set_ylabel("q²I(q)" if mode == "Kratky" else "I(q)")
 
         if mode == "linear linear":
@@ -2247,9 +2280,27 @@ class RadialTab(QWidget):
                 line.set_ydata(self.make_plot_y(q, intensity))
 
         self.apply_plot_axes()
+        apply_plot_display_style(self.canvas.ax)
+        self.update_legend_visibility(redraw=False)
         self.canvas.ax.relim()
         self.canvas.ax.autoscale_view()
-        self.canvas.draw_idle()
+        finalize_plot_canvas(self.canvas)
+
+    def update_legend_visibility(self, redraw=True):
+        legend = self.canvas.ax.get_legend()
+        if self.show_legend.isChecked():
+            lines = [
+                line for line in self.canvas.ax.get_lines()
+                if not line.get_label().startswith("_")
+            ]
+            if lines:
+                self.legend = make_plot_legend(self.canvas.ax)
+        elif legend is not None:
+            legend.remove()
+            self.legend = None
+
+        if redraw:
+            finalize_plot_canvas(self.canvas)
 
     def update_id13_comparison(self):
         if self.selected_files() and self.last_results:
@@ -2294,8 +2345,8 @@ class RadialTab(QWidget):
             return
 
         axis_lines[0].set_label(new_label.strip())
-        self.legend = self.canvas.ax.legend(loc="best")
-        self.canvas.draw_idle()
+        self.legend = make_plot_legend(self.canvas.ax)
+        finalize_plot_canvas(self.canvas)
 
     def ask_text(self, title, label, text):
         from PySide6.QtWidgets import QInputDialog
@@ -2306,10 +2357,7 @@ class RadialTab(QWidget):
             QMessageBox.warning(self, "No results", "No radial integration result to save.")
             return
 
-        if self.use_q_range.isChecked():
-            range_parts = [f"q{self.q_min.value():.4g}-{self.q_max.value():.4g}nm-1"]
-        else:
-            range_parts = ["qfull"]
+        range_parts = ["qfull"]
 
         if self.use_sector.isChecked():
             range_parts.append(f"psi{self.sector_min.value():.3g}-{self.sector_max.value():.3g}deg")

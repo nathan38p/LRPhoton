@@ -42,6 +42,7 @@ from .ui_style import (
     FRAME_SPIN_WIDTH,
     GROUP_BOX_MARGINS,
     PAGE_MARGINS,
+    style_q_geometry_buttons,
 )
 
 
@@ -764,19 +765,31 @@ class CaveTab(QWidget):
         self.open_button.clicked.connect(self.open_file)
         controls_layout.addWidget(self.open_button)
 
-        controls_layout.addWidget(QLabel("Instrument preset:"))
         preset_layout = QHBoxLayout()
         preset_layout.setSpacing(4)
         self.btn_xenocs = QPushButton("XENOCS")
         self.btn_id02 = QPushButton("ID02")
         self.btn_id13 = QPushButton("ID13")
         self.btn_custom = QPushButton("Custom")
+        self.q_manual_button = QPushButton("+")
+        self.q_manual_button.clicked.connect(lambda: self.set_instrument_mode("Custom"))
 
         for button in [self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom]:
             button.setCheckable(True)
             preset_layout.addWidget(button)
+        preset_layout.addWidget(self.q_manual_button)
 
         self.btn_xenocs.setChecked(True)
+        style_q_geometry_buttons(
+            {
+                "XENOCS": self.btn_xenocs,
+                "ID02": self.btn_id02,
+                "ID13": self.btn_id13,
+                "Custom": self.btn_custom,
+            },
+            "XENOCS",
+            self.q_manual_button,
+        )
         controls_layout.addLayout(preset_layout)
 
         self.xc_spin = QDoubleSpinBox()
@@ -1019,10 +1032,7 @@ class CaveTab(QWidget):
             "Custom": self.btn_custom,
         }
 
-        for key, button in buttons.items():
-            button.blockSignals(True)
-            button.setChecked(key == mode)
-            button.blockSignals(False)
+        style_q_geometry_buttons(buttons, mode, self.q_manual_button)
 
         self.apply_instrument_preset()
         self.update_centre_warning_labels()

@@ -62,6 +62,7 @@ from .ui_style import (
     PANEL_MARGINS,
     TOOL_GROUP_BOX_STYLE,
     make_matplotlib_toolbar_block,
+    style_q_geometry_buttons,
 )
 
 
@@ -511,7 +512,7 @@ class ViewTab(QWidget):
         self.info_text.setLineWrapMode(QTextEdit.WidgetWidth)
         self.info_text.setMinimumWidth(240)
         self.info_text.setReadOnly(True)
-        self.info_text.setText("No file loaded.")
+        self.info_text.setText("")
 
         self.dataset_list = QListWidget()
         self.dataset_list.itemDoubleClicked.connect(self.open_selected_dataset)
@@ -565,6 +566,23 @@ class ViewTab(QWidget):
         self.update_frame_navigation_state()
 
         self.canvas.draw_idle()
+        self.set_toolbar_options_enabled(False)
+
+    def set_toolbar_options_enabled(self, enabled):
+        for widget in [
+            getattr(self, "log_checkbox", None),
+            getattr(self, "keep_ratio_checkbox", None),
+            getattr(self, "keep_zoom_checkbox", None),
+            getattr(self, "save_colorbar_checkbox", None),
+            getattr(self, "save_image_button", None),
+            getattr(self, "min_slider", None),
+            getattr(self, "max_slider", None),
+            getattr(self, "vmin_spin", None),
+            getattr(self, "vmax_spin", None),
+            getattr(self, "autoscale_button", None),
+        ]:
+            if widget is not None:
+                widget.setEnabled(enabled)
 
     # ============================================================
     # SETTINGS
@@ -641,48 +659,7 @@ class ViewTab(QWidget):
             "ID13": self.q_id13_button,
             "Custom": self.q_custom_button,
         }
-
-        for mode, button in buttons.items():
-            active = mode == self.q_geometry_mode
-            button.blockSignals(True)
-            button.setChecked(active)
-            button.blockSignals(False)
-            if active:
-                button.setStyleSheet("""
-                    QPushButton {
-                        background-color: #007aff;
-                        color: white;
-                        border: 0px;
-                        border-radius: 5px;
-                        padding: 4px;
-                    }
-                """)
-            else:
-                button.setStyleSheet("""
-                    QPushButton {
-                        background-color: #e2e2e2;
-                        color: #222222;
-                        border: 0px;
-                        border-radius: 5px;
-                        padding: 4px;
-                    }
-                    QPushButton:hover {
-                        background-color: #d8d8d8;
-                    }
-                """)
-
-        self.q_manual_button.setStyleSheet("""
-            QPushButton {
-                background-color: #e2e2e2;
-                color: #222222;
-                border: 0px;
-                border-radius: 5px;
-                padding: 4px;
-            }
-            QPushButton:hover {
-                background-color: #d8d8d8;
-            }
-        """)
+        style_q_geometry_buttons(buttons, self.q_geometry_mode, self.q_manual_button)
 
     def set_q_geometry_mode(self, mode):
         if mode == "Custom" and not self.custom_q_geometry:
@@ -872,6 +849,7 @@ class ViewTab(QWidget):
 
     def open_file(self, path):
         self.current_file = Path(path).expanduser().resolve()
+        self.set_toolbar_options_enabled(False)
         if hasattr(self, "keep_zoom_checkbox") and self.keep_zoom_checkbox.isChecked() and self.image_artist is not None:
             self._saved_xlim = self.ax.get_xlim()
             self._saved_ylim = self.ax.get_ylim()
@@ -918,8 +896,13 @@ class ViewTab(QWidget):
                     "Unsupported file",
                     "Unsupported file format."
                 )
+                self.current_file = None
+                self.current_file_type = None
+                self.set_toolbar_options_enabled(False)
 
         except Exception as e:
+            self.current_file = None
+            self.current_file_type = None
             QMessageBox.critical(self, "Error", str(e))
 
     def reset_figure(self):
@@ -1114,6 +1097,7 @@ class ViewTab(QWidget):
     # ============================================================
 
     def update_file_information(self, file_type, dataset_name, n_frames, image_shape):
+        self.set_toolbar_options_enabled(True)
         self.current_file_type = file_type
         self.current_dataset_name = dataset_name
         self.n_frames = n_frames
