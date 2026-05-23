@@ -327,7 +327,16 @@ CENTER_Y_KEYS = ("Center_2", "center_2", "CenterY", "center_y", "BeamCenterY", "
 # ========================= CAVE TOOLS ========================
 # ============================================================
 
-def apply_central_symmetry_cave(image, xc, yc, nan_operator=">=", nan_threshold=4e9, use_id13_beamstop=False, beamstop_y=1376):
+def apply_central_symmetry_cave(
+    image,
+    xc,
+    yc,
+    nan_operator=">=",
+    nan_threshold=4e9,
+    use_id13_beamstop=False,
+    beamstop_y=1376,
+    expand_nan_neighbors=False,
+):
     source = image.astype(np.float64).copy()
     cave_mask = np.zeros(source.shape, dtype=bool)
 
@@ -337,6 +346,29 @@ def apply_central_symmetry_cave(image, xc, yc, nan_operator=">=", nan_threshold=
         cave_mask |= source <= nan_threshold
 
     cave_mask |= ~np.isfinite(source)
+
+    if expand_nan_neighbors:
+        original_nan_mask = cave_mask.copy()
+        radius = 2
+
+        padded_mask = np.pad(
+            original_nan_mask,
+            radius,
+            mode="constant",
+            constant_values=False,
+        )
+
+        expanded_mask = np.zeros_like(original_nan_mask, dtype=bool)
+
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                expanded_mask |= padded_mask[
+                    radius + dy:radius + dy + original_nan_mask.shape[0],
+                    radius + dx:radius + dx + original_nan_mask.shape[1],
+                ]
+
+        cave_mask = expanded_mask
+
     source[cave_mask] = np.nan
     filled = source.copy()
 
@@ -842,11 +874,18 @@ class CaveTab(QWidget):
         self.id13_beamstop_checkbox = QCheckBox("Add ID13 beamstop mask")
         self.id13_beamstop_checkbox.setChecked(False)
 
+        self.expand_nan_neighbors_checkbox = QCheckBox("Test: expand NaN by 2 px")
+        self.expand_nan_neighbors_checkbox.setChecked(False)
+        self.expand_nan_neighbors_checkbox.setToolTip(
+            "Expands the NaN mask by 2 pixels before central symmetry filling."
+        )
+
         self.save_checkbox = QCheckBox("Save output after Run Cave")
         self.save_checkbox.setChecked(True)
 
         controls_layout.addLayout(nan_layout)
         controls_layout.addWidget(self.id13_beamstop_checkbox)
+        controls_layout.addWidget(self.expand_nan_neighbors_checkbox)
 
         intensity_box = QGroupBox("Display intensity")
         intensity_layout = QGridLayout(intensity_box)
@@ -899,6 +938,7 @@ class CaveTab(QWidget):
         self.nan_operator_combo.currentTextChanged.connect(self.refresh_preview)
         self.nan_threshold_spin.valueChanged.connect(self.refresh_preview)
         self.id13_beamstop_checkbox.stateChanged.connect(self.refresh_preview)
+        self.expand_nan_neighbors_checkbox.stateChanged.connect(self.refresh_preview)
         self.vmin_slider.valueChanged.connect(self.update_display_limits_from_sliders)
         self.vmax_slider.valueChanged.connect(self.update_display_limits_from_sliders)
 
@@ -954,6 +994,8 @@ class CaveTab(QWidget):
             self.frame_slider,
             self.nan_operator_combo,
             self.nan_threshold_spin,
+            self.id13_beamstop_checkbox,
+            self.expand_nan_neighbors_checkbox,
             self.lock_intensity_checkbox,
             self.vmin_slider,
             self.vmax_slider,
@@ -1356,6 +1398,7 @@ class CaveTab(QWidget):
             nan_threshold=self.nan_threshold_spin.value(),
             use_id13_beamstop=use_id13_beamstop,
             beamstop_y=self.beamstop_y_spin.value(),
+            expand_nan_neighbors=self.expand_nan_neighbors_checkbox.isChecked(),
         )
 
         self.image_clean = clean

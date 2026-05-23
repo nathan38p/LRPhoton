@@ -36,6 +36,7 @@ from PySide6.QtGui import QColor, QPainter, QPixmap
 
 from tabs.view_tab import ViewTab
 from tabs.centre_tab import CentreTab
+import tabs.background_tab as background_tab_module
 from tabs.cave_tab import CaveTab
 from tabs.average_tab import AverageTab
 from tabs.radial_tab import RadialTab
@@ -43,6 +44,23 @@ from tabs.azimuthal_tab import AzimuthalTab
 from tabs.unfold_tab import UnfoldTab
 from tabs.hermans_tab import HermansTab
 from tabs.datplot_tab import DatPlotTab
+
+
+BackgroundTab = getattr(background_tab_module, "BackgroundTab", None)
+if BackgroundTab is None:
+    for candidate_name in dir(background_tab_module):
+        candidate = getattr(background_tab_module, candidate_name)
+        if (
+            isinstance(candidate, type)
+            and issubclass(candidate, QWidget)
+            and candidate is not QWidget
+            and getattr(candidate, "__module__", "") == background_tab_module.__name__
+        ):
+            BackgroundTab = candidate
+            break
+
+if BackgroundTab is None:
+    raise ImportError("No QWidget tab class found in tabs/background_tab.py")
 
 
 APP_NAME = "LRPhoton"
@@ -62,12 +80,13 @@ class ColoredTabBar(QTabBar):
         0: ("#dbeafe", "#2563eb"),  # View 2D
         1: ("#dbeafe", "#2563eb"),  # Plot 1D
         2: ("#fee2e2", "#dc2626"),  # Center
-        3: ("#fee2e2", "#dc2626"),  # Average
-        4: ("#fee2e2", "#dc2626"),  # Cave
-        5: ("#fee2e2", "#dc2626"),  # Unfold
-        6: ("#dcfce7", "#16a34a"),  # Radial
-        7: ("#dcfce7", "#16a34a"),  # Azimuthal
-        8: ("#f3e8ff", "#9333ea"),  # Anisotropy
+        3: ("#fee2e2", "#dc2626"),  # Background
+        4: ("#fee2e2", "#dc2626"),  # Average
+        5: ("#fee2e2", "#dc2626"),  # Cave
+        6: ("#fee2e2", "#dc2626"),  # Unfold
+        7: ("#dcfce7", "#16a34a"),  # Radial
+        8: ("#dcfce7", "#16a34a"),  # Azimuthal
+        9: ("#f3e8ff", "#9333ea"),  # Anisotropy
     }
 
     def tabSizeHint(self, index):
@@ -195,12 +214,20 @@ class MainWindow(QMainWindow):
         self.tab_bar.addTab("View 2D")
         self.tab_bar.addTab("Plot 1D")
         self.tab_bar.addTab("Center")
+        self.background_tab_index = self.tab_bar.addTab("🔒 Background")
         self.tab_bar.addTab("Average")
         self.tab_bar.addTab("Cave")
         self.tab_bar.addTab("Unfold")
         self.radial_tab_index = self.tab_bar.addTab("Radial")
         self.tab_bar.addTab("Azimuthal")
         self.tab_bar.addTab("Anisotropy")
+
+        if self.is_development_copy():
+            self.tab_bar.setTabText(self.background_tab_index, "Background")
+            self.tab_bar.setTabEnabled(self.background_tab_index, True)
+        else:
+            self.tab_bar.setTabText(self.background_tab_index, "🔒 Background")
+            self.tab_bar.setTabEnabled(self.background_tab_index, False)
 
         header_layout.addStretch()
         header_layout.addWidget(self.tab_bar)
@@ -251,6 +278,7 @@ class MainWindow(QMainWindow):
         self.view_tab = ViewTab()
         self.datplot_tab = DatPlotTab()
         self.centre_tab = CentreTab()
+        self.background_tab = BackgroundTab()
         self.cave_tab = CaveTab()
         self.average_tab = AverageTab()
         self.radial_tab = RadialTab()
@@ -263,6 +291,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.view_tab)
         self.pages.addWidget(self.datplot_tab)
         self.pages.addWidget(self.centre_tab)
+        self.pages.addWidget(self.background_tab)
         self.pages.addWidget(self.average_tab)
         self.pages.addWidget(self.cave_tab)
         self.pages.addWidget(self.unfold_tab)
@@ -275,6 +304,7 @@ class MainWindow(QMainWindow):
         self.folder_synced_tabs = [
             self.view_tab,
             self.datplot_tab,
+            self.background_tab,
             self.radial_tab,
             self.azimuthal_tab,
             self.unfold_tab,

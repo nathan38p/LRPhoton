@@ -1242,9 +1242,6 @@ class AzimuthalTab(QWidget):
             self.pixel_x.setValue(ID13_DEFAULT_PIXEL_MM)
             self.pixel_y.setValue(ID13_DEFAULT_PIXEL_MM)
             self.wavelength.setValue(ID13_DEFAULT_WAVELENGTH_A)
-            self.use_q_range.setChecked(True)
-            self.q_min.setValue(0.1)
-            self.q_max.setValue(1.0)
             return
 
     def integrate_selected_files(self):
