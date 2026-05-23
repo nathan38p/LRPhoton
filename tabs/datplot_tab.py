@@ -1,4 +1,4 @@
-
+import json
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +38,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 
-from .file_ratings import install_file_rating_menu, set_item_file_path
+from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path
 from .ui_style import (
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
@@ -113,6 +113,10 @@ def default_color(index):
     return palette[index % len(palette)]
 
 
+def _legend_store_path():
+    return Path.home() / ".lrphoton" / "datplot_legends.json"
+
+
 # ============================================================
 # ======================== CUSTOM TABLE =======================
 # ============================================================
@@ -145,21 +149,29 @@ class CurveTableWidget(QTableWidget):
             super().dragMoveEvent(event)
     
     def dropEvent(self, event):
-        """Handle drop and trigger cleanup."""
+        """Move the underlying curve row instead of relying on QTableWidget internals."""
         if event.source() is self:
-            # Get parent tab to refresh
             parent_tab = self.parent()
             while parent_tab and not hasattr(parent_tab, 'refresh_curve_table'):
                 parent_tab = parent_tab.parent()
-            
-            # Do the default drop
-            super().dropEvent(event)
-            
-            # Force a complete refresh if we found the tab
-            if parent_tab and hasattr(parent_tab, 'refresh_curve_table'):
-                # Schedule refresh for next event loop to ensure drop is complete
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, parent_tab.refresh_curve_table)
+
+            drop_row = self.indexAt(event.position().toPoint()).row()
+            if drop_row < 0:
+                drop_row = self.rowCount()
+            elif self._drag_row is not None:
+                rect = self.visualRect(self.model().index(drop_row, 0))
+                if event.position().toPoint().y() > rect.center().y():
+                    drop_row += 1
+
+            if parent_tab and hasattr(parent_tab, "move_curve_row") and self._drag_row is not None:
+                parent_tab.move_curve_row(self._drag_row, drop_row)
+                event.setDropAction(Qt.DropAction.MoveAction)
+                event.accept()
+                self._drag_row = None
+                return
+
+            self._drag_row = None
+            event.ignore()
         else:
             super().dropEvent(event)
 
@@ -344,11 +356,49 @@ class DatPlotTab(QWidget):
 
         self.current_folder = Path("/Users/nathanpiaget/Documents/Thèse LRP/Expériences/XENOCS")
         self.curves = {}
+        self.saved_legends = self.load_saved_legends()
         self._syncing_folder = False
         self._refreshing_curve_table = False
 
         self.build_ui()
         self.refresh_files()
+
+    def load_saved_legends(self):
+        path = _legend_store_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+        legends = data.get("legends", {}) if isinstance(data, dict) else {}
+        return {
+            str(file_path): str(legend)
+            for file_path, legend in legends.items()
+            if isinstance(file_path, str) and isinstance(legend, str)
+        }
+
+    def save_saved_legends(self):
+        path = _legend_store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        data = {"version": 1, "legends": self.saved_legends}
+        tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(path)
+
+    def saved_legend_for_file(self, file_path):
+        try:
+            key = str(Path(file_path).expanduser().resolve())
+        except (OSError, RuntimeError):
+            key = str(file_path)
+        return self.saved_legends.get(key)
+
+    def remember_legend_for_file(self, file_path, legend):
+        try:
+            key = str(Path(file_path).expanduser().resolve())
+        except (OSError, RuntimeError):
+            key = str(file_path)
+        self.saved_legends[key] = legend
+        self.save_saved_legends()
 
     def create_matplotlib_toolbar_block(
         self,
@@ -433,7 +483,15 @@ class DatPlotTab(QWidget):
         self.show_subfolders = QCheckBox("Show subfolders")
         self.show_subfolders.setChecked(False)
         self.show_subfolders.stateChanged.connect(self.refresh_files)
-        file_layout.addWidget(self.show_subfolders)
+        self.only_thumbs_up_checkbox = QCheckBox("Only 👍")
+        self.only_thumbs_up_checkbox.setChecked(False)
+        self.only_thumbs_up_checkbox.stateChanged.connect(self.refresh_files)
+        file_options_layout = QHBoxLayout()
+        file_options_layout.setContentsMargins(0, 0, 0, 0)
+        file_options_layout.addWidget(self.show_subfolders)
+        file_options_layout.addWidget(self.only_thumbs_up_checkbox)
+        file_options_layout.addStretch(1)
+        file_layout.addLayout(file_options_layout)
 
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_files)
@@ -495,7 +553,6 @@ class DatPlotTab(QWidget):
         self.curve_table.setDropIndicatorShown(True)
         self.curve_table.cellChanged.connect(self.curve_table_changed)
         self.curve_table.cellDoubleClicked.connect(self.curve_table_double_clicked)
-        self.curve_table.model().rowsMoved.connect(self.curve_rows_moved)
         curve_layout.addWidget(self.curve_table, stretch=1)
 
         self.clear_header_button = QPushButton("−", self.curve_table.horizontalHeader())
@@ -663,6 +720,8 @@ class DatPlotTab(QWidget):
 
         files = sorted(set(files))
         files = [file for file in files if file.is_file() and fnmatch(file.name, name_filter)]
+        if self.only_thumbs_up_checkbox.isChecked():
+            files = [file for file in files if is_file_rated_up(file)]
 
         self.file_list.blockSignals(True)
         self.file_list.clear()
@@ -695,7 +754,7 @@ class DatPlotTab(QWidget):
                 "path": file_path,
                 "x": x,
                 "y": y,
-                "legend": file_path.stem,
+                "legend": self.saved_legend_for_file(file_path) or file_path.stem,
                 "color": default_color(index),
             }
 
@@ -789,11 +848,45 @@ class DatPlotTab(QWidget):
         if column == 1:
             item = self.curve_table.item(row, column)
             self.curves[key]["legend"] = item.text() if item else self.curves[key]["legend"]
+            self.remember_legend_for_file(self.curves[key]["path"], self.curves[key]["legend"])
+            self.update_plot_legend_only()
+            return
         elif column == 2:
             item = self.curve_table.item(row, column)
             if item:
                 self.curves[key]["color"] = item.text()
 
+        self.update_plot()
+
+    def update_plot_legend_only(self):
+        ax = self.canvas.ax
+
+        for line, curve in zip(ax.lines, self.curves.values()):
+            line.set_label(curve["legend"])
+
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.remove()
+
+        if self.show_legend.isChecked() and self.curves:
+            make_plot_legend(ax)
+
+        finalize_plot_canvas(self.canvas)
+
+    def move_curve_row(self, source_row, destination_row):
+        keys = list(self.curves.keys())
+        if not 0 <= source_row < len(keys):
+            return
+
+        destination_row = max(0, min(destination_row, len(keys)))
+        key = keys.pop(source_row)
+        if destination_row > source_row:
+            destination_row -= 1
+        keys.insert(destination_row, key)
+
+        self.curves = {curve_key: self.curves[curve_key] for curve_key in keys}
+        self.refresh_curve_table()
+        self.curve_table.selectRow(destination_row)
         self.update_plot()
 
     def curve_rows_moved(self, parent, start, end, destination, row):

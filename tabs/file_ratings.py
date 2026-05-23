@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QAction, QBrush, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QListWidget,
@@ -61,7 +61,24 @@ class FileRatingStore:
 
 
 _STORE = FileRatingStore()
-_RATING_GUTTER_WIDTH = 30
+_DEFAULT_FILE_ICON = "💿"
+_GRAPH_FILE_ICON = "📈"
+_THUMBS_UP_ICON = "👍"
+_THUMBS_DOWN_ICON = "👎"
+
+
+def file_prefix_icon(file_path, rating=None):
+    if rating == "up":
+        return _THUMBS_UP_ICON
+    if rating == "down":
+        return _THUMBS_DOWN_ICON
+
+    name = Path(str(file_path)).name.lower()
+    if name.endswith(".dat") or name.endswith("_ave.h5") or name.endswith("ave.h5") or "averaged" in name:
+        return _GRAPH_FILE_ICON
+    if name.endswith((".h5", ".hdf5", ".edf")):
+        return _DEFAULT_FILE_ICON
+    return _DEFAULT_FILE_ICON
 
 
 class FileRatingDelegate(QStyledItemDelegate):
@@ -69,32 +86,12 @@ class FileRatingDelegate(QStyledItemDelegate):
         rating = index.data(FILE_RATING_ROLE)
         item_option = QStyleOptionViewItem(option)
         self.initStyleOption(item_option, index)
-        item_option.rect = QRect(
-            option.rect.left(),
-            option.rect.top(),
-            max(0, option.rect.width() - _RATING_GUTTER_WIDTH),
-            option.rect.height(),
-        )
+        file_path = index.data(FILE_PATH_ROLE) or item_option.text
+        item_option.text = f"{file_prefix_icon(file_path, rating)} {item_option.text}"
 
         widget = option.widget
         style = widget.style() if widget is not None else QApplication.style()
         style.drawControl(QStyle.CE_ItemViewItem, item_option, painter, widget)
-
-        if rating not in {"up", "down"}:
-            return
-
-        painter.save()
-        font = QFont(option.font)
-        font.setPointSize(max(10, font.pointSize() + 1))
-        painter.setFont(font)
-        icon_rect = QRect(
-            option.rect.right() - _RATING_GUTTER_WIDTH + 2,
-            option.rect.top(),
-            _RATING_GUTTER_WIDTH - 4,
-            option.rect.height(),
-        )
-        painter.drawText(icon_rect, Qt.AlignCenter, "👍" if rating == "up" else "👎")
-        painter.restore()
 
 
 def _normalize_path(file_path):
@@ -136,6 +133,10 @@ def set_item_file_path(item, file_path):
     normalized = _normalize_path(file_path)
     item.setData(FILE_PATH_ROLE, normalized)
     apply_file_rating_to_item(item, normalized)
+
+
+def is_file_rated_up(file_path):
+    return _STORE.get(file_path) == "up"
 
 
 def file_path_from_item(item, fallback_folder=None):

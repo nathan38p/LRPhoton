@@ -47,7 +47,7 @@ from .instrument_presets import (
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
 )
-from .file_ratings import install_file_rating_menu, set_item_file_path
+from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path
 from .ui_style import (
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
@@ -278,6 +278,9 @@ class ViewTab(QWidget):
         self.show_subfolders_checkbox = QCheckBox("Show subfolders")
         self.show_subfolders_checkbox.setChecked(False)
         self.show_subfolders_checkbox.stateChanged.connect(self.refresh_files)
+        self.only_thumbs_up_checkbox = QCheckBox("Only 👍")
+        self.only_thumbs_up_checkbox.setChecked(False)
+        self.only_thumbs_up_checkbox.stateChanged.connect(self.refresh_files)
 
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_files)
@@ -287,7 +290,12 @@ class ViewTab(QWidget):
         filters_layout.addWidget(QLabel("Extensions:"), 1, 0)
         filters_layout.addWidget(self.extension_filter, 1, 1)
         file_layout.addLayout(filters_layout)
-        file_layout.addWidget(self.show_subfolders_checkbox)
+        file_options_layout = QHBoxLayout()
+        file_options_layout.setContentsMargins(0, 0, 0, 0)
+        file_options_layout.addWidget(self.show_subfolders_checkbox)
+        file_options_layout.addWidget(self.only_thumbs_up_checkbox)
+        file_options_layout.addStretch(1)
+        file_layout.addLayout(file_options_layout)
         file_layout.addWidget(refresh_button)
 
         self.file_list = QListWidget()
@@ -812,6 +820,8 @@ class ViewTab(QWidget):
             match_name = fnmatch.fnmatch(path.name, name_pattern)
 
             if match_extension and match_name:
+                if self.only_thumbs_up_checkbox.isChecked() and not is_file_rated_up(path):
+                    continue
                 files.append(path)
 
         for path in sorted(files):

@@ -125,7 +125,15 @@ def apply_plot_display_style(ax):
 
 
 def make_plot_legend(ax):
-    legend = ax.legend(loc="best", frameon=True, fontsize=9)
+    legend = ax.legend(
+        loc="best",
+        frameon=True,
+        fontsize=7,
+        handlelength=1.8,
+        borderpad=0.35,
+        labelspacing=0.3,
+        handletextpad=0.5,
+    )
     legend.set_draggable(True)
     return legend
 

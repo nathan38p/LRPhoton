@@ -638,13 +638,15 @@ class AverageTab(QWidget):
     def _ensure_averaged_suffix(self, output_path):
         path_obj = Path(output_path)
         suffix = path_obj.suffix.lower()
-        name = path_obj.stem
+        known_suffixes = {".edf", ".h5", ".hdf5"}
 
-        if suffix in {".edf", ".h5", ".hdf5"}:
+        if suffix in known_suffixes:
+            name = path_obj.stem
             if not name.endswith("_averaged"):
                 name += "_averaged"
             return str(path_obj.with_name(name + path_obj.suffix))
 
+        name = path_obj.name
         if not name.endswith("_averaged"):
             name += "_averaged"
         return str(path_obj.with_name(name))

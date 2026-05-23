@@ -61,7 +61,7 @@ from .ui_style import (
     make_matplotlib_toolbar_block,
     style_q_geometry_buttons,
 )
-from .file_ratings import install_file_rating_menu, set_item_file_path
+from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path
 
 
 # ============================================================
@@ -351,6 +351,8 @@ def apply_central_symmetry_cave(
     yc,
     nan_operator=">=",
     nan_threshold=4e9,
+    nan_operator_2=None,
+    nan_threshold_2=None,
     use_id13_beamstop=False,
     beamstop_y=1376,
     expand_nan_neighbors=False,
@@ -363,6 +365,11 @@ def apply_central_symmetry_cave(
         cave_mask |= source >= nan_threshold
     elif nan_operator == "<=":
         cave_mask |= source <= nan_threshold
+
+    if nan_operator_2 == ">=" and nan_threshold_2 is not None:
+        cave_mask |= source >= nan_threshold_2
+    elif nan_operator_2 == "<=" and nan_threshold_2 is not None:
+        cave_mask |= source <= nan_threshold_2
 
     cave_mask |= ~np.isfinite(source)
 
@@ -961,9 +968,9 @@ class ManualCaveCanvas(FigureCanvas):
     def preview_patch(self, x0, y0, x1, y1):
         shape = {"type": "rect", "points": (x0, y0, x1, y1)}
         if self.dialog.current_tool == "Vertical band":
-            shape = {"type": "vband", "points": (x0, y0, x1, y1)}
+            shape = {"type": "vband", "points": (x0, y0, x1, y1, 10.0)}
         elif self.dialog.current_tool == "Horizontal band":
-            shape = {"type": "hband", "points": (x0, y0, x1, y1)}
+            shape = {"type": "hband", "points": (x0, y0, x1, y1, 10.0)}
         return self.shape_to_patch(shape, alpha=0.18)
 
     def shape_to_patch(self, shape, alpha=0.22):
@@ -1208,6 +1215,13 @@ class ManualCaveDialog(QDialog):
         self.refresh_preview()
 
     def add_shape(self, shape_type, points):
+        if shape_type == "vband" and len(points) == 4:
+            x0, y0, x1, y1 = points
+            points = (x0, y0, x1, y1, 10.0)
+        elif shape_type == "hband" and len(points) == 4:
+            x0, y0, x1, y1 = points
+            points = (x0, y0, x1, y1, 10.0)
+
         self.shapes.append({"type": shape_type, "points": points})
         self.refresh_shape_list()
         self.refresh_preview()
@@ -1277,6 +1291,76 @@ class ManualCaveDialog(QDialog):
             self.shape_list.addItem(item)
             self.shape_list.setItemWidget(item, row_widget)
 
+    def select_shape(self, index):
+        if 0 <= index < len(self.shapes):
+            self.selected_shape_index = index
+            self.shape_list.setCurrentRow(index)
+        else:
+            self.selected_shape_index = None
+        self.refresh_preview()
+
+    def shape_handles(self, shape):
+        if shape["type"] == "rect":
+            x0, y0, x1, y1 = shape["points"]
+            return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+        polygon = self.band_polygon(shape) if shape["type"] in ("vband", "hband") else shape["points"]
+        return list(polygon)
+
+    def hit_test_shape(self, x, y):
+        for index in range(len(self.shapes) - 1, -1, -1):
+            shape = self.shapes[index]
+            for handle_index, (hx, hy) in enumerate(self.shape_handles(shape)):
+                if abs(x - hx) <= 8 and abs(y - hy) <= 8:
+                    return index, handle_index
+
+            mask = np.zeros(self.source_image.shape, dtype=bool)
+            self.shape_to_mask_single(mask, shape)
+            xi = int(round(x))
+            yi = int(round(y))
+            if 0 <= yi < mask.shape[0] and 0 <= xi < mask.shape[1] and mask[yi, xi]:
+                return index, None
+
+        return None
+
+    def edit_shape(self, index, handle, x, y, dx, dy):
+        if not 0 <= index < len(self.shapes):
+            return
+
+        shape = self.shapes[index]
+        if shape["type"] == "rect":
+            x0, y0, x1, y1 = shape["points"]
+            if handle is None:
+                shape["points"] = (x0 + dx, y0 + dy, x1 + dx, y1 + dy)
+            elif handle == 0:
+                shape["points"] = (x, y, x1, y1)
+            elif handle == 1:
+                shape["points"] = (x0, y, x, y1)
+            elif handle == 2:
+                shape["points"] = (x0, y0, x, y)
+            else:
+                shape["points"] = (x, y0, x1, y)
+        elif shape["type"] in ("vband", "hband"):
+            x0, y0, x1, y1, width = shape["points"]
+            if handle is None:
+                shape["points"] = (x0 + dx, y0 + dy, x1 + dx, y1 + dy, width)
+            elif handle in (0, 3):
+                shape["points"] = (x, y, x1, y1, width)
+            else:
+                shape["points"] = (x0, y0, x, y, width)
+        else:
+            points = list(shape["points"])
+            if handle is None:
+                shape["points"] = [(px + dx, py + dy) for px, py in points]
+            elif 0 <= handle < len(points):
+                points[handle] = (x, y)
+                shape["points"] = points
+
+        self.refresh_shape_list()
+        self.shape_list.setCurrentRow(index)
+        self.selected_shape_index = index
+        self.refresh_preview()
+
     def band_polygon(self, shape):
         x0, y0, x1, y1, width = shape["points"]
         half_width = max(float(width), 1.0) / 2.0
@@ -1324,33 +1408,37 @@ class ManualCaveDialog(QDialog):
 
     def shape_mask(self):
         mask = np.zeros(self.source_image.shape, dtype=bool)
-        ny, nx = mask.shape
 
         for shape in self.shapes:
-            if shape["type"] == "rect":
-                x0, y0, x1, y1 = shape["points"]
-                xmin = max(0, int(np.floor(min(x0, x1))))
-                xmax = min(nx, int(np.ceil(max(x0, x1))))
-                ymin = max(0, int(np.floor(min(y0, y1))))
-                ymax = min(ny, int(np.ceil(max(y0, y1))))
-                mask[ymin:ymax, xmin:xmax] = True
-            else:
-                polygon_points = self.band_polygon(shape) if shape["type"] in ("vband", "hband") else shape["points"]
-                polygon = np.asarray(polygon_points, dtype=float)
-                if polygon.size == 0:
-                    continue
-                xmin = max(0, int(np.floor(np.nanmin(polygon[:, 0]))))
-                xmax = min(nx, int(np.ceil(np.nanmax(polygon[:, 0]))) + 1)
-                ymin = max(0, int(np.floor(np.nanmin(polygon[:, 1]))))
-                ymax = min(ny, int(np.ceil(np.nanmax(polygon[:, 1]))) + 1)
-                if xmin >= xmax or ymin >= ymax:
-                    continue
-                yy, xx = np.mgrid[ymin:ymax, xmin:xmax]
-                points = np.column_stack((xx.ravel(), yy.ravel()))
-                path = MplPath(polygon_points)
-                mask[ymin:ymax, xmin:xmax] |= path.contains_points(points).reshape((ymax - ymin, xmax - xmin))
+            self.shape_to_mask_single(mask, shape)
 
         return mask
+
+    def shape_to_mask_single(self, mask, shape):
+        ny, nx = mask.shape
+        if shape["type"] == "rect":
+            x0, y0, x1, y1 = shape["points"]
+            xmin = max(0, int(np.floor(min(x0, x1))))
+            xmax = min(nx, int(np.ceil(max(x0, x1))))
+            ymin = max(0, int(np.floor(min(y0, y1))))
+            ymax = min(ny, int(np.ceil(max(y0, y1))))
+            mask[ymin:ymax, xmin:xmax] = True
+            return
+
+        polygon_points = self.band_polygon(shape) if shape["type"] in ("vband", "hband") else shape["points"]
+        polygon = np.asarray(polygon_points, dtype=float)
+        if polygon.size == 0:
+            return
+        xmin = max(0, int(np.floor(np.nanmin(polygon[:, 0]))))
+        xmax = min(nx, int(np.ceil(np.nanmax(polygon[:, 0]))) + 1)
+        ymin = max(0, int(np.floor(np.nanmin(polygon[:, 1]))))
+        ymax = min(ny, int(np.ceil(np.nanmax(polygon[:, 1]))) + 1)
+        if xmin >= xmax or ymin >= ymax:
+            return
+        yy, xx = np.mgrid[ymin:ymax, xmin:xmax]
+        points = np.column_stack((xx.ravel(), yy.ravel()))
+        path = MplPath(polygon_points)
+        mask[ymin:ymax, xmin:xmax] |= path.contains_points(points).reshape((ymax - ymin, xmax - xmin))
 
     def filled_image(self):
         mask = self.shape_mask()
@@ -1509,6 +1597,9 @@ class CaveTab(QWidget):
         self.show_subfolders_checkbox = QCheckBox("Show subfolders")
         self.show_subfolders_checkbox.setChecked(False)
         self.show_subfolders_checkbox.stateChanged.connect(self.refresh_files)
+        self.only_thumbs_up_checkbox = QCheckBox("Only 👍")
+        self.only_thumbs_up_checkbox.setChecked(False)
+        self.only_thumbs_up_checkbox.stateChanged.connect(self.refresh_files)
 
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_files)
@@ -1518,7 +1609,12 @@ class CaveTab(QWidget):
         filters_layout.addWidget(QLabel("Extensions:"), 1, 0)
         filters_layout.addWidget(self.extension_filter, 1, 1)
         file_layout.addLayout(filters_layout)
-        file_layout.addWidget(self.show_subfolders_checkbox)
+        file_options_layout = QHBoxLayout()
+        file_options_layout.setContentsMargins(0, 0, 0, 0)
+        file_options_layout.addWidget(self.show_subfolders_checkbox)
+        file_options_layout.addWidget(self.only_thumbs_up_checkbox)
+        file_options_layout.addStretch(1)
+        file_layout.addLayout(file_options_layout)
         file_layout.addWidget(refresh_button)
 
         self.file_list = QListWidget()
@@ -1598,7 +1694,7 @@ class CaveTab(QWidget):
         self.btn_id13 = QPushButton("ID13")
         self.btn_custom = QPushButton("Custom")
         self.q_manual_button = QPushButton("+")
-        self.q_manual_button.clicked.connect(lambda: self.set_instrument_mode("Custom"))
+        self.q_manual_button.clicked.connect(self.use_custom_cave_mask)
 
         for button in [self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom]:
             button.setCheckable(True)
@@ -1623,9 +1719,7 @@ class CaveTab(QWidget):
             self.btn_custom: 60,
             self.q_manual_button: 24,
         }
-        for button, width in compact_widths.items():
-            button.setMinimumWidth(0)
-            button.setFixedWidth(width)
+        self.compact_preset_buttons(compact_widths)
         controls_layout.addLayout(preset_layout)
 
         self.xc_spin = QDoubleSpinBox()
@@ -1684,6 +1778,19 @@ class CaveTab(QWidget):
         self.nan_threshold_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.nan_threshold_spin.setMaximumWidth(136)
 
+        self.nan_extra_checkbox = QCheckBox("Or")
+        self.nan_extra_operator_combo = QComboBox()
+        self.nan_extra_operator_combo.addItems([">=", "<="])
+        self.nan_extra_operator_combo.setFixedWidth(54)
+        self.nan_extra_threshold_spin = QDoubleSpinBox()
+        self.nan_extra_threshold_spin.setRange(-1e12, 1e12)
+        self.nan_extra_threshold_spin.setDecimals(6)
+        self.nan_extra_threshold_spin.setValue(4e9)
+        self.nan_extra_threshold_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.nan_extra_threshold_spin.setMaximumWidth(136)
+        self.nan_extra_operator_combo.setEnabled(False)
+        self.nan_extra_threshold_spin.setEnabled(False)
+
         nan_layout = QGridLayout()
         nan_layout.setContentsMargins(0, 0, 0, 0)
         nan_layout.setHorizontalSpacing(4)
@@ -1692,6 +1799,9 @@ class CaveTab(QWidget):
         nan_layout.addWidget(QLabel("NaN if I"), 0, 0)
         nan_layout.addWidget(self.nan_operator_combo, 0, 1)
         nan_layout.addWidget(self.nan_threshold_spin, 0, 2)
+        nan_layout.addWidget(self.nan_extra_checkbox, 1, 0)
+        nan_layout.addWidget(self.nan_extra_operator_combo, 1, 1)
+        nan_layout.addWidget(self.nan_extra_threshold_spin, 1, 2)
 
         self.id13_beamstop_checkbox = QCheckBox("Add ID13 beamstop mask")
         self.id13_beamstop_checkbox.setChecked(False)
@@ -1756,7 +1866,7 @@ class CaveTab(QWidget):
         self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
         self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
         self.btn_id13.clicked.connect(lambda: self.set_instrument_mode("ID13"))
-        self.btn_custom.clicked.connect(lambda: self.set_instrument_mode("Custom"))
+        self.btn_custom.clicked.connect(self.use_custom_cave_mask)
 
         self.xc_spin.valueChanged.connect(self.refresh_preview)
         self.yc_spin.valueChanged.connect(self.refresh_preview)
@@ -1764,6 +1874,11 @@ class CaveTab(QWidget):
         self.frame_spin.valueChanged.connect(self.load_selected_h5_frame)
         self.nan_operator_combo.currentTextChanged.connect(self.refresh_preview)
         self.nan_threshold_spin.valueChanged.connect(self.refresh_preview)
+        self.nan_threshold_spin.editingFinished.connect(self.refresh_preview)
+        self.nan_extra_checkbox.stateChanged.connect(self.update_extra_nan_condition)
+        self.nan_extra_operator_combo.currentTextChanged.connect(self.refresh_preview)
+        self.nan_extra_threshold_spin.valueChanged.connect(self.refresh_preview)
+        self.nan_extra_threshold_spin.editingFinished.connect(self.refresh_preview)
         self.id13_beamstop_checkbox.stateChanged.connect(self.refresh_preview)
         self.expand_nan_neighbors_checkbox.stateChanged.connect(self.refresh_preview)
         self.vmin_slider.valueChanged.connect(self.update_display_limits_from_sliders)
@@ -1817,6 +1932,7 @@ class CaveTab(QWidget):
             self.frame_slider,
             self.nan_operator_combo,
             self.nan_threshold_spin,
+            self.nan_extra_checkbox,
             self.id13_beamstop_checkbox,
             self.expand_nan_neighbors_checkbox,
             self.manual_mask_button,
@@ -1831,6 +1947,7 @@ class CaveTab(QWidget):
         self.update_frame_selector_visibility()
         self.update_beamstop_visibility()
         self.update_manual_mask_button_state()
+        self.update_extra_nan_condition(refresh=False)
 
         for button in [
             self.btn_xenocs,
@@ -1857,6 +1974,27 @@ class CaveTab(QWidget):
             self.manual_mask_button.setEnabled(False)
             self.manual_mask_button.setToolTip("Available in development mode only.")
 
+    def update_extra_nan_condition(self, refresh=True):
+        self.commit_nan_threshold_edits()
+        enabled = self.nan_extra_checkbox.isEnabled() and self.nan_extra_checkbox.isChecked()
+        self.nan_extra_operator_combo.setEnabled(enabled)
+        self.nan_extra_threshold_spin.setEnabled(enabled)
+        if refresh:
+            self.refresh_preview()
+
+    def extra_nan_condition(self):
+        self.commit_nan_threshold_edits()
+        if not self.nan_extra_checkbox.isChecked():
+            return None, None
+        return self.nan_extra_operator_combo.currentText(), self.nan_extra_threshold_spin.value()
+
+    def commit_nan_threshold_edits(self):
+        for spin in (self.nan_threshold_spin, self.nan_extra_threshold_spin):
+            try:
+                spin.interpretText()
+            except Exception:
+                pass
+
     def manual_cave_mask(self):
         if self.image is None or not self.manual_cave_shapes:
             return None
@@ -1868,6 +2006,112 @@ class CaveTab(QWidget):
             self.shape_to_mask(mask, shape)
 
         return mask
+
+    def contiguous_ranges(self, flags):
+        ranges = []
+        start = None
+
+        for index, flag in enumerate(flags):
+            if flag and start is None:
+                start = index
+            elif not flag and start is not None:
+                ranges.append((start, index))
+                start = None
+
+        if start is not None:
+            ranges.append((start, len(flags)))
+
+        return ranges
+
+    def current_bad_pixel_mask(self):
+        if self.image is None:
+            return None
+
+        self.commit_nan_threshold_edits()
+        source = self.image.astype(np.float64)
+        mask = ~np.isfinite(source)
+
+        if self.nan_operator_combo.currentText() == ">=":
+            mask |= source >= self.nan_threshold_spin.value()
+        else:
+            mask |= source <= self.nan_threshold_spin.value()
+
+        extra_operator, extra_threshold = self.extra_nan_condition()
+        if extra_operator == ">=":
+            mask |= source >= extra_threshold
+        elif extra_operator == "<=":
+            mask |= source <= extra_threshold
+
+        if self.expand_nan_neighbors_checkbox.isChecked():
+            original_mask = mask.copy()
+            radius = 2
+            padded_mask = np.pad(original_mask, radius, mode="constant", constant_values=False)
+            expanded_mask = np.zeros_like(original_mask, dtype=bool)
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
+                    expanded_mask |= padded_mask[
+                        radius + dy:radius + dy + original_mask.shape[0],
+                        radius + dx:radius + dx + original_mask.shape[1],
+                    ]
+            mask = expanded_mask
+
+        return mask
+
+    def id13_custom_shapes(self):
+        if self.image is None:
+            return []
+
+        bad_mask = self.current_bad_pixel_mask()
+        if bad_mask is None:
+            return []
+
+        ny, nx = bad_mask.shape
+        shapes = []
+
+        y1 = int(round(self.yc_spin.value()))
+        y2 = int(round(self.beamstop_y_spin.value()))
+        x1 = int(round(self.xc_spin.value()))
+        x2 = nx
+        x1 = max(0, min(x1, nx))
+        y1 = max(0, min(y1, ny))
+        y2 = max(0, min(y2, ny))
+        if y2 < y1:
+            y1, y2 = y2, y1
+        if y1 != y2 and x1 != x2:
+            shapes.append({"type": "rect", "points": (x1, y1, x2, y2)})
+
+        row_threshold = max(8, int(nx * 0.35))
+        col_threshold = max(8, int(ny * 0.35))
+        row_ranges = self.contiguous_ranges(np.sum(bad_mask, axis=1) >= row_threshold)
+        col_ranges = self.contiguous_ranges(np.sum(bad_mask, axis=0) >= col_threshold)
+
+        for start, end in row_ranges:
+            if end - start >= 1:
+                shapes.append({"type": "rect", "points": (0, start, nx, end)})
+
+        for start, end in col_ranges:
+            if end - start >= 1:
+                shapes.append({"type": "rect", "points": (start, 0, end, ny)})
+
+        return shapes
+
+    def use_custom_cave_mask(self):
+        self.set_instrument_mode("Custom")
+
+        if self.image is None:
+            return
+
+        if not self.manual_cave_shapes:
+            self.manual_cave_shapes = [self.copy_shape_data(shape) for shape in self.id13_custom_shapes()]
+
+        self.open_manual_cave_dialog()
+
+    def copy_shape_data(self, shape):
+        if shape["type"] in ("rect", "vband", "hband"):
+            points = tuple(float(value) for value in shape["points"])
+        else:
+            points = [(float(x), float(y)) for x, y in shape["points"]]
+        return {"type": shape["type"], "points": points}
 
     def manual_band_polygon(self, shape):
         x0, y0, x1, y1, width = shape["points"]
@@ -1915,16 +2159,20 @@ class CaveTab(QWidget):
         mask[ymin:ymax, xmin:xmax] |= path.contains_points(points).reshape((ymax - ymin, xmax - xmin))
 
     def open_manual_cave_dialog(self):
-        if not self.is_development_copy() or self.image is None:
+        if self.image is None:
             return
 
+        self.commit_nan_threshold_edits()
         use_id13_beamstop = self.instrument_mode == "ID13" and self.id13_beamstop_checkbox.isChecked()
+        extra_operator, extra_threshold = self.extra_nan_condition()
         _, automatic_filled, _ = apply_central_symmetry_cave(
             self.image,
             self.xc_spin.value(),
             self.yc_spin.value(),
             nan_operator=self.nan_operator_combo.currentText(),
             nan_threshold=self.nan_threshold_spin.value(),
+            nan_operator_2=extra_operator,
+            nan_threshold_2=extra_threshold,
             use_id13_beamstop=use_id13_beamstop,
             beamstop_y=self.beamstop_y_spin.value(),
             expand_nan_neighbors=self.expand_nan_neighbors_checkbox.isChecked(),
@@ -1997,6 +2245,19 @@ class CaveTab(QWidget):
         self.vmin_label.setText(f"Min: {vmin:.3f}")
         self.vmax_label.setText(f"Max: {vmax:.3f}")
 
+    def compact_preset_buttons(self, widths=None):
+        widths = widths or {
+            self.btn_xenocs: 66,
+            self.btn_id02: 48,
+            self.btn_id13: 48,
+            self.btn_custom: 60,
+            self.q_manual_button: 24,
+        }
+
+        for button, width in widths.items():
+            button.setMinimumWidth(0)
+            button.setFixedWidth(width)
+
     def set_instrument_mode(self, mode):
         self.instrument_mode = mode
 
@@ -2008,6 +2269,7 @@ class CaveTab(QWidget):
         }
 
         style_q_geometry_buttons(buttons, mode, self.q_manual_button)
+        self.compact_preset_buttons()
 
         self.apply_instrument_preset()
         self.update_centre_warning_labels()
@@ -2213,6 +2475,14 @@ class CaveTab(QWidget):
         return (4.0 * np.pi / wavelength_nm) * np.sin(two_theta / 2.0)
 
     def apply_instrument_preset(self):
+        if self.instrument_mode != "Custom":
+            self.nan_extra_checkbox.blockSignals(True)
+            self.nan_extra_checkbox.setChecked(False)
+            self.nan_extra_checkbox.blockSignals(False)
+            self.nan_extra_operator_combo.setCurrentText(">=")
+            self.nan_extra_threshold_spin.setValue(4e9)
+            self.update_extra_nan_condition(refresh=False)
+
         if self.instrument_mode == "XENOCS":
             center_1 = get_header_float(self.header, *CENTER_X_KEYS)
             center_2 = get_header_float(self.header, *CENTER_Y_KEYS)
@@ -2284,6 +2554,8 @@ class CaveTab(QWidget):
             match_name = fnmatch.fnmatch(path.name, name_pattern)
 
             if match_extension and match_name:
+                if self.only_thumbs_up_checkbox.isChecked() and not is_file_rated_up(path):
+                    continue
                 files.append(path)
 
         for path in sorted(files):
@@ -2410,7 +2682,9 @@ class CaveTab(QWidget):
         if self.image is None:
             return
 
+        self.commit_nan_threshold_edits()
         use_id13_beamstop = self.instrument_mode == "ID13" and self.id13_beamstop_checkbox.isChecked()
+        extra_operator, extra_threshold = self.extra_nan_condition()
 
         clean, filled, cave_mask = apply_central_symmetry_cave(
             self.image,
@@ -2418,6 +2692,8 @@ class CaveTab(QWidget):
             self.yc_spin.value(),
             nan_operator=self.nan_operator_combo.currentText(),
             nan_threshold=self.nan_threshold_spin.value(),
+            nan_operator_2=extra_operator,
+            nan_threshold_2=extra_threshold,
             use_id13_beamstop=use_id13_beamstop,
             beamstop_y=self.beamstop_y_spin.value(),
             expand_nan_neighbors=self.expand_nan_neighbors_checkbox.isChecked(),

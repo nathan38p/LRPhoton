@@ -41,7 +41,7 @@ from .instrument_presets import (
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
 )
-from .file_ratings import file_path_from_item, install_file_rating_menu, set_item_file_path
+from .file_ratings import file_path_from_item, install_file_rating_menu, is_file_rated_up, set_item_file_path
 from .ui_style import (
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
@@ -842,7 +842,15 @@ class HermansTab(QWidget):
         self.show_subfolders_checkbox = QCheckBox("Show subfolders")
         self.show_subfolders_checkbox.setChecked(False)
         self.show_subfolders_checkbox.stateChanged.connect(self.refresh_files)
-        file_browser_layout.addWidget(self.show_subfolders_checkbox)
+        self.only_thumbs_up_checkbox = QCheckBox("Only 👍")
+        self.only_thumbs_up_checkbox.setChecked(False)
+        self.only_thumbs_up_checkbox.stateChanged.connect(self.refresh_files)
+        file_options_layout = QHBoxLayout()
+        file_options_layout.setContentsMargins(0, 0, 0, 0)
+        file_options_layout.addWidget(self.show_subfolders_checkbox)
+        file_options_layout.addWidget(self.only_thumbs_up_checkbox)
+        file_options_layout.addStretch(1)
+        file_browser_layout.addLayout(file_options_layout)
 
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_files)
@@ -1434,6 +1442,8 @@ class HermansTab(QWidget):
         from fnmatch import fnmatch
         files = sorted(set(files))
         files = [file for file in files if fnmatch(file.name, name_filter)]
+        if self.only_thumbs_up_checkbox.isChecked():
+            files = [file for file in files if is_file_rated_up(file)]
 
         if self.is_anisotropy_mode():
             excluded_suffixes = ("_ave.h5", "_aveq_ave.h5", "ave.h5", "polar.edf")
