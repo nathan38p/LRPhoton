@@ -5,7 +5,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from PySide6.QtCore import Qt, QEvent, QPoint, QSize
+from PySide6.QtCore import Qt, QEvent, QPoint, QSize, QCoreApplication
 from PySide6.QtWidgets import (
     QWidget,
     QDialog,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QLineEdit,
     QScrollArea,
+    QProgressBar,
     QSizePolicy,
     QSplitter,
 )
@@ -1044,6 +1045,14 @@ class ManualCaveDialog(QDialog):
         self.finish_poly_button.setToolTip("Finish polygon")
         self.clear_button = QPushButton("Clear")
         self.apply_button = QPushButton("Apply")
+        self.multicave_button = QPushButton("MultiCave")
+        self.multicave_button.setToolTip(
+            "Apply the ID13 cave frame by frame on the current H5 file and save each caved frame in a folder."
+        )
+        self.multicave_progress = QProgressBar()
+        self.multicave_progress.setRange(0, 1)
+        self.multicave_progress.setValue(0)
+        self.multicave_progress.setTextVisible(True)
         self.close_button = QPushButton("Close")
 
         self.select_button.setCheckable(True)
@@ -1101,6 +1110,8 @@ class ManualCaveDialog(QDialog):
         side.addWidget(self.shape_list, 1)
         side.addWidget(self.clear_button)
         side.addWidget(self.apply_button)
+        side.addWidget(self.multicave_button)
+        side.addWidget(self.multicave_progress)
         side.addWidget(self.close_button)
         body.addLayout(side)
         layout.addLayout(body, 1)
@@ -1131,6 +1142,7 @@ class ManualCaveDialog(QDialog):
         self.finish_poly_button.clicked.connect(self.finish_polygon)
         self.clear_button.clicked.connect(self.clear_shapes)
         self.apply_button.clicked.connect(self.apply_to_parent)
+        self.multicave_button.clicked.connect(self.run_multicave_current_file)
         self.close_button.clicked.connect(self.reject)
         self.min_slider.valueChanged.connect(self.update_display_limits_from_sliders)
         self.max_slider.valueChanged.connect(self.update_display_limits_from_sliders)
@@ -1139,6 +1151,92 @@ class ManualCaveDialog(QDialog):
         self.refresh_shape_list()
         self.set_display_sliders_from_limits()
         self.refresh_preview()
+    def combined_manual_mask_for_shape(self, shape):
+        mask = np.zeros(shape, dtype=bool)
+
+        for manual_shape in self.shapes:
+            self.shape_to_mask_single(mask, manual_shape)
+
+        return mask
+
+    def run_multicave_current_file(self):
+        parent = self.parent()
+
+        if parent.current_file is None or str(parent.file_type).upper() != "H5":
+            QMessageBox.warning(self, "MultiCave", "MultiCave is only available for the current H5 file.")
+            return
+
+        if parent.h5_dataset_name is None:
+            QMessageBox.warning(self, "MultiCave", "No H5 dataset is currently loaded.")
+            return
+
+        total_frames = int(getattr(parent, "h5_n_frames", 1) or 1)
+        if total_frames <= 0:
+            QMessageBox.warning(self, "MultiCave", "No frame found in the current H5 file.")
+            return
+
+        source_path = Path(parent.current_file)
+        output_dir = source_path.with_name(f"{source_path.stem}_cave_frames")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.multicave_button.setEnabled(False)
+        self.multicave_progress.setRange(0, total_frames)
+        self.multicave_progress.setValue(0)
+        self.multicave_progress.setFormat(f"0 / {total_frames}")
+        QCoreApplication.processEvents()
+
+        previous_frame = parent.frame_slider.value() if hasattr(parent, "frame_slider") else 1
+        saved_count = 0
+
+        try:
+            for frame_index in range(total_frames):
+                image, _ = read_h5_frame(parent.current_file, parent.h5_dataset_name, frame_index)
+                manual_mask = self.combined_manual_mask_for_shape(image.shape)
+                extra_operator, extra_threshold = parent.extra_nan_condition()
+
+                _, filled, _ = apply_central_symmetry_cave(
+                    image,
+                    parent.xc_spin.value(),
+                    parent.yc_spin.value(),
+                    nan_operator=parent.nan_operator_combo.currentText(),
+                    nan_threshold=parent.nan_threshold_spin.value(),
+                    nan_operator_2=extra_operator,
+                    nan_threshold_2=extra_threshold,
+                    use_id13_beamstop=True,
+                    beamstop_y=parent.beamstop_y_spin.value(),
+                    expand_nan_neighbors=parent.expand_nan_neighbors_checkbox.isChecked(),
+                    extra_mask=manual_mask,
+                )
+
+                output_file = output_dir / f"{source_path.stem}_frame{frame_index + 1:04d}_cave.h5"
+                write_h5_frame_file(
+                    output_file,
+                    filled,
+                    parent.current_file,
+                    parent.h5_dataset_name,
+                    frame_index,
+                )
+                saved_count += 1
+
+                self.multicave_progress.setValue(frame_index + 1)
+                self.multicave_progress.setFormat(f"{frame_index + 1} / {total_frames}")
+                QCoreApplication.processEvents()
+
+            if hasattr(parent, "frame_slider"):
+                parent.frame_slider.setValue(previous_frame)
+
+            parent.status.append(
+                f"MultiCave done: {saved_count} H5 frames saved in {output_dir}"
+            )
+            QMessageBox.information(
+                self,
+                "MultiCave",
+                f"MultiCave finished.\n\n{saved_count} H5 files saved in:\n{output_dir}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "MultiCave error", str(exc))
+        finally:
+            self.multicave_button.setEnabled(True)
 
     def copy_shape(self, shape):
         if shape["type"] == "rect":
@@ -1443,20 +1541,26 @@ class ManualCaveDialog(QDialog):
     def filled_image(self):
         mask = self.shape_mask()
         source = self.base_filled_image.copy()
-        source[mask] = np.nan
         filled = source.copy()
         xc = self.parent().xc_spin.value()
         yc = self.parent().yc_spin.value()
         ny, nx = source.shape
 
         missing_y, missing_x = np.where(mask)
+
         for y, x in zip(missing_y, missing_x):
             xs = int(round(2 * xc - x))
             ys = int(round(2 * yc - y))
+
             if 0 <= xs < nx and 0 <= ys < ny:
                 value = source[ys, xs]
                 if np.isfinite(value):
                     filled[y, x] = value
+                else:
+                    filled[y, x] = np.nan
+            else:
+                filled[y, x] = np.nan
+
         return filled
 
     def refresh_preview(self):
@@ -1483,8 +1587,13 @@ class ManualCaveDialog(QDialog):
         )
 
     def apply_to_parent(self):
+
         self.parent().manual_cave_shapes = [self.copy_shape(shape) for shape in self.shapes]
+
+        self.parent().image_filled = self.filled_image()
+
         self.parent().refresh_preview()
+
         self.accept()
 
 
@@ -1966,7 +2075,7 @@ class CaveTab(QWidget):
             return
 
         if self.is_development_copy():
-            self.manual_mask_button.setText("Manual cave mask")
+            self.manual_mask_button.setText("Manual cave mask / MultiCave")
             self.manual_mask_button.setEnabled(self.image is not None)
             self.manual_mask_button.setToolTip("")
         else:

@@ -6,6 +6,8 @@ import numpy as np
 from PySide6.QtCore import Qt, QEvent, Signal, QMimeData, QTimer
 from PySide6.QtWidgets import (
     QWidget,
+    QDialog,
+    QDialogButtonBox,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
@@ -31,6 +33,9 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStyle,
     QToolButton,
+    QMenu,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
 )
 from PySide6.QtGui import QColor, QDrag
 
@@ -174,6 +179,29 @@ class CurveTableWidget(QTableWidget):
             event.ignore()
         else:
             super().dropEvent(event)
+
+
+class ColorCellDelegate(QStyledItemDelegate):
+    """Keep color swatches visible even when their row is selected."""
+
+    def paint(self, painter, option, index):
+        item_option = QStyleOptionViewItem(option)
+        self.initStyleOption(item_option, index)
+
+        widget = option.widget
+        style = widget.style() if widget is not None else None
+        if style is not None:
+            style.drawControl(QStyle.CE_ItemViewItem, item_option, painter, widget)
+
+        color = index.data(Qt.BackgroundRole)
+        if not isinstance(color, QColor):
+            color = QColor(index.data(Qt.ToolTipRole) or "")
+        if not color.isValid():
+            return
+
+        painter.save()
+        painter.fillRect(option.rect.adjusted(1, 1, -1, -1), color)
+        painter.restore()
 
 
 # ============================================================
@@ -356,9 +384,11 @@ class DatPlotTab(QWidget):
 
         self.current_folder = Path("/Users/nathanpiaget/Documents/Thèse LRP/Expériences/XENOCS")
         self.curves = {}
+        self.guide_bars = []
         self.saved_legends = self.load_saved_legends()
         self._syncing_folder = False
         self._refreshing_curve_table = False
+        self._refreshing_guide_table = False
 
         self.build_ui()
         self.refresh_files()
@@ -551,9 +581,67 @@ class DatPlotTab(QWidget):
         self.curve_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.curve_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.curve_table.setDropIndicatorShown(True)
+        self.curve_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.curve_table.setItemDelegateForColumn(2, ColorCellDelegate(self.curve_table))
         self.curve_table.cellChanged.connect(self.curve_table_changed)
         self.curve_table.cellDoubleClicked.connect(self.curve_table_double_clicked)
+        self.curve_table.customContextMenuRequested.connect(self.open_curve_table_menu)
         curve_layout.addWidget(self.curve_table, stretch=1)
+
+        mask_buttons_layout = QHBoxLayout()
+        mask_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        mask_buttons_layout.setSpacing(4)
+        self.mask_range_button = QPushButton("Mask range...")
+        self.mask_range_button.setToolTip("Mask a q or psi range in selected curves, or all curves if none is selected.")
+        self.mask_range_button.clicked.connect(self.open_mask_range_dialog)
+        self.mask_range_button.setEnabled(False)
+        self.reset_masks_button = QPushButton("Reset masks")
+        self.reset_masks_button.setToolTip("Restore original data for selected curves, or all curves if none is selected.")
+        self.reset_masks_button.clicked.connect(self.reset_curve_masks)
+        self.reset_masks_button.setEnabled(False)
+        mask_buttons_layout.addWidget(self.mask_range_button)
+        mask_buttons_layout.addWidget(self.reset_masks_button)
+        curve_layout.addLayout(mask_buttons_layout)
+
+        guide_box = QGroupBox("Dashed bars")
+        self.style_top_group_box(guide_box)
+        guide_layout = QVBoxLayout(guide_box)
+        guide_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        guide_layout.setSpacing(6)
+        curve_panel_layout.addWidget(guide_box, stretch=0)
+
+        self.guide_table = QTableWidget(0, 4)
+        self.guide_table.setMinimumHeight(96)
+        self.guide_table.setMaximumHeight(150)
+        self.guide_table.setHorizontalHeaderLabels(["Axis", "Value", "Color", ""])
+        self.guide_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.guide_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.guide_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.guide_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.guide_table.setColumnWidth(0, 42)
+        self.guide_table.setColumnWidth(2, 44)
+        self.guide_table.setColumnWidth(3, 30)
+        self.guide_table.verticalHeader().setVisible(False)
+        self.guide_table.verticalHeader().setDefaultSectionSize(26)
+        self.guide_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.guide_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.guide_table.setItemDelegateForColumn(2, ColorCellDelegate(self.guide_table))
+        self.guide_table.cellChanged.connect(self.guide_table_changed)
+        self.guide_table.cellDoubleClicked.connect(self.guide_table_double_clicked)
+        guide_layout.addWidget(self.guide_table)
+
+        guide_buttons_layout = QHBoxLayout()
+        guide_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        guide_buttons_layout.setSpacing(4)
+        self.add_x_bar_button = QPushButton("+ X")
+        self.add_x_bar_button.setToolTip("Add a vertical dashed bar")
+        self.add_x_bar_button.clicked.connect(lambda: self.add_guide_bar("x"))
+        self.add_y_bar_button = QPushButton("+ Y")
+        self.add_y_bar_button.setToolTip("Add a horizontal dashed bar")
+        self.add_y_bar_button.clicked.connect(lambda: self.add_guide_bar("y"))
+        guide_buttons_layout.addWidget(self.add_x_bar_button)
+        guide_buttons_layout.addWidget(self.add_y_bar_button)
+        guide_layout.addLayout(guide_buttons_layout)
 
         self.clear_header_button = QPushButton("−", self.curve_table.horizontalHeader())
         self.clear_header_button.setFixedSize(22, 18)
@@ -595,7 +683,7 @@ class DatPlotTab(QWidget):
                 self.plot_mode,
                 self.show_legend,
             ],
-            save_callback=self.toolbar.save_figure,
+            save_callback=self.save_plot_high_quality,
             save_tooltip="Save plot",
             toolbar_width=320,
         )
@@ -618,6 +706,7 @@ class DatPlotTab(QWidget):
         self.update_graph_toolbar_enabled()
 
         self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
+        self.canvas.mpl_connect("button_press_event", self.graph_button_press)
         self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
 
         frame_nav = QHBoxLayout()
@@ -676,6 +765,57 @@ class DatPlotTab(QWidget):
         spin.setFixedHeight(24)
         spin.setFixedWidth(90)
         return spin
+
+    def save_plot_high_quality(self):
+        if not self.curves:
+            return
+
+        default_name = "plot_1d.png"
+        if self.curves:
+            first_curve = next(iter(self.curves.values()))
+            default_name = f"{first_curve['path'].stem}_plot_1d.png"
+
+        start_path = str(self.current_folder / default_name)
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save plot",
+            start_path,
+            "PNG image (*.png);;TIFF image (*.tif *.tiff);;PDF vector (*.pdf);;SVG vector (*.svg)",
+        )
+
+        if not file_path:
+            return
+
+        suffix = Path(file_path).suffix.lower()
+        if not suffix:
+            if "TIFF" in selected_filter:
+                file_path += ".tif"
+                suffix = ".tif"
+            elif "PDF" in selected_filter:
+                file_path += ".pdf"
+                suffix = ".pdf"
+            elif "SVG" in selected_filter:
+                file_path += ".svg"
+                suffix = ".svg"
+            else:
+                file_path += ".png"
+                suffix = ".png"
+
+        save_kwargs = {
+            "bbox_inches": "tight",
+            "pad_inches": 0.04,
+            "facecolor": "white",
+        }
+
+        if suffix in [".png", ".tif", ".tiff"]:
+            save_kwargs["dpi"] = 600
+        else:
+            save_kwargs["dpi"] = 300
+
+        try:
+            self.canvas.fig.savefig(file_path, **save_kwargs)
+        except Exception as error:
+            QMessageBox.warning(self, "Save plot error", f"Could not save plot:\n\n{error}")
 
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose folder", str(self.current_folder))
@@ -754,6 +894,7 @@ class DatPlotTab(QWidget):
                 "path": file_path,
                 "x": x,
                 "y": y,
+                "original_y": y.copy(),
                 "legend": self.saved_legend_for_file(file_path) or file_path.stem,
                 "color": default_color(index),
             }
@@ -855,14 +996,25 @@ class DatPlotTab(QWidget):
             item = self.curve_table.item(row, column)
             if item:
                 self.curves[key]["color"] = item.text()
+                self.update_curve_color_only(key)
+                return
 
         self.update_plot()
 
     def update_plot_legend_only(self):
         ax = self.canvas.ax
+        previous_xlim = ax.get_xlim()
+        previous_ylim = ax.get_ylim()
+        previous_xscale = ax.get_xscale()
+        previous_yscale = ax.get_yscale()
 
-        for line, curve in zip(ax.lines, self.curves.values()):
-            line.set_label(curve["legend"])
+        for key, curve in self.curves.items():
+            first = True
+            for line in ax.lines:
+                if line.get_gid() != key:
+                    continue
+                line.set_label(curve["legend"] if first else "_nolegend_")
+                first = False
 
         legend = ax.get_legend()
         if legend is not None:
@@ -871,9 +1023,221 @@ class DatPlotTab(QWidget):
         if self.show_legend.isChecked() and self.curves:
             make_plot_legend(ax)
 
+        ax.set_xscale(previous_xscale)
+        ax.set_yscale(previous_yscale)
+        ax.set_xlim(previous_xlim)
+        ax.set_ylim(previous_ylim)
         finalize_plot_canvas(self.canvas)
 
+    def update_curve_color_only(self, key):
+        if key not in self.curves:
+            return
+
+        ax = self.canvas.ax
+        previous_xlim = ax.get_xlim()
+        previous_ylim = ax.get_ylim()
+        previous_xscale = ax.get_xscale()
+        previous_yscale = ax.get_yscale()
+
+        for line in ax.lines:
+            if line.get_gid() == key:
+                line.set_color(self.curves[key]["color"])
+
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.remove()
+        if self.show_legend.isChecked() and self.curves:
+            make_plot_legend(ax)
+
+        ax.set_xscale(previous_xscale)
+        ax.set_yscale(previous_yscale)
+        ax.set_xlim(previous_xlim)
+        ax.set_ylim(previous_ylim)
+        finalize_plot_canvas(self.canvas)
+
+    def update_plot_preserving_view(self):
+        ax = self.canvas.ax
+        previous_xlim = ax.get_xlim()
+        previous_ylim = ax.get_ylim()
+        previous_xscale = ax.get_xscale()
+        previous_yscale = ax.get_yscale()
+
+        self.update_plot()
+
+        self.canvas.ax.set_xscale(previous_xscale)
+        self.canvas.ax.set_yscale(previous_yscale)
+        self.canvas.ax.set_xlim(previous_xlim)
+        self.canvas.ax.set_ylim(previous_ylim)
+        finalize_plot_canvas(self.canvas)
+
+    def default_guide_value(self, axis):
+        ax = self.canvas.ax
+        limits = ax.get_xlim() if axis == "x" else ax.get_ylim()
+        scale = ax.get_xscale() if axis == "x" else ax.get_yscale()
+        left, right = limits
+        if scale == "log" and left > 0 and right > 0:
+            return float(np.sqrt(left * right))
+        return float((left + right) / 2)
+
+    def add_guide_bar(self, axis):
+        self.guide_bars.append({
+            "axis": axis,
+            "value": self.default_guide_value(axis),
+            "color": "#444444",
+        })
+        self.refresh_guide_table()
+        self.update_plot_preserving_view()
+
+    def refresh_guide_table(self):
+        self._refreshing_guide_table = True
+        self.guide_table.blockSignals(True)
+        self.guide_table.setRowCount(0)
+
+        for row, bar in enumerate(self.guide_bars):
+            self.guide_table.insertRow(row)
+
+            axis_item = QTableWidgetItem(bar["axis"].upper())
+            axis_item.setFlags(axis_item.flags() & ~Qt.ItemIsEditable)
+            self.guide_table.setItem(row, 0, axis_item)
+
+            value_item = QTableWidgetItem(f"{bar['value']:.6g}")
+            self.guide_table.setItem(row, 1, value_item)
+
+            color_item = QTableWidgetItem("")
+            color_item.setFlags(color_item.flags() & ~Qt.ItemIsEditable)
+            color_item.setBackground(QColor(bar["color"]))
+            color_item.setToolTip(bar["color"])
+            self.guide_table.setItem(row, 2, color_item)
+
+            remove_button = QPushButton("−")
+            remove_button.setFixedSize(22, 18)
+            remove_button.setToolTip("Remove this dashed bar")
+            remove_button.setStyleSheet("""
+                QPushButton {
+                    background: #ffecec;
+                    color: #b00020;
+                    border: 1px solid #ffb3b3;
+                    border-radius: 8px;
+                    font-weight: bold;
+                    font-size: 11px;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background: #ffd6d6;
+                }
+            """)
+            remove_button.clicked.connect(lambda checked=False, bar_row=row: self.remove_guide_bar(bar_row))
+
+            remove_holder = QWidget()
+            remove_layout = QHBoxLayout(remove_holder)
+            remove_layout.setContentsMargins(0, 0, 0, 0)
+            remove_layout.setSpacing(0)
+            remove_layout.addWidget(remove_button, alignment=Qt.AlignCenter)
+            self.guide_table.setCellWidget(row, 3, remove_holder)
+
+        self.guide_table.blockSignals(False)
+        self._refreshing_guide_table = False
+
+    def guide_table_changed(self, row, column):
+        if self._refreshing_guide_table or column != 1:
+            return
+        if not 0 <= row < len(self.guide_bars):
+            return
+
+        item = self.guide_table.item(row, column)
+        if item is None:
+            return
+
+        text = item.text().strip().replace(",", ".")
+        try:
+            value = float(text)
+        except ValueError:
+            self.refresh_guide_table()
+            return
+
+        self.guide_bars[row]["value"] = value
+        self.update_plot_preserving_view()
+
+    def guide_table_double_clicked(self, row, column):
+        if column != 2 or not 0 <= row < len(self.guide_bars):
+            return
+
+        color = QColorDialog.getColor(QColor(self.guide_bars[row]["color"]), self, "Choose dashed bar color")
+        if not color.isValid():
+            return
+
+        self.guide_bars[row]["color"] = color.name()
+        self.refresh_guide_table()
+        self.update_plot_preserving_view()
+
+    def remove_guide_bar(self, row):
+        if not 0 <= row < len(self.guide_bars):
+            return
+
+        del self.guide_bars[row]
+        self.refresh_guide_table()
+        self.update_plot_preserving_view()
+
+    def draw_guide_bars(self, ax):
+        for bar in self.guide_bars:
+            value = float(bar.get("value", 0.0))
+            if not np.isfinite(value):
+                continue
+
+            color = bar.get("color", "#444444")
+            axis = bar.get("axis", "x")
+            if axis == "x":
+                line = ax.axvline(value, color=color, linestyle="--", linewidth=1.2, alpha=0.9, label="_nolegend_")
+            else:
+                line = ax.axhline(value, color=color, linestyle="--", linewidth=1.2, alpha=0.9, label="_nolegend_")
+            line.set_gid("guide_bar")
+
+    def plot_curve_segments(self, ax, key, curve, x, y, mode):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        valid = np.isfinite(x) & np.isfinite(y)
+
+        if mode in ("log linear", "log log"):
+            valid &= x > 0
+        if mode in ("linear log", "log log"):
+            valid &= y > 0
+
+        ranges = []
+        start = None
+        for index, is_valid in enumerate(valid):
+            if is_valid and start is None:
+                start = index
+            elif not is_valid and start is not None:
+                ranges.append((start, index))
+                start = None
+
+        if start is not None:
+            ranges.append((start, len(valid)))
+
+        if not ranges:
+            line, = ax.plot([], [], linewidth=1.6, label=curve["legend"], color=curve["color"])
+            line.set_gid(key)
+            return
+
+        for segment_index, (start, end) in enumerate(ranges):
+            line, = ax.plot(
+                x[start:end],
+                y[start:end],
+                linewidth=1.6,
+                label=curve["legend"] if segment_index == 0 else "_nolegend_",
+                color=curve["color"],
+                antialiased=True,
+                solid_capstyle="round",
+                solid_joinstyle="round",
+            )
+            line.set_gid(key)
+
     def move_curve_row(self, source_row, destination_row):
+        previous_xlim = self.canvas.ax.get_xlim()
+        previous_ylim = self.canvas.ax.get_ylim()
+        previous_xscale = self.canvas.ax.get_xscale()
+        previous_yscale = self.canvas.ax.get_yscale()
+
         keys = list(self.curves.keys())
         if not 0 <= source_row < len(keys):
             return
@@ -888,6 +1252,11 @@ class DatPlotTab(QWidget):
         self.refresh_curve_table()
         self.curve_table.selectRow(destination_row)
         self.update_plot()
+        self.canvas.ax.set_xscale(previous_xscale)
+        self.canvas.ax.set_yscale(previous_yscale)
+        self.canvas.ax.set_xlim(previous_xlim)
+        self.canvas.ax.set_ylim(previous_ylim)
+        finalize_plot_canvas(self.canvas)
 
     def curve_rows_moved(self, parent, start, end, destination, row):
         """Handle curve reordering when dragged in the table."""
@@ -938,7 +1307,7 @@ class DatPlotTab(QWidget):
 
         self.curves[key]["color"] = color.name()
         self.refresh_curve_table()
-        self.update_plot()
+        self.update_curve_color_only(key)
 
     def remove_curve(self, key):
         if key in self.curves:
@@ -953,12 +1322,199 @@ class DatPlotTab(QWidget):
         self.clear_graph_coordinates()
         self.update_graph_toolbar_enabled()
 
+    def selected_curve_keys(self):
+        keys = []
+        for index in self.curve_table.selectionModel().selectedRows():
+            item = self.curve_table.item(index.row(), 0)
+            if item is not None and item.text() in self.curves:
+                keys.append(item.text())
+        return keys
+
+    def open_curve_table_menu(self, position):
+        item = self.curve_table.itemAt(position)
+        if item is None:
+            return
+
+        row = item.row()
+        key_item = self.curve_table.item(row, 0)
+        if key_item is None:
+            return
+
+        curve_key = key_item.text()
+        if curve_key not in self.curves:
+            return
+
+        self.curve_table.selectRow(row)
+        legend = self.curves[curve_key]["legend"]
+
+        menu = QMenu(self.curve_table)
+        mask_action = menu.addAction(f"Mask range on {legend}")
+        reset_action = menu.addAction(f"Reset mask on {legend}")
+
+        action = menu.exec(self.curve_table.viewport().mapToGlobal(position))
+        if action is mask_action:
+            self.open_mask_range_dialog(curve_key=curve_key)
+        elif action is reset_action:
+            curve = self.curves[curve_key]
+            if "original_y" in curve:
+                curve["y"] = np.asarray(curve["original_y"], dtype=float).copy()
+                self.update_plot()
+
+    def open_mask_range_dialog(self, curve_key=None, center_x=None):
+        if not self.curves:
+            return
+
+        x_label, _ = self.graph_coordinate_labels()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Mask data range")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        if curve_key is not None and curve_key in self.curves:
+            target_text = f"Target: {self.curves[curve_key]['legend']}"
+        else:
+            selected_count = len(self.selected_curve_keys())
+            target_text = f"Target: {selected_count} selected curve(s)" if selected_count else "Target: all curves"
+        target_label = QLabel(target_text)
+        layout.addWidget(target_label)
+
+        range_layout = QGridLayout()
+        xlim = self.canvas.ax.get_xlim()
+        if center_x is not None and np.isfinite(center_x):
+            span = abs(xlim[1] - xlim[0])
+            half_width = span * 0.01
+            if self.canvas.ax.get_xscale() == "log" and center_x > 0:
+                factor = 10 ** 0.01
+                default_min = center_x / factor
+                default_max = center_x * factor
+            else:
+                default_min = center_x - half_width
+                default_max = center_x + half_width
+        else:
+            default_min, default_max = xlim
+
+        min_spin = self.double_spin(default_min)
+        max_spin = self.double_spin(default_max)
+        min_spin.setFixedWidth(130)
+        max_spin.setFixedWidth(130)
+        range_layout.addWidget(QLabel(f"{x_label} min:"), 0, 0)
+        range_layout.addWidget(min_spin, 0, 1)
+        range_layout.addWidget(QLabel(f"{x_label} max:"), 1, 0)
+        range_layout.addWidget(max_spin, 1, 1)
+        layout.addLayout(range_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self.mask_data_range(min_spin.value(), max_spin.value(), curve_key=curve_key)
+
+    def mask_data_range(self, x_min, x_max, curve_key=None):
+        if not self.curves:
+            return
+
+        if x_max < x_min:
+            x_min, x_max = x_max, x_min
+
+        keys = [curve_key] if curve_key in self.curves else (self.selected_curve_keys() or list(self.curves.keys()))
+        total_masked = 0
+
+        for key in keys:
+            curve = self.curves[key]
+            x = np.asarray(curve["x"], dtype=float)
+            y = np.asarray(curve["y"], dtype=float).copy()
+            mask = np.isfinite(x) & (x >= x_min) & (x <= x_max)
+            if np.any(mask):
+                y[mask] = np.nan
+                curve["y"] = y
+                total_masked += int(np.count_nonzero(mask))
+
+        if total_masked == 0:
+            QMessageBox.information(self, "Mask range", "No point was found in this range.")
+            return
+
+        self.update_plot()
+
+    def reset_curve_masks(self):
+        if not self.curves:
+            return
+
+        keys = self.selected_curve_keys() or list(self.curves.keys())
+        for key in keys:
+            curve = self.curves[key]
+            if "original_y" in curve:
+                curve["y"] = np.asarray(curve["original_y"], dtype=float).copy()
+
+        self.update_plot()
+
+    def nearest_curve_key_at(self, event):
+        if event.inaxes != self.canvas.ax or event.xdata is None or event.ydata is None:
+            return None
+
+        click_display = self.canvas.ax.transData.transform((event.xdata, event.ydata))
+        best_key = None
+        best_distance = float("inf")
+
+        for key, curve in self.curves.items():
+            x = np.asarray(curve["x"], dtype=float)
+            y = np.asarray(self.make_plot_y(x, curve["y"]), dtype=float)
+            valid = np.isfinite(x) & np.isfinite(y)
+            if self.canvas.ax.get_xscale() == "log":
+                valid &= x > 0
+            if self.canvas.ax.get_yscale() == "log":
+                valid &= y > 0
+            if not np.any(valid):
+                continue
+
+            points = self.canvas.ax.transData.transform(np.column_stack((x[valid], y[valid])))
+            distances = np.hypot(points[:, 0] - click_display[0], points[:, 1] - click_display[1])
+            distance = float(np.nanmin(distances))
+            if distance < best_distance:
+                best_distance = distance
+                best_key = key
+
+        return best_key if best_distance <= 18 else None
+
+    def graph_button_press(self, event):
+        if event.button != 3:
+            return
+
+        curve_key = self.nearest_curve_key_at(event)
+        if curve_key is None:
+            return
+
+        menu = QMenu(self)
+        legend = self.curves[curve_key]["legend"]
+        mask_action = menu.addAction(f"Mask range on {legend}")
+        reset_action = menu.addAction(f"Reset mask on {legend}")
+
+        try:
+            global_pos = event.guiEvent.globalPosition().toPoint()
+        except Exception:
+            global_pos = self.canvas.mapToGlobal(self.canvas.rect().center())
+
+        action = menu.exec(global_pos)
+        if action is mask_action:
+            self.open_mask_range_dialog(curve_key=curve_key, center_x=event.xdata)
+        elif action is reset_action:
+            curve = self.curves[curve_key]
+            if "original_y" in curve:
+                curve["y"] = np.asarray(curve["original_y"], dtype=float).copy()
+                self.update_plot()
+
     def update_graph_toolbar_enabled(self):
         enabled = bool(self.curves)
         for widget in [
             getattr(self, "plot_mode", None),
             getattr(self, "show_legend", None),
             getattr(self, "save_plot_button", None),
+            getattr(self, "mask_range_button", None),
+            getattr(self, "reset_masks_button", None),
         ]:
             if widget is not None:
                 widget.setEnabled(enabled)
@@ -1106,19 +1662,12 @@ class DatPlotTab(QWidget):
         if self.auto_limits.isChecked():
             self.update_limit_fields_from_current_data()
 
-        for curve in self.curves.values():
+        for key, curve in self.curves.items():
             x = curve["x"]
             y = self.make_plot_y(x, curve["y"])
-            ax.plot(
-                x,
-                y,
-                linewidth=1.6,
-                label=curve["legend"],
-                color=curve["color"],
-                antialiased=True,
-                solid_capstyle="round",
-                solid_joinstyle="round",
-            )
+            self.plot_curve_segments(ax, key, curve, x, y, mode)
+
+        self.draw_guide_bars(ax)
 
         if mode == "linear linear" or mode == "Kratky":
             ax.set_xscale("linear")

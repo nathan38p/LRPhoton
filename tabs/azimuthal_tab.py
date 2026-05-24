@@ -674,6 +674,7 @@ class AzimuthalTab(QWidget):
         install_file_rating_menu(self.file_list)
         self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.file_list.itemSelectionChanged.connect(self.selection_changed)
+        self.file_list.currentItemChanged.connect(lambda current, previous: self.selection_changed())
         self.file_list.setMinimumHeight(180)
 
         file_layout.addWidget(self.file_list, stretch=1)
@@ -768,8 +769,8 @@ class AzimuthalTab(QWidget):
             option_widgets=[
                 self.show_legend,
             ],
-            save_callback=self.toolbar.save_figure,
-            save_tooltip="Save graph",
+            save_callback=self.save_results,
+            save_tooltip="Save .dat",
             toolbar_width=320,
         )
         center_column_layout.addWidget(toolbar_box, stretch=0)
@@ -1055,10 +1056,13 @@ class AzimuthalTab(QWidget):
         selected = self.selected_files()
         self.set_controls_enabled(bool(selected))
         self.image_canvas.reset_display_limits()
+
         if selected:
-            self.apply_preset_from_file(selected[0])
-            self.update_frame_controls_from_file(selected[0])
-            self.display_selected_file_preview(selected[0])
+            current_file = selected[0]
+            self.apply_preset_from_file(current_file)
+            self.update_frame_controls_from_file(current_file)
+            self.display_selected_file_preview(current_file)
+            self.integrate_selected_files()
         else:
             self.update_frame_controls_from_file(None)
             self.last_results = {}
@@ -1070,7 +1074,15 @@ class AzimuthalTab(QWidget):
             clear_plot_canvas(self.image_canvas)
 
     def selected_files(self):
-        return [file_path_from_item(item, self.current_folder) for item in self.file_list.selectedItems()]
+        selected_items = list(self.file_list.selectedItems())
+        current_item = self.file_list.currentItem()
+
+        if current_item is not None and current_item in selected_items:
+            ordered_items = [current_item] + [item for item in selected_items if item is not current_item]
+        else:
+            ordered_items = selected_items
+
+        return [file_path_from_item(item, self.current_folder) for item in ordered_items]
 
     def update_frame_controls_from_file(self, file_path):
         self.total_frames = 1
@@ -1171,6 +1183,9 @@ class AzimuthalTab(QWidget):
 
         selected = self.selected_files()
         self.apply_preset_from_file(selected[0] if selected else None)
+        if selected:
+            self.display_selected_file_preview(selected[0])
+            self.integrate_selected_files()
 
     def open_geometry_dialog(self):
         dialog = QDialog(self)
@@ -1209,6 +1224,10 @@ class AzimuthalTab(QWidget):
         self.pixel_y.setValue(dialog_spins["pixel_y"].value())
         self.wavelength.setValue(dialog_spins["wavelength"].value())
         self.set_instrument_mode("Custom")
+        selected = self.selected_files()
+        if selected:
+            self.display_selected_file_preview(selected[0])
+            self.integrate_selected_files()
 
     def apply_preset_from_file(self, file_path=None):
         header = {}
@@ -1266,6 +1285,12 @@ class AzimuthalTab(QWidget):
             clear_plot_canvas(self.canvas)
             return
 
+        current_item = self.file_list.currentItem()
+        if current_item is not None:
+            current_file = file_path_from_item(current_item, self.current_folder)
+            if current_file in files:
+                files = [current_file] + [file for file in files if file != current_file]
+
         self.last_results = {}
         ax = self.canvas.ax
         ax.clear()
@@ -1316,6 +1341,8 @@ class AzimuthalTab(QWidget):
         if self.last_results and self.show_legend.isChecked():
             self.legend = make_plot_legend(ax)
         finalize_plot_canvas(self.canvas)
+        self.canvas.draw()
+        self.canvas.flush_events()
         self.log_box.setPlainText("\n".join(messages))
 
     def apply_plot_axes(self):
@@ -1340,6 +1367,8 @@ class AzimuthalTab(QWidget):
 
         if redraw:
             finalize_plot_canvas(self.canvas)
+            self.canvas.draw()
+            self.canvas.flush_events()
 
     def update_graph_coordinates(self, event):
         if event.inaxes != self.canvas.ax or event.xdata is None or event.ydata is None:
@@ -1375,6 +1404,8 @@ class AzimuthalTab(QWidget):
         axis_lines[0].set_label(new_label.strip())
         self.legend = make_plot_legend(self.canvas.ax)
         finalize_plot_canvas(self.canvas)
+        self.canvas.draw()
+        self.canvas.flush_events()
 
     def ask_text(self, title, label, text):
         from PySide6.QtWidgets import QInputDialog
@@ -1396,8 +1427,6 @@ class AzimuthalTab(QWidget):
             with open(out_file, "w", encoding="utf-8") as file:
                 file.write("# psi_deg I_psi pixel_count\n")
                 np.savetxt(file, data, fmt="%.8e %.8e %d")
-
-        QMessageBox.information(self, "Saved", "Azimuthal profiles saved in the current folder.")
 
     def display_selected_file_preview(self, file_path):
         try:

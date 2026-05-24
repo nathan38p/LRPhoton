@@ -5,7 +5,7 @@ import re
 import h5py
 import numpy as np
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
+from scipy.integrate import quad
+from scipy.optimize import curve_fit
 
 from .instrument_presets import (
     ID13_DEFAULT_CENTER_X,
@@ -379,6 +381,144 @@ def fit_gaussian_fixed_center(x, y, x0, window):
         sigma_max = best_sigma + span
 
     return best[1], abs(best[2])
+
+
+# ============================================================
+# ========== Reciprocal Lorentzian Distribution ==============
+# ============================================================
+
+def reciprocal_lorentzian_distribution(theta, width, constant):
+    return (1.0 + (0.7664 * theta / width) ** 2) ** -1.5 + constant
+
+
+def reciprocal_lorentzian_intensity(array_x, amplitude, width, constant, q_a, center_rad, wavelength_a):
+    x_values = np.asarray(array_x, dtype=float)
+    width = max(float(abs(width)), 1e-12)
+
+    theta_b_arg = wavelength_a * q_a / (4.0 * np.pi)
+    theta_b_arg = np.clip(theta_b_arg, -1.0, 1.0)
+    theta_b = np.arcsin(theta_b_arg)
+
+    def p_tau_csi(tau, csi):
+        inner = np.cos(theta_b) * np.cos(tau)
+        inner = np.clip(inner, -1.0, 1.0)
+
+        projected = np.cos(csi) * np.sin(np.arccos(inner))
+        projected = np.clip(projected, -1.0, 1.0)
+
+        angle = np.arccos(projected)
+        return (1.0 + (0.7664 * angle / width) ** 2) ** (-1.5) + constant
+
+    intensity = []
+    for x_value in np.ravel(x_values):
+        # Pascale-equivalent convention while keeping LRPhoton's center as the visible peak:
+        # Pascale uses tau = x - cen and the visible detector peak is cen + 90°.
+        # Here center_rad is the visible peak, so cen = center_rad - 90°.
+        tau = x_value - center_rad + np.pi / 2.0
+        result = quad(lambda csi: amplitude * p_tau_csi(tau, csi), 0.0, np.pi / 2.0)[0]
+        intensity.append(result)
+
+    return np.asarray(intensity, dtype=float).reshape(x_values.shape)
+
+
+def estimate_profile_background(intensity, percentile=5.0):
+    values = np.asarray(intensity, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 0.0
+    return float(np.nanpercentile(values, percentile))
+
+
+def middle_profile_values(azimuth, intensity, background=0.0, middle_fraction=0.5):
+    x = np.asarray(azimuth, dtype=float)
+    y = np.asarray(intensity, dtype=float) - background
+    valid = np.isfinite(x) & np.isfinite(y)
+    if not np.any(valid):
+        return np.asarray([], dtype=float), np.asarray([], dtype=float)
+
+    x = x[valid]
+    y = y[valid]
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+
+    x_min = float(np.nanmin(x))
+    x_max = float(np.nanmax(x))
+    span = x_max - x_min
+    if span > 0:
+        margin = 0.5 * (1.0 - middle_fraction) * span
+        middle = (x >= x_min + margin) & (x <= x_max - margin)
+        if np.any(middle):
+            x = x[middle]
+            y = y[middle]
+
+    return x, y
+
+
+def estimate_profile_center(azimuth, intensity, background=0.0, middle_fraction=0.5):
+    x, y = middle_profile_values(azimuth, intensity, background=background, middle_fraction=middle_fraction)
+    if x.size == 0:
+        return 0.0
+    return float(x[int(np.nanargmax(y))])
+
+
+def estimate_profile_peak_amplitude(azimuth, intensity, background=0.0, middle_fraction=0.5):
+    _, y = middle_profile_values(azimuth, intensity, background=background, middle_fraction=middle_fraction)
+    if y.size == 0:
+        return 1.0
+    amplitude = float(np.nanmax(y))
+    return max(amplitude, 1e-9)
+
+
+def _parse_q_number(text):
+    return float(text.replace(",", ".").replace("p", ".").replace("P", ".").replace("v", ".").replace("V", "."))
+
+
+def q_nm_from_filename(file_path):
+    name = Path(file_path).name
+    pattern = re.compile(
+        r"[qQ]\s*([0-9]+(?:[.,pPvV][0-9]+)?)"
+        r"(?:\s*[-–_]\s*([0-9]+(?:[.,pPvV][0-9]+)?))?"
+        r"(?=\s*(?:nm\s*(?:[-^]?1|⁻¹)|A\s*(?:[-^]?1|⁻¹)|Å\s*(?:[-^]?1|⁻¹)|_|-|\.|$))"
+    )
+    match = pattern.search(name)
+    if match is None:
+        return None
+
+    q_min = _parse_q_number(match.group(1))
+    q_max = _parse_q_number(match.group(2)) if match.group(2) else q_min
+    q_value = 0.5 * (q_min + q_max)
+
+    unit_text = name[match.end():match.end() + 8].lower()
+    if unit_text.startswith("a") or unit_text.startswith("å"):
+        return q_value * 10.0
+    return q_value
+
+
+def calculate_reciprocal_order_parameter(width, constant, ratio):
+    width = max(abs(width), 1e-12)
+    ratio = float(np.clip(ratio, 0.0, 0.999999999))
+    if ratio == 1.0:
+        return 0.0, 1.0
+
+    def distribution(angle):
+        return reciprocal_lorentzian_distribution(angle, width, constant)
+
+    denominator = quad(lambda angle: 4.0 * np.pi * distribution(angle) * np.sin(angle), 0.0, np.pi / 2.0)[0]
+    if denominator == 0:
+        return np.nan, np.nan
+
+    integral_p1 = quad(lambda angle: distribution(angle) / denominator, 0.0, np.pi / 2.0)[0]
+    isotropic_ratio = 8.0 * ratio / (1.0 - ratio) * integral_p1
+
+    integral_cos2 = quad(
+        lambda angle: distribution(angle) / denominator * np.sin(angle) * np.cos(angle) ** 2,
+        0.0,
+        np.pi / 2.0,
+    )[0]
+
+    order_parameter = 0.5 / (1.0 + isotropic_ratio) * (12.0 * np.pi * integral_cos2 - 1.0)
+    return order_parameter, isotropic_ratio
 
 
 # ============================================================
@@ -734,10 +874,14 @@ class HermansTab(QWidget):
         self.current_header = {}
         self.last_fit = None
         self.last_anisotropy = None
+        self.last_order_parameter = None
         self.current_frame = 1
         self.total_frames = 1
         self._updating_frame_controls = False
         self.instrument_mode = "XENOCS"
+        self._order_fit_timer = QTimer(self)
+        self._order_fit_timer.setSingleShot(True)
+        self._order_fit_timer.timeout.connect(self.calculate_order_parameter)
 
         self.build_ui()
         self.init_default_folder()
@@ -859,11 +1003,15 @@ class HermansTab(QWidget):
         self.file_list = QListWidget()
         install_file_rating_menu(self.file_list)
         self.file_list.currentItemChanged.connect(self.load_selected_file)
+        self.file_list.itemClicked.connect(self.load_selected_file)
+        self.file_list.itemActivated.connect(self.load_selected_file)
+        self.file_list.itemSelectionChanged.connect(self.load_selected_file)
         self.file_list.setMinimumHeight(180)
 
         file_browser_layout.addWidget(self.file_list, stretch=1)
 
         self.anisotropy_param_widgets = []
+        self.order_param_widgets = []
         # --- Parameter selection box ---
         mode_box = QGroupBox("Parameter choice")
         mode_layout = QGridLayout(mode_box)
@@ -874,6 +1022,7 @@ class HermansTab(QWidget):
         self.parameter_selector.addItems([
             "Hermans factor",
             "Anisotropy factor (Iv - Ih) / (Iv + Ih)",
+            "Order parameter S (L3/2 reciprocal fit)",
         ])
         self.parameter_selector.currentIndexChanged.connect(self.parameter_mode_changed)
         self.parameter_selector.setCurrentIndex(1)
@@ -890,6 +1039,25 @@ class HermansTab(QWidget):
         results_layout = QVBoxLayout(results_box)
         results_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         results_layout.setSpacing(6)
+
+        # Ensure required matplotlib imports for formula rendering
+        try:
+            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        except ImportError:
+            pass
+        try:
+            from matplotlib.figure import Figure
+        except ImportError:
+            pass
+
+        self.lorentzian_formula_figure = Figure(figsize=(5.2, 0.55))
+        self.lorentzian_formula_canvas = FigureCanvasQTAgg(self.lorentzian_formula_figure)
+        self.lorentzian_formula_ax = self.lorentzian_formula_figure.add_subplot(111)
+        self.lorentzian_formula_ax.axis("off")
+
+        self.lorentzian_formula_figure.subplots_adjust(left=0.0, right=1.0, top=0.95, bottom=0.05)
+        self.lorentzian_formula_canvas.setFixedHeight(0)
+        self.lorentzian_formula_canvas.setToolTip("Pascale model; LRPhoton keeps Center as the visible peak, so internal cen = center - 90°.")
 
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
@@ -943,6 +1111,128 @@ class HermansTab(QWidget):
         self.manual_fwhm_spin, self.manual_fwhm_slider = self.add_slider_control(
             params_layout, 5, "FWHM (°)", 90.0, 0.1, 180.0
         )
+
+        self.order_panel = QWidget()
+        order_layout = QGridLayout(self.order_panel)
+        order_layout.setContentsMargins(0, 0, 0, 0)
+        order_layout.setHorizontalSpacing(6)
+        order_layout.setVerticalSpacing(4)
+
+        def add_order_slider(row, label, value, minimum, maximum, decimals=3, suffix=""):
+            label_widget = QLabel(label)
+            min_spin = QDoubleSpinBox()
+            min_spin.setDecimals(decimals)
+            min_spin.setRange(-1e9, 1e9)
+            min_spin.setValue(minimum)
+            min_spin.setFixedWidth(64)
+            max_spin = QDoubleSpinBox()
+            max_spin.setDecimals(decimals)
+            max_spin.setRange(-1e9, 1e9)
+            max_spin.setValue(maximum)
+            max_spin.setFixedWidth(64)
+            value_spin = QDoubleSpinBox()
+            value_spin.setDecimals(decimals)
+            value_spin.setRange(minimum, maximum)
+            value_spin.setValue(value)
+            if suffix:
+                value_spin.setSuffix(suffix)
+            value_spin.setFixedWidth(92)
+            value_spin.setFixedHeight(22)
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 1000)
+            slider.setValue(self.value_to_slider(value, minimum, maximum))
+            slider.setMinimumWidth(110)
+
+            slider.min_spin = min_spin
+            slider.max_spin = max_spin
+            slider.value_spin = value_spin
+            value_spin.order_slider = slider
+            value_spin.order_min_spin = min_spin
+            value_spin.order_max_spin = max_spin
+
+            def sync_slider_limits(_value=None):
+                min_value = min_spin.value()
+                max_value = max_spin.value()
+                if max_value <= min_value:
+                    max_value = min_value + 1e-9
+                    max_spin.blockSignals(True)
+                    max_spin.setValue(max_value)
+                    max_spin.blockSignals(False)
+                value_spin.setRange(min_value, max_value)
+                clamped = max(min_value, min(max_value, value_spin.value()))
+                value_spin.blockSignals(True)
+                value_spin.setValue(clamped)
+                value_spin.blockSignals(False)
+                slider.blockSignals(True)
+                slider.setValue(self.value_to_slider(clamped, min_value, max_value))
+                slider.blockSignals(False)
+                self.order_parameter_changed()
+
+            def sync_from_slider(_value=None):
+                value_spin.blockSignals(True)
+                value_spin.setValue(self.slider_to_value(slider))
+                value_spin.blockSignals(False)
+                self.order_parameter_changed()
+
+            def sync_from_spin(_value=None):
+                min_value = min_spin.value()
+                max_value = max_spin.value()
+                value = max(min_value, min(max_value, value_spin.value()))
+                value_spin.blockSignals(True)
+                value_spin.setValue(value)
+                value_spin.blockSignals(False)
+                slider.blockSignals(True)
+                slider.setValue(self.value_to_slider(value, min_value, max_value))
+                slider.blockSignals(False)
+                self.order_parameter_changed()
+
+            min_spin.valueChanged.connect(sync_slider_limits)
+            max_spin.valueChanged.connect(sync_slider_limits)
+            slider.valueChanged.connect(sync_from_slider)
+            value_spin.valueChanged.connect(sync_from_spin)
+
+            order_layout.addWidget(label_widget, row, 0)
+            order_layout.addWidget(min_spin, row, 1)
+            order_layout.addWidget(slider, row, 2)
+            order_layout.addWidget(max_spin, row, 3)
+            order_layout.addWidget(value_spin, row, 4)
+            order_layout.setColumnStretch(2, 1)
+            self.order_param_widgets.extend([label_widget, min_spin, slider, max_spin, value_spin])
+            return value_spin
+
+        def add_order_spin(row, column, label, value, minimum, maximum, decimals=4, suffix=""):
+            label_widget = QLabel(label)
+            spin = QDoubleSpinBox()
+            spin.setDecimals(decimals)
+            spin.setRange(minimum, maximum)
+            spin.setValue(value)
+            if suffix:
+                spin.setSuffix(suffix)
+            spin.setFixedWidth(96)
+            spin.setFixedHeight(22)
+            spin.valueChanged.connect(self.order_parameter_changed)
+            order_layout.addWidget(label_widget, row, column)
+            order_layout.addWidget(spin, row, column + 1)
+            self.order_param_widgets.extend([label_widget, spin])
+            return spin
+
+        self.order_background_spin = add_order_slider(0, "Background", 30.0, 20.0, 40.0, decimals=3, suffix=" a.u.")
+        self.order_center_spin = add_order_slider(1, "Center", 1.0, 0.0, 360.0, decimals=3, suffix=" °")
+        self.order_amp_spin = add_order_slider(2, "Amp init", 200.0, 0.0, 300.0, decimals=3, suffix=" a.u.")
+        self.order_width_spin = add_order_slider(3, "Width init", 8.0, 0.001, 60.0, decimals=3, suffix=" °")
+        self.order_q_spin = add_order_spin(4, 0, "Q", 6.35, 0.0, 20.0, decimals=4, suffix=" nm⁻¹")
+        self.order_ratio_spin = add_order_spin(4, 2, "r", 0.001, 0.0, 0.999999, decimals=4)
+        self.order_constant_spin = add_order_spin(5, 0, "C init", 0.0, -1e9, 1e9, decimals=5, suffix=" a.u.")
+        self.order_wavelength_spin = add_order_spin(5, 2, "λ", ID13_DEFAULT_WAVELENGTH_A, 0.0001, 100.0, decimals=5, suffix=" Å")
+        self.order_fit_min_spin = add_order_spin(6, 0, "Fit min", 0.0, 0.0, 360.0, decimals=2, suffix=" °")
+        self.order_fit_max_spin = add_order_spin(6, 2, "Fit max", 360.0, 0.0, 360.0, decimals=2, suffix=" °")
+        self.order_fit_button = QPushButton("Fit S")
+        self.order_fit_button.setFixedWidth(96)
+        self.order_fit_button.clicked.connect(self.calculate_order_parameter)
+        order_layout.addWidget(self.order_fit_button, 6, 4)
+        params_layout.addWidget(self.order_panel, 8, 0, 1, 5)
+        self.order_param_widgets.extend([self.order_panel, self.order_fit_button])
+
         self.fit_button = None
         self.save_fit_button = None
         small_box_margins = (6, 16, 6, 6)
@@ -1322,18 +1612,35 @@ class HermansTab(QWidget):
 
             self.move_widget_to_layout(self.results_box, self.right_layout, stretch=1)
             self.move_widget_to_layout(self.params_box, self.center_column_layout, stretch=0)
+    def is_hermans_mode(self):
+        return hasattr(self, "parameter_selector") and self.parameter_selector.currentIndex() == 0
+
     def is_anisotropy_mode(self):
         return hasattr(self, "parameter_selector") and self.parameter_selector.currentIndex() == 1
 
-    def parameter_mode_changed(self):
+    def is_order_mode(self):
+        return hasattr(self, "parameter_selector") and self.parameter_selector.currentIndex() == 2
+
+    def parameter_mode_changed(self, *args):
+        hermans_mode = self.is_hermans_mode()
         anisotropy_mode = self.is_anisotropy_mode()
+        order_mode = self.is_order_mode()
 
         if hasattr(self, "plot_control_bar"):
-            self.plot_control_bar.setTitle("I(q) profiles" if anisotropy_mode else "Azimuthal profile")
+            if anisotropy_mode:
+                self.plot_control_bar.setTitle("I(q) profiles")
+            elif order_mode:
+                self.plot_control_bar.setTitle("Reciprocal order fit")
+            else:
+                self.plot_control_bar.setTitle("Azimuthal profile")
         if hasattr(self, "save_anisotropy_button"):
-            self.save_anisotropy_button.setToolTip(
-                "Save anisotropy profiles .dat" if anisotropy_mode else "Save Hermans fit .dat"
-            )
+            if anisotropy_mode:
+                tooltip = "Save anisotropy profiles .dat"
+            elif order_mode:
+                tooltip = "Save reciprocal order fit .dat"
+            else:
+                tooltip = "Save Hermans fit .dat"
+            self.save_anisotropy_button.setToolTip(tooltip)
         self.image_box.setVisible(anisotropy_mode)
 
         hermans_widgets = []
@@ -1367,11 +1674,15 @@ class HermansTab(QWidget):
 
         for widget in hermans_widgets:
             if widget is not None:
-                widget.setVisible(not anisotropy_mode)
+                widget.setVisible(hermans_mode)
 
         for widget in getattr(self, "anisotropy_param_widgets", []):
             if widget is not None:
                 widget.setVisible(anisotropy_mode)
+
+        for widget in getattr(self, "order_param_widgets", []):
+            if widget is not None:
+                widget.setVisible(order_mode)
 
         for widget in [
             getattr(self, "btn_xenocs", None),
@@ -1397,6 +1708,8 @@ class HermansTab(QWidget):
         elif hasattr(self, "canvas"):
             if anisotropy_mode:
                 self.calculate_anisotropy()
+            elif order_mode:
+                self.update_order_preview()
             else:
                 self.calculate()
 
@@ -1407,7 +1720,12 @@ class HermansTab(QWidget):
         if not hasattr(self, "extensions_filter"):
             return
 
-        desired_filter = "*.edf *.h5 *.hdf5" if self.is_anisotropy_mode() else "*azimProf.dat"
+        if self.is_anisotropy_mode():
+            desired_filter = "*.edf *.h5 *.hdf5"
+        elif self.is_order_mode():
+            desired_filter = "*azimProf.dat"
+        else:
+            desired_filter = "*azimProf.dat"
         if self.extensions_filter.text() == desired_filter:
             return
 
@@ -1415,7 +1733,7 @@ class HermansTab(QWidget):
         self.extensions_filter.setText(desired_filter)
         self.extensions_filter.blockSignals(False)
 
-    def refresh_files(self):
+    def refresh_files(self, *args):
         if not hasattr(self, "folder_path"):
             return
 
@@ -1428,7 +1746,12 @@ class HermansTab(QWidget):
 
         patterns = self.extensions_filter.text().split()
         if not patterns:
-            patterns = ["*.edf", "*.h5", "*.hdf5"] if self.is_anisotropy_mode() else ["*azimProf.dat"]
+            if self.is_anisotropy_mode():
+                patterns = ["*.edf", "*.h5", "*.hdf5"]
+            elif self.is_order_mode():
+                patterns = ["*azimProf.dat"]
+            else:
+                patterns = ["*azimProf.dat"]
 
         name_filter = self.name_filter.text().strip()
         if not name_filter:
@@ -1481,7 +1804,8 @@ class HermansTab(QWidget):
         if self.available_files:
             row = self.available_files.index(current_text) if current_text in self.available_files else 0
             self.file_list.setCurrentRow(row)
-            self.load_file(self.folder / self.available_files[row])
+            item = self.file_list.item(row)
+            self.load_file(file_path_from_item(item, self.folder))
         else:
             self.current_file = None
             self.azimuth = None
@@ -1490,6 +1814,7 @@ class HermansTab(QWidget):
             self.current_header = {}
             self.last_fit = None
             self.last_anisotropy = None
+            self.last_order_parameter = None
             self.update_plot_toolbar_enabled(False)
             self.results_text.clear()
             self.clear_graph_coordinates()
@@ -1509,6 +1834,8 @@ class HermansTab(QWidget):
     def save_current_profiles(self):
         if self.is_anisotropy_mode():
             self.save_anisotropy_profiles()
+        elif self.is_order_mode():
+            self.save_order_fit()
         else:
             self.save_gaussian_fit()
 
@@ -1536,7 +1863,7 @@ class HermansTab(QWidget):
         self._updating_frame_controls = False
         self.update_frame_navigation_state()
 
-    def update_frame_bounds(self):
+    def update_frame_bounds(self, *args):
         start = self.frame_start_spin.value()
         end = self.frame_end_spin.value()
 
@@ -1647,7 +1974,7 @@ class HermansTab(QWidget):
 
         self.set_center_spins(x, y)
 
-    def update_fit_mode(self):
+    def update_fit_mode(self, *args):
         use_fit = self.fit_with_data_radio.isChecked()
 
         self.window_spin.setEnabled(use_fit)
@@ -1719,9 +2046,9 @@ class HermansTab(QWidget):
         slider.setValue(self.value_to_slider(default, minimum, maximum))
         slider.setMinimumWidth(180)
 
-        min_spin.valueChanged.connect(lambda: self.update_slider_limits(min_spin, max_spin, value_spin, slider))
-        max_spin.valueChanged.connect(lambda: self.update_slider_limits(min_spin, max_spin, value_spin, slider))
-        value_spin.valueChanged.connect(lambda: self.spin_changed(min_spin, max_spin, value_spin, slider))
+        min_spin.valueChanged.connect(lambda _value=None: self.update_slider_limits(min_spin, max_spin, value_spin, slider))
+        max_spin.valueChanged.connect(lambda _value=None: self.update_slider_limits(min_spin, max_spin, value_spin, slider))
+        value_spin.valueChanged.connect(lambda _value=None: self.spin_changed(min_spin, max_spin, value_spin, slider))
 
         layout.addWidget(label_widget, row, 0)
         layout.addWidget(min_spin, row, 1)
@@ -1748,7 +2075,7 @@ class HermansTab(QWidget):
         maximum = slider.max_spin.value()
         return minimum + (maximum - minimum) * slider.value() / 1000
 
-    def slider_changed(self):
+    def slider_changed(self, value=None):
         slider = self.sender()
         slider.value_spin.blockSignals(True)
         slider.value_spin.setValue(self.slider_to_value(slider))
@@ -1793,9 +2120,10 @@ class HermansTab(QWidget):
             self.azimuth = None
             self.intensity = None
             self.last_fit = None
+            self.last_order_parameter = None
             self.file_list.clear()
-            self.canvas.ax.clear()
-            self.canvas.draw_idle()
+            clear_plot_canvas(self.canvas)
+
 
     def set_folder_from_external_tab(self, folder):
         folder = Path(folder)
@@ -1819,8 +2147,8 @@ class HermansTab(QWidget):
 
     
 
-    def load_selected_file(self):
-        item = self.file_list.currentItem()
+    def load_selected_file(self, current=None, previous=None):
+        item = current or self.file_list.currentItem()
 
         if item is None or self.folder is None:
             self.current_file = None
@@ -1830,6 +2158,7 @@ class HermansTab(QWidget):
             self.current_header = {}
             self.last_fit = None
             self.last_anisotropy = None
+            self.last_order_parameter = None
             self.results_text.clear()
             self.clear_graph_coordinates()
             self.update_plot_toolbar_enabled(False)
@@ -1843,6 +2172,13 @@ class HermansTab(QWidget):
         self.current_file = Path(file_path)
 
         if self.is_anisotropy_mode():
+            self.current_image = None
+            self.current_header = {}
+            self.last_anisotropy = None
+            self.last_order_parameter = None
+            self.clear_graph_coordinates()
+            clear_plot_canvas(self.canvas)
+
             try:
                 if self.current_file.suffix.lower() in [".h5", ".hdf5"]:
                     self.configure_frame_navigation(count_h5_frames(self.current_file))
@@ -1852,7 +2188,11 @@ class HermansTab(QWidget):
                 image, header = read_image_file(self.current_file, frame_index=self.current_frame - 1)
             except Exception as error:
                 self.current_file = None
+                self.current_image = None
+                self.current_header = {}
+                self.last_anisotropy = None
                 self.update_plot_toolbar_enabled(False)
+                clear_plot_canvas(self.canvas)
                 QMessageBox.critical(self, "File reading error", str(error))
                 return
 
@@ -1880,7 +2220,17 @@ class HermansTab(QWidget):
         self.current_image = None
         self.current_header = {}
         self.last_fit = None
+        self.last_order_parameter = None
         self.update_plot_toolbar_enabled(True)
+
+        if self.is_order_mode():
+            self.set_order_q_from_filename()
+            self.set_order_background_from_profile()
+            self.set_order_center_from_profile()
+            self.set_order_amplitude_from_profile()
+            self.update_order_preview()
+            self.schedule_order_fit()
+            return
 
         self.offset_spin.blockSignals(True)
         self.offset_spin.setValue(0)
@@ -1889,17 +2239,26 @@ class HermansTab(QWidget):
         self.offset_slider.setValue(self.value_to_slider(0, self.offset_slider.min_spin.value(), self.offset_slider.max_spin.value()))
         self.offset_slider.blockSignals(False)
 
+        self.draw_raw_azimuthal_profile()
         self.calculate()
 
-    def calculate(self):
+    def calculate(self, *args):
         if self.is_anisotropy_mode():
             self.calculate_anisotropy()
+            return
+        if self.is_order_mode():
+            self.update_order_preview()
             return
 
         if self.azimuth is None or self.intensity is None or self.current_file is None:
             self.clear_graph_coordinates()
             clear_plot_canvas(self.canvas)
             return
+        
+        ax = self.canvas.ax
+        previous_xlim = ax.get_xlim()
+        previous_ylim = ax.get_ylim()
+        preserve_view = len(ax.lines) > 0
 
         azimuth = self.azimuth
         intensity = self.intensity
@@ -1911,6 +2270,7 @@ class HermansTab(QWidget):
         az_fit = azimuth[mask]
 
         if az_fit.size < 10:
+            self.draw_raw_azimuthal_profile(peak=peak, window=window)
             self.results_text.setPlainText("Not enough points in the fitting window.")
             return
 
@@ -1921,6 +2281,7 @@ class HermansTab(QWidget):
         fit_intensity = corrected[mask]
 
         if np.nanmax(fit_intensity) <= 0:
+            self.draw_raw_azimuthal_profile(baseline=baseline, peak=peak, window=window)
             self.results_text.setPlainText(
                 "Corrected signal is null or negative.\nAdjust the baseline."
             )
@@ -1932,6 +2293,7 @@ class HermansTab(QWidget):
             try:
                 amplitude, sigma = fit_gaussian_fixed_center(az_fit, fit_intensity, peak, window)
             except Exception as error:
+                self.draw_raw_azimuthal_profile(baseline=baseline, peak=peak, window=window)
                 self.results_text.setPlainText(str(error))
                 return
 
@@ -1975,9 +2337,364 @@ class HermansTab(QWidget):
         }
 
         self.update_plot(azimuth, intensity, baseline, peak, amplitude, sigma, fwhm, pi, hermans_corr)
+        if preserve_view:
+            self.canvas.ax.set_xlim(previous_xlim)
+            self.canvas.ax.set_ylim(previous_ylim)
+            self.canvas.draw_idle()
         self.update_results_text()
 
-    def calculate_anisotropy(self):
+    def set_order_slider_value_and_limits(self, spin, value, minimum, maximum):
+        slider = getattr(spin, "order_slider", None)
+        min_spin = getattr(spin, "order_min_spin", None)
+        max_spin = getattr(spin, "order_max_spin", None)
+        if slider is None or min_spin is None or max_spin is None:
+            self.set_order_control_value(spin, value)
+            return
+
+        if maximum <= minimum:
+            maximum = minimum + 1e-9
+
+        value = max(minimum, min(maximum, value))
+
+        min_spin.blockSignals(True)
+        max_spin.blockSignals(True)
+        spin.blockSignals(True)
+        slider.blockSignals(True)
+
+        min_spin.setValue(minimum)
+        max_spin.setValue(maximum)
+        spin.setRange(minimum, maximum)
+        spin.setValue(value)
+        slider.setValue(self.value_to_slider(value, minimum, maximum))
+
+        min_spin.blockSignals(False)
+        max_spin.blockSignals(False)
+        spin.blockSignals(False)
+        slider.blockSignals(False)
+
+    def set_order_control_value(self, spin, value):
+        slider = getattr(spin, "order_slider", None)
+        min_spin = getattr(spin, "order_min_spin", None)
+        max_spin = getattr(spin, "order_max_spin", None)
+        if slider is not None and min_spin is not None and max_spin is not None:
+            if value < min_spin.value():
+                min_spin.blockSignals(True)
+                min_spin.setValue(value)
+                min_spin.blockSignals(False)
+            if value > max_spin.value():
+                max_spin.blockSignals(True)
+                max_spin.setValue(value)
+                max_spin.blockSignals(False)
+            spin.setRange(min_spin.value(), max_spin.value())
+            slider.blockSignals(True)
+            slider.setValue(self.value_to_slider(value, min_spin.value(), max_spin.value()))
+            slider.blockSignals(False)
+        spin.blockSignals(True)
+        spin.setValue(value)
+        spin.blockSignals(False)
+
+    def set_order_background_from_profile(self):
+        if self.intensity is None or not hasattr(self, "order_background_spin"):
+            return
+        finite_intensity = np.asarray(self.intensity, dtype=float)
+        finite_intensity = finite_intensity[np.isfinite(finite_intensity)]
+        if finite_intensity.size == 0:
+            return
+        background = float(np.nanmin(finite_intensity))
+        self.set_order_slider_value_and_limits(
+            self.order_background_spin,
+            background,
+            background - 10.0,
+            background + 10.0,
+        )
+
+    def set_order_q_from_filename(self):
+        if self.current_file is None or not hasattr(self, "order_q_spin"):
+            return
+        q_nm = q_nm_from_filename(self.current_file)
+        if q_nm is None:
+            return
+        self.set_order_control_value(self.order_q_spin, q_nm)
+
+    def set_order_center_from_profile(self):
+        if self.azimuth is None or self.intensity is None or not hasattr(self, "order_center_spin"):
+            return
+        center = estimate_profile_center(
+            self.azimuth,
+            self.intensity,
+            background=self.order_background_spin.value(),
+        )
+        self.set_order_control_value(self.order_center_spin, center)
+
+    def set_order_amplitude_from_profile(self):
+        if self.azimuth is None or self.intensity is None or not hasattr(self, "order_amp_spin"):
+            return
+        corrected = np.asarray(self.intensity, dtype=float) - self.order_background_spin.value()
+        corrected = corrected[np.isfinite(corrected)]
+        if corrected.size == 0:
+            return
+        amplitude = float(np.nanmax(corrected))
+        self.set_order_slider_value_and_limits(
+            self.order_amp_spin,
+            amplitude,
+            amplitude - 10.0,
+            amplitude + 10.0,
+        )
+
+    def schedule_order_fit(self):
+        if not self.is_order_mode() or self.current_file is None:
+            return
+        self._order_fit_timer.start(350)
+
+    def order_parameter_changed(self, *args):
+        self.update_order_preview()
+        self.schedule_order_fit()
+
+    def update_order_preview(self, *args):
+        if not self.is_order_mode():
+            return
+        if self.azimuth is None or self.intensity is None or self.current_file is None:
+            self.clear_graph_coordinates()
+            clear_plot_canvas(self.canvas)
+            return
+
+        background = self.order_background_spin.value()
+        center_deg = self.order_center_spin.value()
+
+        azimuth = self.azimuth.astype(float)
+        intensity = self.intensity.astype(float)
+        y_corrected = intensity - background
+        valid = np.isfinite(azimuth) & np.isfinite(y_corrected)
+        x_deg = azimuth[valid]
+        y_corrected_plot = y_corrected[valid]
+        order = np.argsort(x_deg)
+        x_deg = x_deg[order]
+        y_corrected_plot = y_corrected_plot[order]
+
+        self.last_order_parameter = None
+        self.draw_order_raw_profile(x_deg, y_corrected_plot, center_deg=center_deg)
+        self.results_text.setPlainText(
+            f"File = {self.current_file.name}\n"
+            f"Background = {background:.6g} a.u.\n"
+            f"Q = {self.order_q_spin.value():.6g} nm⁻¹\n"
+            f"λ = {self.order_wavelength_spin.value():.5g} Å\n"
+            f"Center = {center_deg:.3f} °\n"
+            "L3/2 fit updates automatically after parameter changes."
+        )
+
+    def calculate_order_parameter(self, *args):
+        if not self.is_order_mode():
+            return
+
+        if self.azimuth is None or self.intensity is None or self.current_file is None:
+            self.clear_graph_coordinates()
+            clear_plot_canvas(self.canvas)
+            return
+
+        background = self.order_background_spin.value()
+        q_nm = self.order_q_spin.value()
+        q_value = q_nm * 0.1
+        center_deg = self.order_center_spin.value()
+        center_rad = np.deg2rad(center_deg)
+        wavelength_a = self.order_wavelength_spin.value()
+        ratio = self.order_ratio_spin.value()
+
+        # Amplitude min/max from spin boxes if possible
+        amplitude_min = getattr(self.order_amp_spin, "order_min_spin", None).value() if getattr(self.order_amp_spin, "order_min_spin", None) is not None else 0.0
+        amplitude_max = getattr(self.order_amp_spin, "order_max_spin", None).value() if getattr(self.order_amp_spin, "order_max_spin", None) is not None else np.inf
+        amplitude_min = float(amplitude_min)
+        amplitude_max = float(amplitude_max)
+        if amplitude_max <= amplitude_min:
+            amplitude_max = amplitude_min + 1e-9
+        initial_amplitude = max(amplitude_min, min(amplitude_max, self.order_amp_spin.value()))
+
+        # Width min/max from spin boxes if possible
+        width_min_deg = getattr(self.order_width_spin, "order_min_spin", None).value() if getattr(self.order_width_spin, "order_min_spin", None) is not None else 0.01
+        width_max_deg = getattr(self.order_width_spin, "order_max_spin", None).value() if getattr(self.order_width_spin, "order_max_spin", None) is not None else 180.0
+        width_min_deg = max(0.01, float(width_min_deg))
+        width_max_deg = max(width_min_deg + 1e-6, float(width_max_deg))
+        initial_width = np.deg2rad(max(width_min_deg, min(width_max_deg, self.order_width_spin.value())))
+
+        # Constant min/max from spin box
+        constant_min = self.order_constant_spin.minimum()
+        constant_max = self.order_constant_spin.maximum()
+        constant_min = float(constant_min)
+        constant_max = float(constant_max)
+        if constant_max <= constant_min:
+            constant_max = constant_min + 1e-9
+        initial_constant = max(constant_min, min(constant_max, self.order_constant_spin.value()))
+
+        azimuth = self.azimuth.astype(float)
+        intensity = self.intensity.astype(float)
+        y_corrected_full = intensity - background
+        valid = np.isfinite(azimuth) & np.isfinite(y_corrected_full)
+        x_deg = azimuth[valid]
+        y_corrected = y_corrected_full[valid]
+        order = np.argsort(x_deg)
+        x_deg = x_deg[order]
+        y_corrected = y_corrected[order]
+
+        if x_deg.size < 5:
+            self.results_text.setPlainText("Not enough valid points for reciprocal order fit.")
+            self.draw_order_raw_profile(x_deg, y_corrected, center_deg=center_deg)
+            return
+
+        fit_min_deg = self.order_fit_min_spin.value() if hasattr(self, "order_fit_min_spin") else 0.0
+        fit_max_deg = self.order_fit_max_spin.value() if hasattr(self, "order_fit_max_spin") else 360.0
+        if fit_max_deg <= fit_min_deg:
+            self.results_text.setPlainText("Fit max must be greater than Fit min for Lorentzian fit.")
+            self.draw_order_raw_profile(x_deg, y_corrected, center_deg=center_deg)
+            return
+
+        fit_mask = (x_deg >= fit_min_deg) & (x_deg <= fit_max_deg)
+        if np.count_nonzero(fit_mask) < 8:
+            self.results_text.setPlainText(
+                f"Not enough valid points between {fit_min_deg:.3g}° and {fit_max_deg:.3g}° for Lorentzian fit."
+            )
+            self.draw_order_raw_profile(x_deg, y_corrected, center_deg=center_deg)
+            return
+
+        fit_x_plot_deg = x_deg[fit_mask]
+        fit_y_corrected = y_corrected[fit_mask]
+        x_rad = np.deg2rad(fit_x_plot_deg)
+
+        try:
+            best_values, covariance = curve_fit(
+                lambda x_values, amplitude, width, constant: reciprocal_lorentzian_intensity(
+                    x_values,
+                    amplitude,
+                    width,
+                    constant,
+                    q_value,
+                    center_rad,
+                    wavelength_a,
+                ),
+                x_rad,
+                fit_y_corrected,
+                p0=[initial_amplitude, initial_width, initial_constant],
+                bounds=(
+                    [amplitude_min, np.deg2rad(width_min_deg), constant_min],
+                    [amplitude_max, np.deg2rad(width_max_deg), constant_max],
+                ),
+                maxfev=50000,
+            )
+            amplitude, width, constant = best_values
+            width = abs(width)
+            y_fit = reciprocal_lorentzian_intensity(x_rad, amplitude, width, constant, q_value, center_rad, wavelength_a)
+            order_parameter, isotropic_ratio = calculate_reciprocal_order_parameter(width, constant, ratio)
+        except Exception as error:
+            self.last_order_parameter = None
+            self.draw_order_raw_profile(x_deg, y_corrected)
+            self.results_text.setPlainText(str(error))
+            return
+
+        theta = np.arange(0.0, np.pi / 2.0, 0.001)
+        distribution = np.asarray([
+            reciprocal_lorentzian_distribution(angle, width, constant)
+            for angle in theta
+        ])
+        denominator = quad(
+            lambda angle: 4.0 * np.pi * reciprocal_lorentzian_distribution(angle, width, constant) * np.sin(angle),
+            0.0,
+            np.pi / 2.0,
+        )[0]
+        if denominator != 0:
+            distribution = distribution / denominator
+
+        self.last_order_parameter = {
+            "x_deg": azimuth[np.isfinite(azimuth) & np.isfinite(y_corrected_full)],
+            "y_corrected": y_corrected_full[np.isfinite(azimuth) & np.isfinite(y_corrected_full)],
+            "fit_x_deg": fit_x_plot_deg,
+            "fit_y_corrected": fit_y_corrected,
+            "y_fit": y_fit,
+            "fit_min_deg": fit_min_deg,
+            "fit_max_deg": fit_max_deg,
+            "amplitude_min": amplitude_min,
+            "amplitude_max": amplitude_max,
+            "constant_min": constant_min,
+            "constant_max": constant_max,
+            "width_min_deg": width_min_deg,
+            "width_max_deg": width_max_deg,
+            "theta_deg": np.rad2deg(theta),
+            "distribution": distribution,
+            "background": background,
+            "q_nm": q_nm,
+            "q_a": q_value,
+            "center_deg": center_deg,
+            "wavelength_a": wavelength_a,
+            "ratio": ratio,
+            "amplitude": amplitude,
+            "width_rad": width,
+            "width_deg": np.rad2deg(width),
+            "constant": constant,
+            "order_parameter": order_parameter,
+            "isotropic_ratio": isotropic_ratio,
+            "covariance": covariance,
+        }
+
+        self.update_order_plot()
+        self.results_text.setPlainText(
+            f"File = {self.current_file.name}\n"
+            f"Fit range = {fit_min_deg:.6g}° to {fit_max_deg:.6g}°\n"
+            f"Background = {background:.6g} a.u.\n"
+            f"Q = {q_nm:.6g} nm⁻¹ ({q_value:.6g} Å⁻¹ used in fit)\n"
+            f"λ = {wavelength_a:.5g} Å\n"
+            f"Center = {center_deg:.3f} °\n"
+            f"r = {ratio:.6g}\n"
+            f"Amplitude = {amplitude:.6g} a.u.\n"
+            f"Amplitude bounds = {amplitude_min:.6g} to {amplitude_max:.6g} a.u.\n"
+            f"Width = {np.rad2deg(width):.6g} °\n"
+            f"Width bounds = {width_min_deg:.6g}° to {width_max_deg:.6g}°\n"
+            f"Constant = {constant:.6g} a.u.\n"
+            f"Constant bounds = {constant_min:.6g} to {constant_max:.6g} a.u.\n"
+            f"f = {isotropic_ratio:.6g}\n"
+            f"Order parameter S = {order_parameter:.6g}"
+        )
+
+    def draw_order_raw_profile(self, x_deg, y_corrected, center_deg=None):
+        ax = self.canvas.ax
+        ax.clear()
+        ax.set_axis_on()
+        if x_deg.size:
+            ax.plot(x_deg, y_corrected, "k-", linewidth=1.2, label="Background-corrected data")
+        if center_deg is not None:
+            ax.axvline(center_deg, color="#777777", linestyle="--", linewidth=1.0, label="Center")
+        ax.set_xlabel("ψ / °")
+        ax.set_ylabel("Intensity / a.u.")
+        ax.set_xlim(0, 360)
+        ax.grid(True)
+        if self.show_legend_checkbox.isChecked():
+            ax.legend(loc="best")
+        self.canvas.draw_idle()
+
+    def update_order_plot(self):
+        data = self.last_order_parameter
+        if data is None:
+            return
+
+        ax = self.canvas.ax
+        ax.clear()
+        ax.set_axis_on()
+        order = np.argsort(data["x_deg"])
+        ax.plot(data["x_deg"][order], data["y_corrected"][order], "k-", linewidth=1.2, label="Background-corrected data")
+
+        fit_order = np.argsort(data["fit_x_deg"])
+        ax.plot(data["fit_x_deg"][fit_order], data["y_fit"][fit_order], color="#d71920", linewidth=1.6, label="L3/2 fit")
+
+        center_deg = data.get("center_deg")
+        if center_deg is not None:
+            ax.axvline(center_deg, color="#777777", linestyle="--", linewidth=1.0, label="Center")
+
+
+        ax.set_xlabel("ψ / °")
+        ax.set_ylabel("Intensity / a.u.")
+        ax.set_xlim(0, 360)
+        ax.grid(True)
+        if self.show_legend_checkbox.isChecked():
+            ax.legend(loc="best")
+        self.canvas.draw_idle()
+
+    def calculate_anisotropy(self, *args):
         if not self.is_anisotropy_mode():
             return
 
@@ -2037,6 +2754,9 @@ class HermansTab(QWidget):
                 reference_angle=self.reference_angle.value(),
             )
         except Exception as error:
+            self.last_anisotropy = None
+            self.clear_graph_coordinates()
+            clear_plot_canvas(self.canvas)
             self.results_text.setPlainText(str(error))
             return
 
@@ -2074,6 +2794,8 @@ class HermansTab(QWidget):
         }
 
         ax = self.canvas.ax
+        ax.clear()
+        preserve_view = len(ax.lines) > 0
         ax.clear()
         ax.set_axis_on()
 
@@ -2147,6 +2869,30 @@ class HermansTab(QWidget):
         )
 
         # (Removed accidental duplicated Hermans calculation block)
+
+    def draw_raw_azimuthal_profile(self, baseline=None, peak=None, window=None):
+        if self.azimuth is None or self.intensity is None:
+            return
+
+        ax = self.canvas.ax
+        ax.clear()
+        ax.set_axis_on()
+        ax.plot(self.azimuth, self.intensity, "k-", linewidth=1.2, label="Raw data")
+
+        if baseline is not None:
+            ax.plot(self.azimuth, baseline, "r--", linewidth=1.3, label="Baseline")
+        if peak is not None:
+            ax.axvline(peak, color="blue", linestyle="--", linewidth=1, label="Peak centre")
+        if peak is not None and window is not None:
+            ax.axvspan(peak - window / 2, peak + window / 2, color="#4a90e2", alpha=0.12, label="Fit window")
+
+        ax.set_title("")
+        ax.set_xlabel("ψ / °")
+        ax.set_ylabel("Intensity / a.u.")
+        ax.set_xlim(0, 360)
+        ax.grid(True)
+        ax.legend(loc="best")
+        self.canvas.draw_idle()
 
     def update_plot(self, azimuth, intensity, baseline, peak, amplitude, sigma, fwhm, pi, hermans_corr):
         ax = self.canvas.ax
@@ -2234,6 +2980,69 @@ class HermansTab(QWidget):
             np.savetxt(file, output, fmt="%.6f %.10e %.10e")
 
         QMessageBox.information(self, "Fit saved", f"Fit saved:\n{output_file}")
+
+    def save_order_fit(self):
+        if self.current_file is None:
+            QMessageBox.warning(self, "Save unavailable", "No file is currently loaded.")
+            return
+
+        if self.last_order_parameter is None:
+            self.calculate_order_parameter()
+
+        if self.last_order_parameter is None:
+            QMessageBox.warning(self, "Save unavailable", "No reciprocal order fit is currently available.")
+            return
+
+        data = self.last_order_parameter
+        subtracted_file = self.current_file.parent / f"{self.current_file.stem}_order_subtracted.dat"
+        fit_file = self.current_file.parent / f"{self.current_file.stem}_order_lorentzian_fit.dat"
+
+        subtracted_output = np.column_stack([
+            data["x_deg"],
+            data["y_corrected"],
+        ])
+        fit_output = np.column_stack([
+            data["fit_x_deg"],
+            data["y_fit"],
+        ])
+
+        with open(subtracted_file, "w", encoding="utf-8") as file:
+            file.write("# Background-subtracted azimuthal profile saved from LRPhoton\n")
+            file.write(f"# Source file: {self.current_file}\n")
+            file.write(f"# Background = {data['background']:.10g} a.u.\n")
+            file.write("# Columns: angle_deg subtracted_intensity\n")
+            np.savetxt(file, subtracted_output, fmt="%.10g %.10e")
+
+        with open(fit_file, "w", encoding="utf-8") as file:
+            file.write("# Reciprocal L3/2 Lorentzian fit saved from LRPhoton\n")
+            file.write(f"# Source file: {self.current_file}\n")
+            file.write(f"# Background = {data['background']:.10g} a.u.\n")
+            file.write(f"# Fit min = {data.get('fit_min_deg', 0.0):.10g} deg\n")
+            file.write(f"# Fit max = {data.get('fit_max_deg', 360.0):.10g} deg\n")
+            file.write(f"# Amplitude min = {data.get('amplitude_min', 0.0):.10g} a.u.\n")
+            file.write(f"# Amplitude max = {data.get('amplitude_max', np.inf):.10g} a.u.\n")
+            file.write(f"# Width min = {data.get('width_min_deg', 0.01):.10g} deg\n")
+            file.write(f"# Width max = {data.get('width_max_deg', 180.0):.10g} deg\n")
+            file.write(f"# Constant min = {data.get('constant_min', -np.inf):.10g} a.u.\n")
+            file.write(f"# Constant max = {data.get('constant_max', np.inf):.10g} a.u.\n")
+            file.write(f"# Q = {data['q_nm']:.10g} nm^-1\n")
+            file.write(f"# Q used in fit = {data['q_a']:.10g} A^-1\n")
+            file.write(f"# Center = {data['center_deg']:.10g} deg\n")
+            file.write(f"# Wavelength = {data['wavelength_a']:.10g} A\n")
+            file.write(f"# r = {data['ratio']:.10g}\n")
+            file.write(f"# Amplitude = {data['amplitude']:.10g} a.u.\n")
+            file.write(f"# Width = {data['width_deg']:.10g} deg\n")
+            file.write(f"# Constant = {data['constant']:.10g} a.u.\n")
+            file.write(f"# f = {data['isotropic_ratio']:.10g}\n")
+            file.write(f"# S = {data['order_parameter']:.10g}\n")
+            file.write("# Columns: angle_deg lorentzian_fit\n")
+            np.savetxt(file, fit_output, fmt="%.10g %.10e")
+
+        QMessageBox.information(
+            self,
+            "Order files saved",
+            f"Files saved:\n{subtracted_file}\n{fit_file}",
+        )
 
     def save_anisotropy_profiles(self):
         if self.current_file is None:
