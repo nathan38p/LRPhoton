@@ -2125,7 +2125,7 @@ class RadialTab(QWidget):
                 q_max = 0
                 sector_min = self.sector_min.value() if self.use_sector.isChecked() else 0
                 sector_max = self.sector_max.value() if self.use_sector.isChecked() else 360
-                use_log_bins = self.plot_mode.currentText() in ["log log", "log linear", "Kratky"]
+                use_log_bins = self.plot_mode.currentText() in ["log log", "log linear"]
                 wavelength_nm = wavelength_to_nm(self.wavelength.value())
 
                 diagnostics = q_geometry_diagnostics(
@@ -2284,8 +2284,8 @@ class RadialTab(QWidget):
             ax.set_xscale("log")
             ax.set_yscale("linear")
         elif mode == "Kratky":
-            ax.set_xscale("log")
-            ax.set_yscale("log")
+            ax.set_xscale("linear")
+            ax.set_yscale("linear")
         elif mode == "2θ linear":
             ax.set_xscale("linear")
             ax.set_yscale("linear")
@@ -2294,9 +2294,7 @@ class RadialTab(QWidget):
             ax.set_yscale("log")
 
     def update_plot_mode(self):
-        # Kratky must be recomputed with logarithmic q bins, not only redrawn.
-        # Otherwise the log-log display is based on linearly spaced bins and does not
-        # match the expected SAXSutilities-style Kratky plot.
+        # Kratky changes both the y transform and the binning mode, so recompute it.
         if self.last_results and self.selected_files():
             self.integrate_selected_files()
             return
