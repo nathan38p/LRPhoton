@@ -526,9 +526,18 @@ def id13_pyfai_like_average(image, q_min, q_max, sector_min=0, sector_max=360):
     intensity = intensity / id13_polarization_correction(two_theta, chi, config)
 
     psi = (np.degrees(chi) + 360.0) % 360.0
-    sector_min = sector_min % 360.0
-    sector_max = sector_max % 360.0
-    if abs((sector_max - sector_min) % 360.0) < 1e-9:
+    raw_sector_min = float(sector_min)
+    raw_sector_max = float(sector_max)
+    sector_min = raw_sector_min % 360.0
+    sector_max = raw_sector_max % 360.0
+    if abs(raw_sector_max - raw_sector_min) < 1e-9:
+        angle = np.deg2rad(sector_min)
+        dx_px = np.cos(chi)
+        dy_px = np.sin(chi)
+        projection = dx_px * np.cos(angle) + dy_px * np.sin(angle)
+        perpendicular = np.abs(-dx_px * np.sin(angle) + dy_px * np.cos(angle))
+        sector_mask = (projection >= 0) & (perpendicular <= 0.01)
+    elif abs((sector_max - sector_min) % 360.0) < 1e-9:
         sector_mask = np.ones_like(psi, dtype=bool)
     elif sector_min <= sector_max:
         sector_mask = (psi >= sector_min) & (psi <= sector_max)
@@ -635,10 +644,17 @@ def radial_average(
     q = (4.0 * np.pi / wavelength_nm) * np.sin(two_theta / 2.0)
 
     psi = (np.degrees(np.arctan2(dy_px, dx_px)) + 360.0) % 360.0
-    sector_min = sector_min % 360.0
-    sector_max = sector_max % 360.0
+    raw_sector_min = float(sector_min)
+    raw_sector_max = float(sector_max)
+    sector_min = raw_sector_min % 360.0
+    sector_max = raw_sector_max % 360.0
 
-    if abs((sector_max - sector_min) % 360.0) < 1e-9:
+    if abs(raw_sector_max - raw_sector_min) < 1e-9:
+        angle = np.deg2rad(sector_min)
+        projection = dx_px * np.cos(angle) + dy_px * np.sin(angle)
+        perpendicular = np.abs(-dx_px * np.sin(angle) + dy_px * np.cos(angle))
+        sector_mask = (projection >= 0) & (perpendicular <= 0.75)
+    elif abs((sector_max - sector_min) % 360.0) < 1e-9:
         sector_mask = np.ones_like(psi, dtype=bool)
     elif sector_min <= sector_max:
         sector_mask = (psi >= sector_min) & (psi <= sector_max)

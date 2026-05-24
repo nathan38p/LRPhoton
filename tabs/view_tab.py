@@ -172,6 +172,262 @@ class ViewImageCanvas(FigureCanvas):
         return self.rect().center()
 
 
+class PlaneAnnotationCanvas(FigureCanvas):
+    def __init__(self, dialog):
+        self.dialog = dialog
+        self.fig = Figure()
+        self.ax = self.fig.add_subplot(111)
+        super().__init__(self.fig)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._drag_label = None
+        self.mpl_connect("motion_notify_event", self.on_motion)
+        self.mpl_connect("figure_leave_event", self.on_leave)
+        self.mpl_connect("button_press_event", self.on_press)
+        self.mpl_connect("button_release_event", self.on_release)
+
+    def show_image(self):
+        self.ax.clear()
+        self.ax.set_axis_off()
+        self.ax.imshow(
+            self.dialog.display_image,
+            origin="upper",
+            cmap="jet",
+            interpolation="nearest",
+            vmin=self.dialog.vmin,
+            vmax=self.dialog.vmax,
+        )
+        self.draw_annotations()
+        self.ax.set_aspect("equal")
+        self.draw_idle()
+
+    def draw_annotations(self):
+        color = "#ffffff"
+        for label, data in self.dialog.annotations.items():
+            points = data.get("points", [])
+            label_pos = data.get("label_pos")
+            if label_pos is None and points:
+                x, y = points[0]
+                label_pos = (x + 35.0, y - 35.0)
+                data["label_pos"] = label_pos
+
+            if label_pos is None:
+                continue
+
+            for point in points:
+                self.ax.annotate(
+                    "",
+                    xy=point,
+                    xytext=label_pos,
+                    arrowprops=dict(arrowstyle="->", color=color, linewidth=1.2),
+                )
+
+            self.ax.text(
+                label_pos[0],
+                label_pos[1],
+                label,
+                color="black",
+                fontsize=10,
+                ha="center",
+                va="center",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor=color, edgecolor="black", alpha=0.92),
+            )
+
+    def data_point_from_event(self, event):
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return None
+        x = float(event.xdata)
+        y = float(event.ydata)
+        ny, nx = self.dialog.raw_image.shape
+        if not (-0.5 <= x <= nx - 0.5 and -0.5 <= y <= ny - 0.5):
+            return None
+        return x, y
+
+    def label_hit(self, event):
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return None
+        event_xy = np.array([event.x, event.y], dtype=float)
+        for label, data in reversed(list(self.dialog.annotations.items())):
+            label_pos = data.get("label_pos")
+            if label_pos is None:
+                continue
+            display_xy = np.asarray(self.ax.transData.transform(label_pos), dtype=float)
+            if np.linalg.norm(event_xy - display_xy) <= 22.0:
+                return label
+        return None
+
+    def on_press(self, event):
+        if event.button != 1:
+            return
+        hit = self.label_hit(event)
+        if hit is not None:
+            self._drag_label = hit
+            return
+
+        point = self.data_point_from_event(event)
+        if point is not None:
+            self.dialog.add_point(point)
+
+    def on_motion(self, event):
+        if self._drag_label is not None:
+            point = self.data_point_from_event(event)
+            if point is not None:
+                self.dialog.annotations[self._drag_label]["label_pos"] = point
+                self.show_image()
+            return
+
+        point = self.data_point_from_event(event)
+        if point is None:
+            self.dialog.coordinate_label.setText("x = - | y = - | q = - | I = -")
+            return
+        self.dialog.update_coordinate_label(point)
+
+    def on_release(self, event):
+        self._drag_label = None
+
+    def on_leave(self, event):
+        self.dialog.coordinate_label.setText("x = - | y = - | q = - | I = -")
+
+
+class PlaneAnnotationDialog(QDialog):
+    def __init__(self, parent, raw_image, display_image, vmin, vmax, q_calculator, title):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(950, 720)
+        self.raw_image = np.asarray(raw_image, dtype=float)
+        self.display_image = np.asarray(display_image, dtype=float)
+        self.vmin = vmin
+        self.vmax = vmax
+        self.q_calculator = q_calculator
+        self.annotations = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(6)
+        controls.addWidget(QLabel("Plane:"))
+        self.label_edit = QLineEdit("plane 1")
+        controls.addWidget(self.label_edit, 1)
+        self.undo_button = QPushButton("Undo point")
+        self.clear_button = QPushButton("Clear")
+        self.save_button = QPushButton("Save PNG")
+        controls.addWidget(self.undo_button)
+        controls.addWidget(self.clear_button)
+        controls.addWidget(self.save_button)
+        layout.addLayout(controls)
+
+        self.canvas = PlaneAnnotationCanvas(self)
+        toolbar = NavigationToolbar(self.canvas, self)
+        toolbar_box, _, _ = make_matplotlib_toolbar_block(self, "", toolbar, toolbar_width=300)
+        toolbar_box.setFixedHeight(48)
+        layout.addWidget(toolbar_box, 0)
+        layout.addWidget(self.canvas, 1)
+
+        self.coordinate_label = QLabel("x = - | y = - | q = - | I = -")
+        self.coordinate_label.setMinimumHeight(28)
+        self.coordinate_label.setAlignment(Qt.AlignCenter)
+        self.coordinate_label.setStyleSheet("""
+            QLabel {
+                background-color: #f4f4f4;
+                border-radius: 8px;
+                padding: 6px;
+                font-family: Menlo, Monaco, monospace;
+                font-size: 11px;
+            }
+        """)
+        layout.addWidget(self.coordinate_label, 0)
+
+        self.undo_button.clicked.connect(self.undo_last_point)
+        self.clear_button.clicked.connect(self.clear_annotations)
+        self.save_button.clicked.connect(self.save_png)
+        self.canvas.show_image()
+
+    def current_label(self):
+        label = self.label_edit.text().strip()
+        return label or "plane"
+
+    def add_point(self, point):
+        label = self.current_label()
+        data = self.annotations.setdefault(label, {"points": [], "label_pos": None})
+        data["points"].append((float(point[0]), float(point[1])))
+        if data["label_pos"] is None:
+            data["label_pos"] = (float(point[0]) + 45.0, float(point[1]) - 35.0)
+        self.canvas.show_image()
+        self.update_coordinate_label(point)
+
+    def undo_last_point(self):
+        label = self.current_label()
+        data = self.annotations.get(label)
+        if data is None or not data.get("points"):
+            return
+        data["points"].pop()
+        if not data["points"]:
+            del self.annotations[label]
+        self.canvas.show_image()
+
+    def clear_annotations(self):
+        self.annotations = {}
+        self.canvas.show_image()
+
+    def save_png(self):
+        parent = self.parent()
+        default_name = "annotated_image.png"
+        default_folder = Path.home()
+        current_file = getattr(parent, "current_file", None)
+        if current_file is not None:
+            default_folder = current_file.parent
+            default_name = f"{current_file.stem}_annotated.png"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save annotated image",
+            str(default_folder / default_name),
+            "PNG image (*.png)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".png"):
+            file_path += ".png"
+
+        try:
+            self.canvas.draw()
+            self.canvas.fig.savefig(
+                file_path,
+                dpi=300,
+                bbox_inches="tight",
+                pad_inches=0.02,
+                facecolor="white",
+            )
+        except Exception as error:
+            QMessageBox.warning(self, "Save error", f"Unable to save annotated image:\n{error}")
+
+    def update_coordinate_label(self, point):
+        x_index = int(round(point[0]))
+        y_index = int(round(point[1]))
+        ny, nx = self.raw_image.shape
+        if not (0 <= x_index < nx and 0 <= y_index < ny):
+            self.coordinate_label.setText("x = - | y = - | q = - | I = -")
+            return
+
+        value = self.raw_image[y_index, x_index]
+        if np.isnan(value):
+            value_text = "NaN"
+        elif np.isposinf(value):
+            value_text = "+Inf"
+        elif np.isneginf(value):
+            value_text = "-Inf"
+        else:
+            value_text = f"{value:.8g}"
+
+        q_value = self.q_calculator(x_index, y_index) if self.q_calculator is not None else None
+        q_text = "-" if q_value is None else f"{q_value:.6g} nm⁻¹"
+        self.coordinate_label.setText(
+            f"x = {x_index + 1} | y = {y_index + 1} | q = {q_text} | I = {value_text}"
+        )
+
+
 class ViewTab(QWidget):
     folder_changed = Signal(Path)
     def __init__(self):
@@ -218,6 +474,7 @@ class ViewTab(QWidget):
         self.custom_q_geometry = self.load_custom_q_geometry()
         self.current_file_type = None
         self.current_dataset_name = None
+        self.annotation_dialog = None
 
         self._build_ui()
 
@@ -567,6 +824,9 @@ class ViewTab(QWidget):
         self.set_q_geometry_mode("XENOCS")
         info_box_layout.addLayout(q_buttons_layout)
         info_box_layout.addWidget(self.info_text)
+        self.open_annotation_button = QPushButton("Open annotated image")
+        self.open_annotation_button.clicked.connect(self.open_annotation_window)
+        info_box_layout.addWidget(self.open_annotation_button)
         right_layout.addWidget(info_box)
 
         content_layout.addWidget(right_panel, stretch=0)
@@ -590,6 +850,7 @@ class ViewTab(QWidget):
             getattr(self, "vmin_spin", None),
             getattr(self, "vmax_spin", None),
             getattr(self, "autoscale_button", None),
+            getattr(self, "open_annotation_button", None),
         ]:
             if widget is not None:
                 widget.setEnabled(enabled)
@@ -1819,6 +2080,31 @@ class ViewTab(QWidget):
 
     def on_mouse_leave(self, event):
         self.cursor_label.setText("x = - | y = - | q = - | I = -")
+
+    def open_annotation_window(self):
+        raw_image = self.get_current_image()
+        if raw_image is None:
+            QMessageBox.information(self, "No image", "No image is currently loaded.")
+            return
+
+        raw_image = np.asarray(raw_image, dtype=float)
+        display_image = self.prepare_display_image(raw_image)
+        vmin, vmax = self.display_limits_for_save(display_image)
+        title = "Annotated image"
+        if self.current_file is not None:
+            title = f"Annotated image - {self.current_file.name}"
+
+        dialog = PlaneAnnotationDialog(
+            self,
+            raw_image,
+            display_image,
+            vmin,
+            vmax,
+            self.calculate_q_at_pixel,
+            title,
+        )
+        self.annotation_dialog = dialog
+        dialog.show()
 
     # ============================================================
     # SAVE

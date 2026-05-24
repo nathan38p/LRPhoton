@@ -74,7 +74,11 @@ def file_prefix_icon(file_path, rating=None):
         return _THUMBS_DOWN_ICON
 
     name = Path(str(file_path)).name.lower()
-    if name.endswith(".dat") or name.endswith("_ave.h5") or name.endswith("ave.h5") or "averaged" in name:
+    if (
+        name.endswith(".dat")
+        or name.endswith(("_ave.h5", "_ave.hdf5", "_averaged.h5", "_averaged.hdf5"))
+        or "averaged" in name
+    ):
         return _GRAPH_FILE_ICON
     if name.endswith((".h5", ".hdf5", ".edf")):
         return _DEFAULT_FILE_ICON

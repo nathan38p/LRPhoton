@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QMessageBox,
+    QInputDialog,
     QAbstractItemView,
     QFrame,
     QSpinBox,
@@ -385,6 +386,10 @@ class DatPlotTab(QWidget):
         self.current_folder = Path("/Users/nathanpiaget/Documents/Thèse LRP/Expériences/XENOCS")
         self.curves = {}
         self.guide_bars = []
+        self.peak_labels = []
+        self.peak_label_artists = []
+        self._dragging_peak_label = None
+        self.last_peak_label_name = ""
         self.saved_legends = self.load_saved_legends()
         self._syncing_folder = False
         self._refreshing_curve_table = False
@@ -643,6 +648,20 @@ class DatPlotTab(QWidget):
         guide_buttons_layout.addWidget(self.add_y_bar_button)
         guide_layout.addLayout(guide_buttons_layout)
 
+        axis_label_layout = QHBoxLayout()
+        axis_label_layout.setContentsMargins(0, 0, 0, 0)
+        axis_label_layout.setSpacing(4)
+        self.add_axis_label_button = QPushButton("+ Peak label")
+        self.add_axis_label_button.setToolTip("Click a peak, enter a label name. Reuse the same name to add another arrow to the same label.")
+        self.add_axis_label_button.setCheckable(True)
+        self.add_axis_label_button.clicked.connect(self.toggle_peak_label_mode)
+        self.clear_axis_labels_button = QPushButton("Clear labels")
+        self.clear_axis_labels_button.setToolTip("Remove all peak labels")
+        self.clear_axis_labels_button.clicked.connect(self.clear_peak_labels)
+        axis_label_layout.addWidget(self.add_axis_label_button)
+        axis_label_layout.addWidget(self.clear_axis_labels_button)
+        guide_layout.addLayout(axis_label_layout)
+
         self.clear_header_button = QPushButton("−", self.curve_table.horizontalHeader())
         self.clear_header_button.setFixedSize(22, 18)
         self.clear_header_button.setToolTip("Clear all curves")
@@ -707,6 +726,7 @@ class DatPlotTab(QWidget):
 
         self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
         self.canvas.mpl_connect("button_press_event", self.graph_button_press)
+        self.canvas.mpl_connect("button_release_event", self.graph_button_release)
         self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
 
         frame_nav = QHBoxLayout()
@@ -813,6 +833,7 @@ class DatPlotTab(QWidget):
             save_kwargs["dpi"] = 300
 
         try:
+            self.canvas.draw()
             self.canvas.fig.savefig(file_path, **save_kwargs)
         except Exception as error:
             QMessageBox.warning(self, "Save plot error", f"Could not save plot:\n\n{error}")
@@ -1192,6 +1213,134 @@ class DatPlotTab(QWidget):
                 line = ax.axhline(value, color=color, linestyle="--", linewidth=1.2, alpha=0.9, label="_nolegend_")
             line.set_gid("guide_bar")
 
+    def draw_peak_labels(self, ax):
+        self.peak_label_artists = []
+        for index, label_data in enumerate(self.peak_labels):
+            points = label_data.get("points")
+            if points is None:
+                points = [(label_data.get("x", 0.0), label_data.get("y", 0.0))]
+                label_data["points"] = points
+            if not points:
+                continue
+
+            first_x, first_y = points[0]
+            text_x = float(label_data.get("text_x", first_x))
+            text_y = float(label_data.get("text_y", first_y))
+            name = str(label_data.get("name", "label"))
+            if not all(np.isfinite(value) for value in (text_x, text_y)):
+                continue
+            if ax.get_xscale() == "log" and text_x <= 0:
+                continue
+            if ax.get_yscale() == "log" and text_y <= 0:
+                continue
+
+            has_visible_arrow = False
+            for point_index, point in enumerate(points):
+                x_value = float(point[0])
+                y_value = float(point[1])
+                if not all(np.isfinite(value) for value in (x_value, y_value)):
+                    continue
+                if ax.get_xscale() == "log" and x_value <= 0:
+                    continue
+                if ax.get_yscale() == "log" and y_value <= 0:
+                    continue
+
+                ax.annotate(
+                    "",
+                    xy=(x_value, y_value),
+                    xytext=(text_x, text_y),
+                    textcoords="data",
+                    arrowprops=dict(arrowstyle="->", color="black", linewidth=1.4),
+                    zorder=20,
+                )
+                has_visible_arrow = True
+
+            if not has_visible_arrow:
+                continue
+
+            text_artist = ax.text(
+                text_x,
+                text_y,
+                name,
+                ha="center",
+                va="center",
+                fontsize=9,
+                color="black",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", alpha=0.94),
+                zorder=21,
+            )
+            self.peak_label_artists.append({"index": index, "text": text_artist})
+
+    def toggle_peak_label_mode(self, checked):
+        if checked and not self.curves:
+            self.add_axis_label_button.setChecked(False)
+
+    def clear_peak_labels(self):
+        self.peak_labels = []
+        self._dragging_peak_label = None
+        self.add_axis_label_button.setChecked(False)
+        self.update_plot()
+
+    def peak_label_hit(self, event):
+        if event.inaxes != self.canvas.ax or event.xdata is None:
+            return None
+        event_xy = np.array([event.x, event.y], dtype=float)
+        for item in reversed(self.peak_label_artists):
+            text = item.get("text")
+            if text is None:
+                continue
+            try:
+                bbox = text.get_window_extent(renderer=self.canvas.get_renderer()).expanded(1.2, 1.6)
+                if bbox.contains(event_xy[0], event_xy[1]):
+                    return item["index"]
+            except Exception:
+                pass
+        return None
+
+    def add_peak_label_at(self, event):
+        if event.inaxes != self.canvas.ax or event.xdata is None or event.ydata is None:
+            return
+
+        name, ok = QInputDialog.getText(
+            self,
+            "Add peak label",
+            "Name (same name = same label):",
+            text=self.last_peak_label_name,
+        )
+        if not ok:
+            self.add_axis_label_button.setChecked(False)
+            return
+        name = name.strip() or "peak"
+        self.last_peak_label_name = name
+
+        xlim = self.canvas.ax.get_xlim()
+        ylim = self.canvas.ax.get_ylim()
+        x_span = abs(xlim[1] - xlim[0])
+        y_span = abs(ylim[1] - ylim[0])
+        text_x = float(event.xdata + 0.06 * x_span)
+        text_y = float(event.ydata + 0.08 * y_span)
+        if self.canvas.ax.get_xscale() == "log" and event.xdata > 0:
+            text_x = float(event.xdata * 1.2)
+        if self.canvas.ax.get_yscale() == "log" and event.ydata > 0:
+            text_y = float(event.ydata * 1.35)
+
+        for label_data in self.peak_labels:
+            if str(label_data.get("name", "")) == name:
+                points = label_data.setdefault("points", [])
+                points.append((float(event.xdata), float(event.ydata)))
+                self.add_axis_label_button.setChecked(False)
+                self.update_plot()
+                return
+
+        self.peak_labels.append({
+            "name": name,
+            "points": [(float(event.xdata), float(event.ydata))],
+            "text_x": text_x,
+            "text_y": text_y,
+        })
+        self.add_axis_label_button.setChecked(False)
+        self.update_plot()
+
     def plot_curve_segments(self, ax, key, curve, x, y, mode):
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
@@ -1481,6 +1630,16 @@ class DatPlotTab(QWidget):
         return best_key if best_distance <= 18 else None
 
     def graph_button_press(self, event):
+        if event.button == 1:
+            hit = self.peak_label_hit(event)
+            if hit is not None:
+                self._dragging_peak_label = hit
+                self.add_axis_label_button.setChecked(False)
+                return
+            if self.add_axis_label_button.isChecked():
+                self.add_peak_label_at(event)
+            return
+
         if event.button != 3:
             return
 
@@ -1507,6 +1666,9 @@ class DatPlotTab(QWidget):
                 curve["y"] = np.asarray(curve["original_y"], dtype=float).copy()
                 self.update_plot()
 
+    def graph_button_release(self, event):
+        self._dragging_peak_label = None
+
     def update_graph_toolbar_enabled(self):
         enabled = bool(self.curves)
         for widget in [
@@ -1515,6 +1677,8 @@ class DatPlotTab(QWidget):
             getattr(self, "save_plot_button", None),
             getattr(self, "mask_range_button", None),
             getattr(self, "reset_masks_button", None),
+            getattr(self, "add_axis_label_button", None),
+            getattr(self, "clear_axis_labels_button", None),
         ]:
             if widget is not None:
                 widget.setEnabled(enabled)
@@ -1532,6 +1696,20 @@ class DatPlotTab(QWidget):
         return "q", "I"
 
     def update_graph_coordinates(self, event):
+        if self._dragging_peak_label is not None:
+            if event.inaxes == self.canvas.ax and event.xdata is not None and event.ydata is not None:
+                x_value = float(event.xdata)
+                y_value = float(event.ydata)
+                if self.canvas.ax.get_xscale() == "log" and x_value <= 0:
+                    return
+                if self.canvas.ax.get_yscale() == "log" and y_value <= 0:
+                    return
+                if 0 <= self._dragging_peak_label < len(self.peak_labels):
+                    self.peak_labels[self._dragging_peak_label]["text_x"] = x_value
+                    self.peak_labels[self._dragging_peak_label]["text_y"] = y_value
+                    self.update_plot()
+            return
+
         if event.inaxes != self.canvas.ax or event.xdata is None or event.ydata is None:
             return
 
@@ -1668,6 +1846,7 @@ class DatPlotTab(QWidget):
             self.plot_curve_segments(ax, key, curve, x, y, mode)
 
         self.draw_guide_bars(ax)
+        self.draw_peak_labels(ax)
 
         if mode == "linear linear" or mode == "Kratky":
             ax.set_xscale("linear")

@@ -1125,11 +1125,13 @@ class HermansTab(QWidget):
             min_spin.setRange(-1e9, 1e9)
             min_spin.setValue(minimum)
             min_spin.setFixedWidth(64)
+            min_spin.setKeyboardTracking(False)
             max_spin = QDoubleSpinBox()
             max_spin.setDecimals(decimals)
             max_spin.setRange(-1e9, 1e9)
             max_spin.setValue(maximum)
             max_spin.setFixedWidth(64)
+            max_spin.setKeyboardTracking(False)
             value_spin = QDoubleSpinBox()
             value_spin.setDecimals(decimals)
             value_spin.setRange(minimum, maximum)
@@ -1138,10 +1140,12 @@ class HermansTab(QWidget):
                 value_spin.setSuffix(suffix)
             value_spin.setFixedWidth(92)
             value_spin.setFixedHeight(22)
+            value_spin.setKeyboardTracking(False)
             slider = QSlider(Qt.Horizontal)
             slider.setRange(0, 1000)
             slider.setValue(self.value_to_slider(value, minimum, maximum))
             slider.setMinimumWidth(110)
+            slider.setTracking(False)
 
             slider.min_spin = min_spin
             slider.max_spin = max_spin
@@ -1168,11 +1172,28 @@ class HermansTab(QWidget):
                 slider.blockSignals(False)
                 self.order_parameter_changed()
 
-            def sync_from_slider(_value=None):
+            def sync_from_slider(slider_value=None, run_fit=True):
+                if slider_value is None:
+                    slider_value = slider.value()
+                min_value = min_spin.value()
+                max_value = max_spin.value()
+                value = min_value + (max_value - min_value) * float(slider_value) / 1000.0
                 value_spin.blockSignals(True)
-                value_spin.setValue(self.slider_to_value(slider))
+                value_spin.setValue(value)
                 value_spin.blockSignals(False)
-                self.order_parameter_changed()
+                if run_fit:
+                    self.order_parameter_changed()
+                else:
+                    self.update_order_preview()
+
+            def begin_slider_drag():
+                self._order_fit_timer.stop()
+
+            def preview_from_slider(_value=None):
+                sync_from_slider(slider_value=_value, run_fit=False)
+
+            def finish_slider_drag():
+                sync_from_slider(run_fit=True)
 
             def sync_from_spin(_value=None):
                 min_value = min_spin.value()
@@ -1188,6 +1209,9 @@ class HermansTab(QWidget):
 
             min_spin.valueChanged.connect(sync_slider_limits)
             max_spin.valueChanged.connect(sync_slider_limits)
+            slider.sliderPressed.connect(begin_slider_drag)
+            slider.sliderMoved.connect(preview_from_slider)
+            slider.sliderReleased.connect(finish_slider_drag)
             slider.valueChanged.connect(sync_from_slider)
             value_spin.valueChanged.connect(sync_from_spin)
 
@@ -1210,6 +1234,7 @@ class HermansTab(QWidget):
                 spin.setSuffix(suffix)
             spin.setFixedWidth(96)
             spin.setFixedHeight(22)
+            spin.setKeyboardTracking(False)
             spin.valueChanged.connect(self.order_parameter_changed)
             order_layout.addWidget(label_widget, row, column)
             order_layout.addWidget(spin, row, column + 1)
@@ -1769,7 +1794,15 @@ class HermansTab(QWidget):
             files = [file for file in files if is_file_rated_up(file)]
 
         if self.is_anisotropy_mode():
-            excluded_suffixes = ("_ave.h5", "_aveq_ave.h5", "ave.h5", "polar.edf")
+            excluded_suffixes = (
+                "_ave.h5",
+                "_ave.hdf5",
+                "_aveq_ave.h5",
+                "_aveq_ave.hdf5",
+                "_averaged.h5",
+                "_averaged.hdf5",
+                "polar.edf",
+            )
             edf_stems = {file.stem for file in files if file.suffix.lower() == ".edf"}
             filtered_files = []
             for file in files:
@@ -2841,6 +2874,17 @@ class HermansTab(QWidget):
         ax.set_yscale(y_scale)
         ax.set_xlabel(x_label)
         ax.set_ylabel(y_label)
+        if self.use_q_range.isChecked():
+            q_min = min(self.q_min_filter.value(), self.q_max_filter.value())
+            q_max = max(self.q_min_filter.value(), self.q_max_filter.value())
+            if q_max > q_min:
+                if x_scale == "log":
+                    positive_x = x_values[np.isfinite(x_values) & (x_values > 0)]
+                    lower = q_min if q_min > 0 else (float(np.nanmin(positive_x)) if positive_x.size else None)
+                    if lower is not None and q_max > lower:
+                        ax.set_xlim(lower, q_max)
+                else:
+                    ax.set_xlim(q_min, q_max)
         ax.grid(True, which="both")
         ax.legend(loc="best")
         self.canvas.draw_idle()
