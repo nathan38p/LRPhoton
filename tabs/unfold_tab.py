@@ -21,9 +21,16 @@ class UnfoldTab(ViewTab):
     """View-like tab prepared for pattern unfolding workflows."""
 
     def _build_ui(self):
+        self.q_axis_unit = "nm"
         super()._build_ui()
         self._configure_unfold_toolbar()
         self._configure_unfold_right_panel()
+
+    def q_display_factor(self):
+        return 0.1 if self.q_axis_unit == "A" else 1.0
+
+    def q_axis_label(self):
+        return "q (Å⁻¹)" if self.q_axis_unit == "A" else "q (nm⁻¹)"
 
     def _configure_unfold_toolbar(self):
         self.toolbar.coordinates = False
@@ -191,8 +198,11 @@ class UnfoldTab(ViewTab):
         self.display_img = unfolded_display
         self.unfold_q_min = q_min
         self.unfold_q_max = q_max
+        q_factor = self.q_display_factor()
+        q_display_min = q_min * q_factor
+        q_display_max = q_max * q_factor
         aspect = "auto"
-        extent = [q_min, q_max, 0.0, 360.0]
+        extent = [q_display_min, q_display_max, 0.0, 360.0]
 
         if self.image_artist is None:
             self.image_artist = self.ax.imshow(
@@ -205,7 +215,7 @@ class UnfoldTab(ViewTab):
                 aspect=aspect,
             )
             self.ax.set_aspect(aspect)
-            self.ax.set_xlabel("q (nm⁻¹)")
+            self.ax.set_xlabel(self.q_axis_label())
             self.ax.set_ylabel("ψ (°)")
             self.ax.set_axis_on()
             self.colorbar = self.fig.colorbar(
@@ -219,7 +229,7 @@ class UnfoldTab(ViewTab):
             self.image_artist.set_extent(extent)
             self.image_artist.set_clim(self.vmin_spin.value(), self.vmax_spin.value())
             self.ax.set_aspect(aspect)
-            self.ax.set_xlabel("q (nm⁻¹)")
+            self.ax.set_xlabel(self.q_axis_label())
             self.ax.set_ylabel("ψ (°)")
             self.ax.set_axis_on()
 
@@ -229,7 +239,7 @@ class UnfoldTab(ViewTab):
             self.ax.set_xlim(self._saved_xlim)
             self.ax.set_ylim(self._saved_ylim)
         else:
-            self.ax.set_xlim(q_min, q_max)
+            self.ax.set_xlim(q_display_min, q_display_max)
             self.ax.set_ylim(0.0, 360.0)
 
         total = self.n_frames if self.is_lazy_h5 else self.images.shape[0]
@@ -411,7 +421,8 @@ class UnfoldTab(ViewTab):
             self.cursor_label.setText("q = - | ψ = - | I = -")
             return
 
-        q_value = float(event.xdata)
+        q_display_value = float(event.xdata)
+        q_value = q_display_value / self.q_display_factor()
         angle = float(event.ydata) % 360.0
         angle_bins, q_bins = self.raw_current_img.shape
         q_min = getattr(self, "unfold_q_min", 0.0)
@@ -436,9 +447,24 @@ class UnfoldTab(ViewTab):
         else:
             value_text = f"{value:.8g}"
 
+        unit_label = "Å⁻¹" if self.q_axis_unit == "A" else "nm⁻¹"
         self.cursor_label.setText(
-            f"q = {q_value:.6g} nm⁻¹ | ψ = {angle:.3f}° | I = {value_text}"
+            f"q = {q_display_value:.6g} {unit_label} | ψ = {angle:.3f}° | I = {value_text}"
         )
+
+    def on_mouse_press(self, event):
+        try:
+            clicked_label = self.ax.xaxis.label.contains(event)[0]
+        except Exception:
+            clicked_label = False
+        if event.button == 1 and clicked_label:
+            self.q_axis_unit = "A" if self.q_axis_unit == "nm" else "nm"
+            self._saved_xlim = None
+            self._saved_ylim = None
+            self.update_image()
+            return
+
+        super().on_mouse_press(event)
 
     def on_mouse_leave(self, event):
         self.cursor_label.setText("q = - | ψ = - | I = -")

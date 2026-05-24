@@ -716,6 +716,7 @@ class CentreTab(QWidget):
         self.instrument_mode = "XENOCS"
         self.current_header = {}
         self.file_loaded = False
+        self.q_axis_unit = "nm"
 
         self._build_ui(default_xc, default_yc)
 
@@ -921,6 +922,8 @@ class CentreTab(QWidget):
         self.canvas_v.setMinimumWidth(0)
         self.canvas_h.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.canvas_v.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.canvas_h.mpl_connect("button_press_event", self.on_graph_button_press)
+        self.canvas_v.mpl_connect("button_press_event", self.on_graph_button_press)
         graph_layout.addWidget(self.canvas_h)
         graph_layout.addWidget(self.canvas_v)
 
@@ -1340,6 +1343,28 @@ class CentreTab(QWidget):
         self.show_center_image()
         self.update_plots()
 
+    def q_display_factor(self):
+        return 0.1 if self.q_axis_unit == "A" else 1.0
+
+    def q_axis_label(self):
+        return "q (Å⁻¹)" if self.q_axis_unit == "A" else "q (nm⁻¹)"
+
+    def on_graph_button_press(self, event):
+        if event.button != 1:
+            return
+        try:
+            clicked_label = (
+                self.canvas_h.ax.xaxis.label.contains(event)[0]
+                or self.canvas_v.ax.xaxis.label.contains(event)[0]
+            )
+        except Exception:
+            clicked_label = False
+        if not clicked_label:
+            return
+
+        self.q_axis_unit = "A" if self.q_axis_unit == "nm" else "nm"
+        self.update_plots()
+
     def update_plots(self):
         if self.img is None:
             clear_plot_canvas(self.canvas_h)
@@ -1365,6 +1390,7 @@ class CentreTab(QWidget):
         q2, i2 = compute_directional_iq_nm_general(self.img, self.xc, self.yc, ang_h2, half_width, d_m, px_x, px_y, lam)
         q3, i3 = compute_directional_iq_nm_general(self.img, self.xc, self.yc, ang_v, half_width, d_m, px_x, px_y, lam)
         q4, i4 = compute_directional_iq_nm_general(self.img, self.xc, self.yc, ang_v2, half_width, d_m, px_x, px_y, lam)
+        q_factor = self.q_display_factor()
 
         self.canvas_h.ax.clear()
         self.canvas_v.ax.clear()
@@ -1372,19 +1398,19 @@ class CentreTab(QWidget):
         self.canvas_v.ax.set_axis_on()
 
         valid = np.isfinite(q1) & np.isfinite(i1) & (q1 > 0) & (i1 > 0)
-        self.canvas_h.ax.loglog(q1[valid], i1[valid], "-", color="red", linewidth=1.3, label="H +")
+        self.canvas_h.ax.loglog(q1[valid] * q_factor, i1[valid], "-", color="red", linewidth=1.3, label="H +")
 
         valid = np.isfinite(q2) & np.isfinite(i2) & (q2 > 0) & (i2 > 0)
-        self.canvas_h.ax.loglog(q2[valid], i2[valid], "--", color="darkred", linewidth=1.1, label="H -")
+        self.canvas_h.ax.loglog(q2[valid] * q_factor, i2[valid], "--", color="darkred", linewidth=1.1, label="H -")
 
         valid = np.isfinite(q3) & np.isfinite(i3) & (q3 > 0) & (i3 > 0)
-        self.canvas_v.ax.loglog(q3[valid], i3[valid], "-", color="blue", linewidth=1.3, label="V +")
+        self.canvas_v.ax.loglog(q3[valid] * q_factor, i3[valid], "-", color="blue", linewidth=1.3, label="V +")
 
         valid = np.isfinite(q4) & np.isfinite(i4) & (q4 > 0) & (i4 > 0)
-        self.canvas_v.ax.loglog(q4[valid], i4[valid], "--", color="navy", linewidth=1.1, label="V -")
+        self.canvas_v.ax.loglog(q4[valid] * q_factor, i4[valid], "--", color="navy", linewidth=1.1, label="V -")
 
         for ax, title in [(self.canvas_h.ax, "Horizontal I(q)"), (self.canvas_v.ax, "Vertical I(q)")]:
-            ax.set_xlabel("q (nm$^{-1}$)")
+            ax.set_xlabel(self.q_axis_label())
             ax.set_ylabel("I(q)")
             ax.set_title(title)
             ax.grid(True, which="both")

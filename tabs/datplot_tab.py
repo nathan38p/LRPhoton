@@ -394,6 +394,7 @@ class DatPlotTab(QWidget):
         self._syncing_folder = False
         self._refreshing_curve_table = False
         self._refreshing_guide_table = False
+        self.q_axis_unit = "nm"
 
         self.build_ui()
         self.refresh_files()
@@ -1570,6 +1571,14 @@ class DatPlotTab(QWidget):
         if x_max < x_min:
             x_min, x_max = x_max, x_min
 
+        data_x_min = x_min
+        data_x_max = x_max
+        if not self.curves_are_really_0_to_360():
+            factor = self.q_display_factor()
+            if factor != 0:
+                data_x_min = x_min / factor
+                data_x_max = x_max / factor
+
         keys = [curve_key] if curve_key in self.curves else (self.selected_curve_keys() or list(self.curves.keys()))
         total_masked = 0
 
@@ -1577,7 +1586,7 @@ class DatPlotTab(QWidget):
             curve = self.curves[key]
             x = np.asarray(curve["x"], dtype=float)
             y = np.asarray(curve["y"], dtype=float).copy()
-            mask = np.isfinite(x) & (x >= x_min) & (x <= x_max)
+            mask = np.isfinite(x) & (x >= data_x_min) & (x <= data_x_max)
             if np.any(mask):
                 y[mask] = np.nan
                 curve["y"] = y
@@ -1610,8 +1619,8 @@ class DatPlotTab(QWidget):
         best_distance = float("inf")
 
         for key, curve in self.curves.items():
-            x = np.asarray(curve["x"], dtype=float)
-            y = np.asarray(self.make_plot_y(x, curve["y"]), dtype=float)
+            x = np.asarray(self.make_plot_x(curve["x"]), dtype=float)
+            y = np.asarray(self.make_plot_y(curve["x"], curve["y"]), dtype=float)
             valid = np.isfinite(x) & np.isfinite(y)
             if self.canvas.ax.get_xscale() == "log":
                 valid &= x > 0
@@ -1631,6 +1640,19 @@ class DatPlotTab(QWidget):
 
     def graph_button_press(self, event):
         if event.button == 1:
+            try:
+                clicked_label = self.canvas.ax.xaxis.label.contains(event)[0]
+            except Exception:
+                clicked_label = False
+            if clicked_label and self.curves and not self.curves_are_really_0_to_360():
+                self.q_axis_unit = "A" if self.q_axis_unit == "nm" else "nm"
+                if self.x_label.text() in ("", "q / nm⁻¹", "q / Å⁻¹"):
+                    self.x_label.blockSignals(True)
+                    self.x_label.setText(self.q_axis_label())
+                    self.x_label.blockSignals(False)
+                self.update_plot()
+                return
+
             hit = self.peak_label_hit(event)
             if hit is not None:
                 self._dragging_peak_label = hit
@@ -1685,8 +1707,19 @@ class DatPlotTab(QWidget):
 
     def make_plot_y(self, x, y):
         if self.plot_mode.currentText() == "Kratky":
-            return x ** 2 * y
+            return self.make_plot_x(x) ** 2 * y
         return y
+
+    def q_display_factor(self):
+        return 0.1 if self.q_axis_unit == "A" else 1.0
+
+    def make_plot_x(self, x):
+        if self.curves_are_really_0_to_360():
+            return x
+        return np.asarray(x, dtype=float) * self.q_display_factor()
+
+    def q_axis_label(self):
+        return "q / Å⁻¹" if self.q_axis_unit == "A" else "q / nm⁻¹"
 
     def graph_coordinate_labels(self):
         if self.curves_are_really_0_to_360():
@@ -1715,7 +1748,10 @@ class DatPlotTab(QWidget):
 
         try:
             x_name, y_name = self.graph_coordinate_labels()
-            x_suffix = "°" if x_name == "ψ" else ""
+            if x_name == "ψ":
+                x_suffix = "°"
+            else:
+                x_suffix = " Å⁻¹" if self.q_axis_unit == "A" else " nm⁻¹"
             self.graph_coordinate_label.setText(
                 f"{x_name} = {event.xdata:.6g}{x_suffix} | {y_name} = {event.ydata:.6g}"
             )
@@ -1775,8 +1811,8 @@ class DatPlotTab(QWidget):
         all_y = []
 
         for curve in self.curves.values():
-            x = curve["x"]
-            y = self.make_plot_y(x, curve["y"])
+            x = self.make_plot_x(curve["x"])
+            y = self.make_plot_y(curve["x"], curve["y"])
 
             valid = np.isfinite(x) & np.isfinite(y)
             if np.any(valid):
@@ -1841,8 +1877,8 @@ class DatPlotTab(QWidget):
             self.update_limit_fields_from_current_data()
 
         for key, curve in self.curves.items():
-            x = curve["x"]
-            y = self.make_plot_y(x, curve["y"])
+            x = self.make_plot_x(curve["x"])
+            y = self.make_plot_y(curve["x"], curve["y"])
             self.plot_curve_segments(ax, key, curve, x, y, mode)
 
         self.draw_guide_bars(ax)
@@ -1868,7 +1904,7 @@ class DatPlotTab(QWidget):
             ax.set_xlim(0, 360)
             ax.set_xlabel(default_x_label)
         else:
-            default_x_label = "q / nm⁻¹"
+            default_x_label = self.q_axis_label()
             ax.set_xlabel(self.x_label.text() or default_x_label)
         ax.set_ylabel("q²I(q)" if mode == "Kratky" else (self.y_label.text() or "Intensity / a.u."))
         ax.set_title(self.title_edit.text())

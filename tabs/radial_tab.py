@@ -1264,6 +1264,7 @@ class RadialTab(QWidget):
         self._syncing_folder = False
         self._changing_h5_frame = False
         self._syncing_frame_controls = False
+        self.q_axis_unit = "nm"
 
         self.build_ui()
         self.refresh_files()
@@ -1621,7 +1622,7 @@ class RadialTab(QWidget):
         self.image_vmin_slider.valueChanged.connect(self.update_image_intensity_limits)
         self.image_vmax_slider.valueChanged.connect(self.update_image_intensity_limits)
 
-        self.canvas.mpl_connect("button_press_event", self.on_graph_right_click)
+        self.canvas.mpl_connect("button_press_event", self.on_graph_button_press)
         self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
         self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
 
@@ -2252,13 +2253,19 @@ class RadialTab(QWidget):
         mode = self.plot_mode.currentText()
         if mode in ["2θ linear", "2θ log"]:
             return q_nm_to_two_theta_deg(q, self.wavelength.value() if wavelength_value is None else wavelength_value)
-        return q
+        return q * self.q_display_factor()
 
 
     def make_plot_y(self, q, intensity):
         if self.plot_mode.currentText() == "Kratky":
-            return q ** 2 * intensity
+            return self.make_plot_x(q) ** 2 * intensity
         return intensity
+
+    def q_display_factor(self):
+        return 0.1 if self.q_axis_unit == "A" else 1.0
+
+    def q_axis_label(self):
+        return "q / Å⁻¹" if self.q_axis_unit == "A" else "q / nm⁻¹"
 
     def apply_plot_axes(self):
         ax = self.canvas.ax
@@ -2267,7 +2274,7 @@ class RadialTab(QWidget):
         if mode in ["2θ linear", "2θ log"]:
             ax.set_xlabel("2θ / °")
         else:
-            ax.set_xlabel("q / nm⁻¹")
+            ax.set_xlabel(self.q_axis_label())
 
         ax.set_ylabel("q²I(q)" if mode == "Kratky" else "I(q)")
 
@@ -2344,14 +2351,33 @@ class RadialTab(QWidget):
             return
 
         try:
+            if self.plot_mode.currentText() in ["2θ linear", "2θ log"]:
+                x_label = "2θ"
+                x_unit = "°"
+            else:
+                x_label = "q"
+                x_unit = " Å⁻¹" if self.q_axis_unit == "A" else " nm⁻¹"
             self.graph_coordinate_label.setText(
-                f"q = {event.xdata:.6g} | I = {event.ydata:.6g}"
+                f"{x_label} = {event.xdata:.6g}{x_unit} | I = {event.ydata:.6g}"
             )
         except Exception:
             self.graph_coordinate_label.setText("q = - | I = -")
 
     def clear_graph_coordinates(self, event=None):
         self.graph_coordinate_label.setText("q = - | I = -")
+
+    def on_graph_button_press(self, event):
+        if event.button == 1:
+            try:
+                clicked_label = self.canvas.ax.xaxis.label.contains(event)[0]
+            except Exception:
+                clicked_label = False
+            if clicked_label and self.plot_mode.currentText() not in ["2θ linear", "2θ log"]:
+                self.q_axis_unit = "A" if self.q_axis_unit == "nm" else "nm"
+                self.update_plot_mode()
+                return
+
+        self.on_graph_right_click(event)
 
     def on_graph_right_click(self, event):
         if event.button != 3 or event.inaxes != self.canvas.ax:

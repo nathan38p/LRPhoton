@@ -879,6 +879,7 @@ class HermansTab(QWidget):
         self.total_frames = 1
         self._updating_frame_controls = False
         self.instrument_mode = "XENOCS"
+        self.q_axis_unit = "nm"
         self._order_fit_timer = QTimer(self)
         self._order_fit_timer.setSingleShot(True)
         self._order_fit_timer.timeout.connect(self.calculate_order_parameter)
@@ -1520,6 +1521,7 @@ class HermansTab(QWidget):
         self.center_column_layout.insertWidget(2, self.graph_coordinate_label, stretch=0)
         self.update_plot_toolbar_enabled(False)
         self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
+        self.canvas.mpl_connect("button_press_event", self.on_graph_button_press)
         self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
         # (anisotropy_graph_controls block removed)
         self.image_canvas = ImageCanvas()
@@ -1940,8 +1942,9 @@ class HermansTab(QWidget):
 
         try:
             if self.is_anisotropy_mode():
+                unit_label = "Å⁻¹" if self.q_axis_unit == "A" else "nm⁻¹"
                 self.graph_coordinate_label.setText(
-                    f"q = {event.xdata:.6g} nm⁻¹ | I = {event.ydata:.6g}"
+                    f"q = {event.xdata:.6g} {unit_label} | I = {event.ydata:.6g}"
                 )
             else:
                 x_name, y_name = self.graph_coordinate_labels()
@@ -1961,6 +1964,25 @@ class HermansTab(QWidget):
         else:
             x_name, y_name = self.graph_coordinate_labels()
             self.graph_coordinate_label.setText(f"{x_name} = - | {y_name} = -")
+
+    def q_display_factor(self):
+        return 0.1 if self.q_axis_unit == "A" else 1.0
+
+    def q_axis_label(self):
+        return "q / Å⁻¹" if self.q_axis_unit == "A" else "q / nm⁻¹"
+
+    def on_graph_button_press(self, event):
+        if event.button != 1 or not self.is_anisotropy_mode():
+            return
+        try:
+            clicked_label = self.canvas.ax.xaxis.label.contains(event)[0]
+        except Exception:
+            clicked_label = False
+        if not clicked_label:
+            return
+
+        self.q_axis_unit = "A" if self.q_axis_unit == "nm" else "nm"
+        self.calculate_anisotropy()
 
     def set_instrument_mode(self, mode):
         self.instrument_mode = mode
@@ -2833,17 +2855,18 @@ class HermansTab(QWidget):
         ax.set_axis_on()
 
         plot_mode = self.anisotropy_plot_mode.currentText()
-        x_values = q
+        q_display = q * self.q_display_factor()
+        x_values = q_display
         y_iv = iv
         y_ih = ih
-        x_label = "q / nm⁻¹"
+        x_label = self.q_axis_label()
         y_label = "Intensity / a.u."
         x_scale = "linear"
         y_scale = "linear"
 
         if plot_mode == "Kratky":
-            y_iv = iv * q ** 2
-            y_ih = ih * q ** 2
+            y_iv = iv * q_display ** 2
+            y_ih = ih * q_display ** 2
             y_label = "q² I(q)"
         elif plot_mode == "log-log":
             x_scale = "log"
@@ -2880,11 +2903,12 @@ class HermansTab(QWidget):
             if q_max > q_min:
                 if x_scale == "log":
                     positive_x = x_values[np.isfinite(x_values) & (x_values > 0)]
-                    lower = q_min if q_min > 0 else (float(np.nanmin(positive_x)) if positive_x.size else None)
-                    if lower is not None and q_max > lower:
-                        ax.set_xlim(lower, q_max)
+                    lower = q_min * self.q_display_factor() if q_min > 0 else (float(np.nanmin(positive_x)) if positive_x.size else None)
+                    upper = q_max * self.q_display_factor()
+                    if lower is not None and upper > lower:
+                        ax.set_xlim(lower, upper)
                 else:
-                    ax.set_xlim(q_min, q_max)
+                    ax.set_xlim(q_min * self.q_display_factor(), q_max * self.q_display_factor())
         ax.grid(True, which="both")
         ax.legend(loc="best")
         self.canvas.draw_idle()
