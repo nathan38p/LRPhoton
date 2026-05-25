@@ -419,15 +419,14 @@ class MainWindow(QMainWindow):
 
         geometry = screen.availableGeometry()
 
-        # On Windows inside UTM, Qt/QEMU can report a maximized size that is a
-        # few pixels larger than the visible guest desktop. Do not use
-        # showMaximized() here: use the available desktop geometry directly so
-        # the window fills the screen without being clipped by the taskbar or
-        # by UTM scaling.
+        # On Windows inside UTM, keep the native Windows title bar visible.
+        # Avoid showMaximized(), which can overshoot the visible guest desktop,
+        # but leave enough top margin so the window decorations are not hidden
+        # under UTM's toolbar/title area.
         if sys.platform.startswith("win"):
             self.setMinimumSize(760, 560)
-            self.setGeometry(geometry)
-            QTimer.singleShot(0, lambda: self.setGeometry(QApplication.primaryScreen().availableGeometry()))
+            self.setGeometry(geometry.adjusted(0, 28, 0, 0))
+            QTimer.singleShot(0, lambda: self.setGeometry(QApplication.primaryScreen().availableGeometry().adjusted(0, 28, 0, 0)))
             return
 
         # macOS fullscreen/maximized behaviour is cleaner with the exact
