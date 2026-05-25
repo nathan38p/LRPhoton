@@ -153,7 +153,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle(APP_NAME)
-        self.resize(1300, 700)
+        self.resize_to_available_screen()
 
         container = QWidget()
         main_layout = QVBoxLayout(container)
@@ -322,10 +322,25 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.pages)
 
         self.setCentralWidget(container)
-        self.showMaximized()
+        self.show()
         QApplication.processEvents()
 
         self.build_tabs()
+
+    def resize_to_available_screen(self):
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1300, 700)
+            return
+
+        geometry = screen.availableGeometry()
+        width = min(1300, max(900, geometry.width() - 80))
+        height = min(760, max(620, geometry.height() - 80))
+        self.resize(width, height)
+        self.move(
+            geometry.x() + max(0, (geometry.width() - width) // 2),
+            geometry.y() + max(0, (geometry.height() - height) // 2),
+        )
 
     def resolve_background_tab_class(self):
         import tabs.background_tab as background_tab_module
