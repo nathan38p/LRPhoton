@@ -89,34 +89,6 @@ from PySide6.QtWidgets import (
 
 from PySide6.QtGui import QColor, QPainter, QPixmap
 
-from tabs.view_tab import ViewTab
-from tabs.centre_tab import CentreTab
-import tabs.background_tab as background_tab_module
-from tabs.cave_tab import CaveTab
-from tabs.average_tab import AverageTab
-from tabs.radial_tab import RadialTab
-from tabs.azimuthal_tab import AzimuthalTab
-from tabs.unfold_tab import UnfoldTab
-from tabs.hermans_tab import HermansTab
-from tabs.datplot_tab import DatPlotTab
-
-
-BackgroundTab = getattr(background_tab_module, "BackgroundTab", None)
-if BackgroundTab is None:
-    for candidate_name in dir(background_tab_module):
-        candidate = getattr(background_tab_module, candidate_name)
-        if (
-            isinstance(candidate, type)
-            and issubclass(candidate, QWidget)
-            and candidate is not QWidget
-            and getattr(candidate, "__module__", "") == background_tab_module.__name__
-        ):
-            BackgroundTab = candidate
-            break
-
-if BackgroundTab is None:
-    raise ImportError("No QWidget tab class found in tabs/background_tab.py")
-
 
 APP_NAME = "LRPhoton"
 APP_VERSION = "1.0.2"
@@ -336,6 +308,57 @@ class MainWindow(QMainWindow):
         # ============================================================
 
         self.pages = QStackedWidget()
+        loading_label = QLabel("Loading LRPhoton...")
+        loading_label.setAlignment(Qt.AlignCenter)
+        loading_label.setStyleSheet("""
+            QLabel {
+                color: #555555;
+                font-size: 16px;
+                padding: 40px;
+            }
+        """)
+        self.pages.addWidget(loading_label)
+
+        main_layout.addWidget(self.pages)
+
+        self.setCentralWidget(container)
+        self.showMaximized()
+        QApplication.processEvents()
+
+        self.build_tabs()
+
+    def resolve_background_tab_class(self):
+        import tabs.background_tab as background_tab_module
+
+        background_tab = getattr(background_tab_module, "BackgroundTab", None)
+        if background_tab is None:
+            for candidate_name in dir(background_tab_module):
+                candidate = getattr(background_tab_module, candidate_name)
+                if (
+                    isinstance(candidate, type)
+                    and issubclass(candidate, QWidget)
+                    and candidate is not QWidget
+                    and getattr(candidate, "__module__", "") == background_tab_module.__name__
+                ):
+                    background_tab = candidate
+                    break
+
+        if background_tab is None:
+            raise ImportError("No QWidget tab class found in tabs/background_tab.py")
+        return background_tab
+
+    def build_tabs(self):
+        from tabs.view_tab import ViewTab
+        from tabs.centre_tab import CentreTab
+        from tabs.cave_tab import CaveTab
+        from tabs.average_tab import AverageTab
+        from tabs.radial_tab import RadialTab
+        from tabs.azimuthal_tab import AzimuthalTab
+        from tabs.unfold_tab import UnfoldTab
+        from tabs.hermans_tab import HermansTab
+        from tabs.datplot_tab import DatPlotTab
+
+        BackgroundTab = self.resolve_background_tab_class()
 
         self.view_tab = ViewTab()
         self.datplot_tab = DatPlotTab()
@@ -349,6 +372,11 @@ class MainWindow(QMainWindow):
         self.hermans_tab = HermansTab()
         self.view_tab.set_q_geometry_source_tab(self.azimuthal_tab)
         self.unfold_tab.set_q_geometry_source_tab(self.azimuthal_tab)
+
+        while self.pages.count():
+            old_widget = self.pages.widget(0)
+            self.pages.removeWidget(old_widget)
+            old_widget.deleteLater()
 
         self.pages.addWidget(self.view_tab)
         self.pages.addWidget(self.datplot_tab)
@@ -389,10 +417,7 @@ class MainWindow(QMainWindow):
                 source_tab.folder_changed.connect(target_tab.set_folder_from_external_tab)
 
         self.tab_bar.currentChanged.connect(self.pages.setCurrentIndex)
-
-        main_layout.addWidget(self.pages)
-
-        self.setCentralWidget(container)
+        self.pages.setCurrentIndex(self.tab_bar.currentIndex())
 
     def load_last_folder(self):
         try:
@@ -1059,7 +1084,6 @@ def main():
     """)
 
     window = MainWindow()
-    window.showMaximized()
     if window.can_check_for_updates():
         QTimer.singleShot(1200, lambda: window.check_for_updates(silent=window.silent_update_test))
     else:
