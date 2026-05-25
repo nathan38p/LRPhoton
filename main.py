@@ -125,9 +125,49 @@ def ensure_asset_file(file_name):
 
     return asset_path
 
+
 APP_ICON_FILE = ensure_asset_file("LRPhoton.ico")
 if not APP_ICON_FILE.exists() or APP_ICON_FILE.stat().st_size <= 0:
     APP_ICON_FILE = ensure_asset_file("LRPhoton.png")
+
+# Application icon creation utility for window manager (with macOS padding)
+def make_application_icon():
+    """
+    Build the application icon used by the window manager.
+    On macOS, the Dock icon needs visual padding, otherwise a full-canvas PNG looks
+    oversized compared with normal macOS app icons.
+    """
+    if not APP_ICON_FILE.exists():
+        return QIcon()
+
+    if sys.platform != "darwin":
+        return QIcon(str(APP_ICON_FILE))
+
+    source_pixmap = QPixmap(str(APP_ICON_FILE))
+    if source_pixmap.isNull():
+        return QIcon(str(APP_ICON_FILE))
+
+    canvas_size = 1024
+    icon_size = 830
+    canvas = QPixmap(canvas_size, canvas_size)
+    canvas.fill(Qt.transparent)
+
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+    painter.drawPixmap(
+        (canvas_size - icon_size) // 2,
+        (canvas_size - icon_size) // 2,
+        source_pixmap.scaled(
+            icon_size,
+            icon_size,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        ),
+    )
+    painter.end()
+
+    return QIcon(canvas)
 
 class ColoredTabBar(QTabBar):
     TAB_COLORS = {
@@ -177,8 +217,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle(APP_NAME)
-        if APP_ICON_FILE.exists():
-            self.setWindowIcon(QIcon(str(APP_ICON_FILE)))
+        self.setWindowIcon(make_application_icon())
         self.resize_to_available_screen()
 
         container = QWidget()
@@ -365,6 +404,13 @@ class MainWindow(QMainWindow):
             return
 
         geometry = screen.availableGeometry()
+
+        # Start maximized on Windows and macOS for a more app-like experience.
+        if sys.platform == "darwin" or sys.platform.startswith("win"):
+            self.setGeometry(geometry)
+            self.showMaximized()
+            return
+
         width = min(1300, max(900, geometry.width() - 80))
         height = min(760, max(620, geometry.height() - 80))
         self.resize(width, height)
@@ -1077,8 +1123,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    if APP_ICON_FILE.exists():
-        app.setWindowIcon(QIcon(str(APP_ICON_FILE)))
+    app.setWindowIcon(make_application_icon())
 
     app.setStyleSheet("""
         QFrame {
