@@ -87,7 +87,7 @@ from PySide6.QtWidgets import (
     QWidget
 )
 
-from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPixmap, QIcon
 
 
 APP_NAME = "LRPhoton"
@@ -101,9 +101,33 @@ GITHUB_REPO = "LRPhoton-releases"
 GITHUB_BRANCH = "main"
 GITHUB_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
 UPDATE_INFO_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits/{GITHUB_BRANCH}"
+RAW_FILE_URL = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}"
 SOURCE_ZIP_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
 LOCAL_VERSION_FILE = Path(__file__).resolve().parent / ".lrphoton_commit"
 USER_SETTINGS_FILE = Path.home() / ".lrphoton" / "settings.json"
+
+def local_asset_path(file_name):
+    return Path(__file__).resolve().parent / "assets" / file_name
+
+
+def ensure_asset_file(file_name):
+    asset_path = local_asset_path(file_name)
+    if asset_path.exists() and asset_path.stat().st_size > 0:
+        return asset_path
+
+    try:
+        asset_path.parent.mkdir(parents=True, exist_ok=True)
+        response = requests.get(f"{RAW_FILE_URL}/assets/{file_name}", timeout=10)
+        response.raise_for_status()
+        asset_path.write_bytes(response.content)
+    except Exception:
+        pass
+
+    return asset_path
+
+APP_ICON_FILE = ensure_asset_file("LRPhoton.ico")
+if not APP_ICON_FILE.exists() or APP_ICON_FILE.stat().st_size <= 0:
+    APP_ICON_FILE = ensure_asset_file("LRPhoton.png")
 
 class ColoredTabBar(QTabBar):
     TAB_COLORS = {
@@ -153,6 +177,8 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle(APP_NAME)
+        if APP_ICON_FILE.exists():
+            self.setWindowIcon(QIcon(str(APP_ICON_FILE)))
         self.resize_to_available_screen()
 
         container = QWidget()
@@ -169,18 +195,23 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(8, 0, 8, 0)
         header_layout.setSpacing(12)
 
-        logo_path = Path(__file__).parent / "assets" / "LRPhoton.png"
+        logo_path = ensure_asset_file("LRPhoton.png")
 
         logo = QLabel()
         logo_pixmap = QPixmap(str(logo_path))
-        logo.setPixmap(
-            logo_pixmap.scaled(
-                42,
-                42,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
+        if not logo_pixmap.isNull():
+            logo.setPixmap(
+                logo_pixmap.scaled(
+                    42,
+                    42,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
             )
-        )
+        else:
+            logo.setText("◉")
+            logo.setAlignment(Qt.AlignCenter)
+            logo.setStyleSheet("font-size: 30px; color: #2563eb;")
         logo.setFixedSize(42, 42)
         logo.setCursor(Qt.PointingHandCursor)
         logo.mousePressEvent = lambda event: self.open_about_dialog()
@@ -663,11 +694,11 @@ class MainWindow(QMainWindow):
 
     def is_development_copy(self):
         """
-        Disable GitHub auto-update checks when running from the developer Git repository.
-        ZIP downloads do not contain .git, so normal users still get update checks.
+        Disable GitHub auto-update checks only when explicitly requested.
+        This avoids blocking updates on Windows when LRPhoton is launched from a copied
+        or cloned folder that still contains a .git directory.
         """
-        app_dir = Path(__file__).resolve().parent
-        return (app_dir / ".git").exists()
+        return os.getenv("LRPHOTON_DEVELOPMENT_COPY") in ("1", "true", "True", "TRUE")
 
     def get_app_dir_write_error(self):
         app_dir = Path(__file__).resolve().parent
@@ -804,6 +835,7 @@ class MainWindow(QMainWindow):
 
         allowed_extensions = {
             ".py",
+            ".pyw",
             ".json",
             ".txt",
             ".md",
@@ -1033,6 +1065,8 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    if APP_ICON_FILE.exists():
+        app.setWindowIcon(QIcon(str(APP_ICON_FILE)))
 
     app.setStyleSheet("""
         QFrame {
@@ -1099,7 +1133,9 @@ def main():
     """)
 
     window = MainWindow()
-    if window.can_check_for_updates():
+    if "--force-update-check" in sys.argv:
+        QTimer.singleShot(400, lambda: window.check_for_updates(silent=False))
+    elif window.can_check_for_updates():
         QTimer.singleShot(1200, lambda: window.check_for_updates(silent=window.silent_update_test))
     else:
         window.version_label.setVisible(False)
