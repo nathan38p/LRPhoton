@@ -419,14 +419,25 @@ class MainWindow(QMainWindow):
 
         geometry = screen.availableGeometry()
 
-        # On Windows inside UTM, keep the native Windows title bar visible.
-        # Avoid showMaximized(), which can overshoot the visible guest desktop,
-        # but leave enough top margin so the window decorations are not hidden
-        # under UTM's toolbar/title area.
+        # On Windows inside UTM, set a normal decorated window whose outer frame
+        # stays fully inside the visible guest desktop. QMainWindow.setGeometry()
+        # controls the client area, not the whole native frame, so using the full
+        # screen width makes the right border overflow. Keep the LRPhoton inner
+        # margins unchanged and only reduce the top-level window rectangle.
         if sys.platform.startswith("win"):
             self.setMinimumSize(760, 560)
-            self.setGeometry(geometry.adjusted(0, 28, 0, 0))
-            QTimer.singleShot(0, lambda: self.setGeometry(QApplication.primaryScreen().availableGeometry().adjusted(0, 28, 0, 0)))
+
+            def apply_windows_utm_geometry():
+                current_screen = QApplication.primaryScreen()
+                if current_screen is None:
+                    return
+                available = current_screen.availableGeometry()
+                self.showNormal()
+                self.setGeometry(available.adjusted(0, 28, -28, -8))
+
+            apply_windows_utm_geometry()
+            QTimer.singleShot(0, apply_windows_utm_geometry)
+            QTimer.singleShot(200, apply_windows_utm_geometry)
             return
 
         # macOS fullscreen/maximized behaviour is cleaner with the exact
