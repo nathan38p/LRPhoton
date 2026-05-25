@@ -419,11 +419,11 @@ class MainWindow(QMainWindow):
 
         geometry = screen.availableGeometry()
 
-        # On Windows inside UTM, set a normal decorated window whose outer frame
-        # stays fully inside the visible guest desktop. QMainWindow.setGeometry()
-        # controls the client area, not the whole native frame, so using the full
-        # screen width makes the right border overflow. Keep the LRPhoton inner
-        # margins unchanged and only reduce the top-level window rectangle.
+        # On Windows inside UTM, do not use the full reported screen width.
+        # The guest can report the full virtual desktop while the visible UTM
+        # viewport is a little narrower, so the right side gets clipped. Keep
+        # the internal LRPhoton margins unchanged and only make the native
+        # top-level window slightly smaller and centered in the visible area.
         if sys.platform.startswith("win"):
             self.setMinimumSize(760, 560)
 
@@ -431,9 +431,16 @@ class MainWindow(QMainWindow):
                 current_screen = QApplication.primaryScreen()
                 if current_screen is None:
                     return
+
                 available = current_screen.availableGeometry()
                 self.showNormal()
-                self.setGeometry(available.adjusted(0, 28, -28, -8))
+
+                width = max(760, available.width() - 96)
+                height = max(560, available.height() - 40)
+                x = available.x() + max(0, (available.width() - width) // 2)
+                y = available.y() + 28
+
+                self.setGeometry(x, y, width, height)
 
             apply_windows_utm_geometry()
             QTimer.singleShot(0, apply_windows_utm_geometry)
