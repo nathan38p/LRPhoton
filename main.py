@@ -221,7 +221,6 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(make_application_icon())
-        self.resize_to_available_screen()
 
         container = QWidget()
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -409,11 +408,9 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.pages_scroll_area, 1)
 
         self.setCentralWidget(container)
-        self.show()
-        QApplication.processEvents()
-        self.sync_pages_width_to_window()
-
         self.build_tabs()
+        self.resize_to_available_screen()
+        self.sync_pages_width_to_window()
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.sync_pages_width_to_window()
@@ -455,8 +452,9 @@ class MainWindow(QMainWindow):
         if sys.platform.startswith("win"):
             self.setMinimumSize(900, 620)
             self.setGeometry(geometry)
-            QTimer.singleShot(0, self.showMaximized)
-            QTimer.singleShot(200, self.showMaximized)
+            self.showMaximized()
+            QTimer.singleShot(0, self.sync_pages_width_to_window)
+            QTimer.singleShot(200, self.sync_pages_width_to_window)
             return
 
         # macOS fullscreen/maximized behaviour is cleaner with the exact
@@ -464,7 +462,8 @@ class MainWindow(QMainWindow):
         if sys.platform == "darwin":
             self.setMinimumSize(900, 620)
             self.setGeometry(geometry)
-            QTimer.singleShot(0, self.showMaximized)
+            self.showMaximized()
+            QTimer.singleShot(0, self.sync_pages_width_to_window)
             return
 
         width = min(1300, max(900, geometry.width() - 80))
@@ -474,6 +473,8 @@ class MainWindow(QMainWindow):
             geometry.x() + max(0, (geometry.width() - width) // 2),
             geometry.y() + max(0, (geometry.height() - height) // 2),
         )
+        self.show()
+        QTimer.singleShot(0, self.sync_pages_width_to_window)
 
     def resolve_background_tab_class(self):
         import tabs.background_tab as background_tab_module
