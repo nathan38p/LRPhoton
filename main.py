@@ -227,6 +227,8 @@ class MainWindow(QMainWindow):
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         main_layout = QVBoxLayout(container)
         main_layout.setContentsMargins(22, 18, 22, 10)
+        self.main_layout_left_margin = 22
+        self.main_layout_right_margin = 22
         main_layout.setSpacing(8)
 
         # ============================================================
@@ -393,11 +395,15 @@ class MainWindow(QMainWindow):
         """)
         self.pages.addWidget(loading_label)
 
+        self.pages.setMinimumWidth(0)
+        self.pages.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+
         self.pages_scroll_area = QScrollArea()
         self.pages_scroll_area.setWidgetResizable(True)
         self.pages_scroll_area.setFrameShape(QFrame.NoFrame)
         self.pages_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.pages_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.pages_scroll_area.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.pages_scroll_area.setWidget(self.pages)
 
         main_layout.addWidget(self.pages_scroll_area, 1)
@@ -405,8 +411,36 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
         self.show()
         QApplication.processEvents()
+        self.sync_pages_width_to_window()
 
         self.build_tabs()
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.sync_pages_width_to_window()
+
+    def sync_pages_width_to_window(self):
+        if not hasattr(self, "pages") or not hasattr(self, "pages_scroll_area"):
+            return
+
+        central_widget = self.centralWidget()
+        if central_widget is None:
+            return
+
+        available_width = max(
+            0,
+            central_widget.width()
+            - self.main_layout_left_margin
+            - self.main_layout_right_margin,
+        )
+        if available_width <= 0:
+            return
+
+        self.pages_scroll_area.setFixedWidth(available_width)
+        self.pages.setFixedWidth(available_width)
+
+        current_page = self.pages.currentWidget()
+        if current_page is not None:
+            current_page.setFixedWidth(available_width)
 
     def resize_to_available_screen(self):
         screen = QApplication.primaryScreen()
@@ -530,8 +564,16 @@ class MainWindow(QMainWindow):
                     continue
                 source_tab.folder_changed.connect(target_tab.set_folder_from_external_tab)
 
+        for index in range(self.pages.count()):
+            page = self.pages.widget(index)
+            if page is not None:
+                page.setMinimumWidth(0)
+                page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+
         self.tab_bar.currentChanged.connect(self.pages.setCurrentIndex)
+        self.tab_bar.currentChanged.connect(lambda _index: self.sync_pages_width_to_window())
         self.pages.setCurrentIndex(self.tab_bar.currentIndex())
+        self.sync_pages_width_to_window()
 
     def load_last_folder(self):
         try:
