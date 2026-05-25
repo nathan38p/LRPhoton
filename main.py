@@ -694,11 +694,23 @@ class MainWindow(QMainWindow):
 
     def is_development_copy(self):
         """
-        Disable GitHub auto-update checks only when explicitly requested.
-        This avoids blocking updates on Windows when LRPhoton is launched from a copied
-        or cloned folder that still contains a .git directory.
+        Enable the private development mode only for Nathan's local working copy.
+        In development mode, locked tabs are available and GitHub auto-update checks
+        are disabled.
         """
-        return os.getenv("LRPHOTON_DEVELOPMENT_COPY") in ("1", "true", "True", "TRUE")
+        if os.getenv("LRPHOTON_DEVELOPMENT_COPY") in ("1", "true", "True", "TRUE"):
+            return True
+
+        app_dir = Path(__file__).resolve().parent
+        normalized_path = str(app_dir).replace("\\", "/").lower()
+
+        developer_path_markers = (
+            "/users/nathanpiaget/documents/thèse lrp/programmes/lrphoton",
+            "/users/nathanpiaget/documents/thèse lrp/programmes/lrphoton",
+            "/users/nathanpiaget/documents/these lrp/programmes/lrphoton",
+        )
+
+        return any(marker in normalized_path for marker in developer_path_markers)
 
     def get_app_dir_write_error(self):
         app_dir = Path(__file__).resolve().parent
