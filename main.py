@@ -95,7 +95,7 @@ APP_VERSION = "1.0.2"
 APP_AUTHOR = "Nathan Piaget"
 # Constants
 REPORT_EMAIL = "nathan.piaget@univ-grenoble-alpes.fr"
-# update test4
+# update test5
 GITHUB_OWNER = "nathan38p"
 GITHUB_REPO = "LRPhoton-releases"
 GITHUB_BRANCH = "main"
