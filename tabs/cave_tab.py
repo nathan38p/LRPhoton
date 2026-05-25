@@ -1961,6 +1961,26 @@ class CaveTab(QWidget):
         self.only_thumbs_up_checkbox.stateChanged.connect(self.refresh_files)
 
         refresh_button = QPushButton("Refresh")
+        cave_action_button_style = """
+            QPushButton {
+                background-color: #dddddd;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
+            QPushButton:hover {
+                background-color: #d4d4d4;
+            }
+            QPushButton:pressed {
+                background-color: #c8c8c8;
+            }
+            QPushButton:disabled {
+                background-color: #eeeeee;
+                color: #aaaaaa;
+                border: none;
+            }
+        """
+        cave_action_button_height = refresh_button.sizeHint().height()
         refresh_button.clicked.connect(self.refresh_files)
 
         filters_layout.addWidget(QLabel("Name:"), 0, 0)
@@ -2238,13 +2258,40 @@ class CaveTab(QWidget):
 
         controls_layout.addWidget(intensity_box)
 
+        cave_action_button_style = """
+            QPushButton {
+                background-color: #dddddd;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
+            QPushButton:hover {
+                background-color: #d4d4d4;
+            }
+            QPushButton:pressed {
+                background-color: #c8c8c8;
+            }
+            QPushButton:disabled {
+                background-color: #eeeeee;
+                color: #aaaaaa;
+                border: none;
+            }
+        """
+
         button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(4)
+
         self.run_button = QPushButton("Run Cave")
-        self.run_button.setMinimumHeight(34)
+        self.run_button.setFixedHeight(cave_action_button_height)
+        self.run_button.setStyleSheet(cave_action_button_style)
         self.run_button.clicked.connect(self.run_cave)
+
         self.save_button = QPushButton("Save Cave")
-        self.save_button.setMinimumHeight(34)
+        self.save_button.setFixedHeight(cave_action_button_height)
+        self.save_button.setStyleSheet(cave_action_button_style)
         self.save_button.clicked.connect(self.save_cave)
+
         button_layout.addWidget(self.run_button)
         button_layout.addWidget(self.save_button)
         controls_layout.addLayout(button_layout)

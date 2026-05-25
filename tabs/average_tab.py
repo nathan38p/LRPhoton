@@ -824,7 +824,7 @@ class AverageTab(QWidget):
         end = self.frame_end_spin.value()
 
         if self.first_edf_header_text:
-            suggested_path = first_path.parent / f"{first_path.stem}_averaged.edf"
+            suggested_path = first_path.parent / f"{first_path.stem}_{start}-{end}_averaged.edf"
             output_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save average EDF",
@@ -832,7 +832,7 @@ class AverageTab(QWidget):
                 "EDF (*.edf);;HDF5 (*.h5);;All files (*)",
             )
         else:
-            suggested_path = first_path.parent / f"{first_path.stem}_averaged.h5"
+            suggested_path = first_path.parent / f"{first_path.stem}_{start}-{end}_averaged.h5"
             output_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save average H5",
@@ -843,7 +843,7 @@ class AverageTab(QWidget):
         if not output_path:
             return
 
-        output_path = self._ensure_averaged_suffix(output_path)
+        output_path = self._ensure_averaged_suffix(output_path, start, end)
 
         try:
             lower_path = output_path.lower()
@@ -860,20 +860,27 @@ class AverageTab(QWidget):
         except Exception as error:
             QMessageBox.critical(self, "Save error", str(error))
 
-    def _ensure_averaged_suffix(self, output_path):
+    def _ensure_averaged_suffix(self, output_path, start_frame, end_frame):
         path_obj = Path(output_path)
         suffix = path_obj.suffix.lower()
         known_suffixes = {".edf", ".h5", ".hdf5"}
+        frame_suffix = f"_{int(start_frame)}-{int(end_frame)}_averaged"
 
         if suffix in known_suffixes:
             name = path_obj.stem
-            if not name.endswith("_averaged"):
-                name += "_averaged"
+            if name.endswith("_averaged"):
+                name = name[:-len("_averaged")]
+            if not name.endswith(f"_{int(start_frame)}-{int(end_frame)}"):
+                name += f"_{int(start_frame)}-{int(end_frame)}"
+            name += "_averaged"
             return str(path_obj.with_name(name + path_obj.suffix))
 
         name = path_obj.name
-        if not name.endswith("_averaged"):
-            name += "_averaged"
+        if name.endswith("_averaged"):
+            name = name[:-len("_averaged")]
+        if not name.endswith(f"_{int(start_frame)}-{int(end_frame)}"):
+            name += f"_{int(start_frame)}-{int(end_frame)}"
+        name += "_averaged"
         return str(path_obj.with_name(name))
 
     def update_status(self):
