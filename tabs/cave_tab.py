@@ -6,7 +6,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from PySide6.QtCore import Qt, QEvent, QPoint, QSize, QCoreApplication
+from PySide6.QtCore import Qt, QEvent, QPoint, QSize, QCoreApplication, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QDialog,
@@ -50,7 +50,9 @@ from .instrument_presets import (
     ID13_DEFAULT_WAVELENGTH_A,
 )
 from .ui_style import (
+    ACTION_BUTTON_STYLE,
     BLOCK_SPACING,
+    COMPACT_COMBO_STYLE,
     FILE_BROWSER_WIDTH,
     FRAME_BUTTON_WIDTH,
     FRAME_COUNTER_WIDTH,
@@ -1846,6 +1848,8 @@ class ManualCaveDialog(QDialog):
 class CaveTab(QWidget):
     """Cave tab: fill masked detector zones by central symmetry."""
 
+    folder_changed = Signal(Path)
+
     def __init__(self):
         super().__init__()
 
@@ -1858,6 +1862,7 @@ class CaveTab(QWidget):
         self.h5_dataset_name = None
         self.h5_frame_axis = None
         self.h5_n_frames = 1
+        self._syncing_folder = False
         self._syncing_frame_controls = False
 
         self.image = None
@@ -1920,14 +1925,15 @@ class CaveTab(QWidget):
         center_layout.setSpacing(BLOCK_SPACING)
 
         center_splitter = QSplitter(Qt.Vertical)
-        center_splitter.setChildrenCollapsible(False)
-        center_splitter.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+        self.center_splitter = center_splitter
+        center_splitter.setChildrenCollapsible(True)
+        center_splitter.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         center_layout.addWidget(center_splitter, stretch=1)
 
         file_box = QGroupBox("File browser")
         file_box.setStyleSheet(GROUP_BOX_STYLE)
         file_box.setMinimumHeight(0)
-        file_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+        file_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         file_layout = QVBoxLayout(file_box)
         file_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         file_layout.setSpacing(6)
@@ -1972,9 +1978,7 @@ class CaveTab(QWidget):
 
         self.file_list = QListWidget()
         install_file_rating_menu(self.file_list)
-        self.file_list.currentItemChanged.connect(self.file_selection_changed)
         self.file_list.itemClicked.connect(self.open_selected_file)
-        self.file_list.itemDoubleClicked.connect(self.open_selected_file)
         self.file_list.setMinimumHeight(0)
         file_layout.addWidget(self.file_list, stretch=1)
 
@@ -1983,18 +1987,35 @@ class CaveTab(QWidget):
         controls_box.setMinimumHeight(0)
         controls_box.setMinimumWidth(0)
         controls_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        controls_layout = QVBoxLayout(controls_box)
-        controls_layout.setContentsMargins(6, 18, 6, 6)
+        controls_box_layout = QVBoxLayout(controls_box)
+        controls_box_layout.setContentsMargins(6, 18, 6, 6)
+        controls_box_layout.setSpacing(0)
+        controls_content = QWidget()
+        controls_content.setStyleSheet("background-color: #eeeeee;")
+        controls_layout = QVBoxLayout(controls_content)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(4)
 
         controls_scroll = QScrollArea()
         controls_scroll.setWidgetResizable(True)
         controls_scroll.setFrameShape(QScrollArea.NoFrame)
         controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         controls_scroll.setMinimumHeight(0)
         controls_scroll.setMinimumWidth(0)
         controls_scroll.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        controls_scroll.setWidget(controls_box)
+        controls_scroll.setStyleSheet("""
+            QScrollArea {
+                background-color: #eeeeee;
+                border: 0px;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color: #eeeeee;
+            }
+        """)
+        controls_scroll.viewport().setStyleSheet("background-color: #eeeeee;")
+        controls_scroll.setWidget(controls_content)
+        controls_box_layout.addWidget(controls_scroll)
 
         cave_box = QGroupBox("Cave-filled pattern")
         cave_box.setMinimumHeight(0)
@@ -2023,21 +2044,18 @@ class CaveTab(QWidget):
 
         top_layout.addWidget(original_box, stretch=1)
         center_splitter.addWidget(file_box)
-        center_splitter.addWidget(controls_scroll)
+        center_splitter.addWidget(controls_box)
         center_splitter.setStretchFactor(0, 1)
         center_splitter.setStretchFactor(1, 1)
-        center_splitter.setSizes([1, 1])
+        self.set_initial_center_splitter_sizes()
+        QTimer.singleShot(0, self.set_initial_center_splitter_sizes)
+        QTimer.singleShot(100, self.set_initial_center_splitter_sizes)
 
         top_layout.addWidget(center_panel, stretch=0)
         top_layout.addWidget(cave_box, stretch=1)
         top_layout.setStretch(0, 1)
         top_layout.setStretch(1, 0)
         top_layout.setStretch(2, 1)
-
-        self.open_button = QPushButton("Open EDF / H5")
-        self.open_button.setMinimumWidth(0)
-        self.open_button.clicked.connect(self.open_file)
-        controls_layout.addWidget(self.open_button)
 
         preset_layout = QHBoxLayout()
         preset_layout.setContentsMargins(0, 0, 0, 0)
@@ -2133,7 +2151,8 @@ class CaveTab(QWidget):
 
         self.nan_operator_combo = QComboBox()
         self.nan_operator_combo.addItems(["<=", ">="])
-        self.nan_operator_combo.setFixedWidth(54)
+        self.nan_operator_combo.setFixedWidth(64)
+        self.nan_operator_combo.setStyleSheet(COMPACT_COMBO_STYLE)
 
         self.nan_threshold_spin = QDoubleSpinBox()
         self.nan_threshold_spin.setRange(-1e12, 1e12)
@@ -2145,7 +2164,8 @@ class CaveTab(QWidget):
         self.nan_extra_checkbox = QCheckBox("Or")
         self.nan_extra_operator_combo = QComboBox()
         self.nan_extra_operator_combo.addItems([">=", "<="])
-        self.nan_extra_operator_combo.setFixedWidth(54)
+        self.nan_extra_operator_combo.setFixedWidth(64)
+        self.nan_extra_operator_combo.setStyleSheet(COMPACT_COMBO_STYLE)
         self.nan_extra_threshold_spin = QDoubleSpinBox()
         self.nan_extra_threshold_spin.setRange(-1e12, 1e12)
         self.nan_extra_threshold_spin.setDecimals(6)
@@ -2187,10 +2207,11 @@ class CaveTab(QWidget):
         controls_layout.addWidget(self.expand_nan_neighbors_checkbox)
         controls_layout.addWidget(self.manual_mask_button)
 
-        intensity_box = QGroupBox("Display intensity")
+        intensity_box = QGroupBox("Contrast")
         intensity_box.setMinimumWidth(0)
+        intensity_box.setStyleSheet(GROUP_BOX_STYLE)
         intensity_layout = QGridLayout(intensity_box)
-        intensity_layout.setContentsMargins(6, 18, 6, 6)
+        intensity_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         intensity_layout.setSpacing(4)
 
         self.vmin_slider = QSlider(Qt.Horizontal)
@@ -2202,21 +2223,29 @@ class CaveTab(QWidget):
 
         self.vmin_label = QLabel("Min: 0.000")
         self.vmax_label = QLabel("Max: 1.000")
+        self.auto_intensity_button = QPushButton("Auto")
+        self.auto_intensity_button.setFixedWidth(54)
+        self.auto_intensity_button.clicked.connect(self.auto_display_limits)
         self.lock_intensity_checkbox = QCheckBox("Lock min/max")
         self.lock_intensity_checkbox.setChecked(False)
 
         intensity_layout.addWidget(self.vmin_label, 0, 0)
         intensity_layout.addWidget(self.vmin_slider, 0, 1)
+        intensity_layout.addWidget(self.auto_intensity_button, 0, 2, 2, 1)
         intensity_layout.addWidget(self.vmax_label, 1, 0)
         intensity_layout.addWidget(self.vmax_slider, 1, 1)
-        intensity_layout.addWidget(self.lock_intensity_checkbox, 2, 0, 1, 2)
+        intensity_layout.addWidget(self.lock_intensity_checkbox, 2, 0, 1, 3)
 
         controls_layout.addWidget(intensity_box)
 
         button_layout = QHBoxLayout()
         self.run_button = QPushButton("Run Cave")
+        self.run_button.setMinimumHeight(34)
+        self.run_button.setStyleSheet(ACTION_BUTTON_STYLE)
         self.run_button.clicked.connect(self.run_cave)
         self.save_button = QPushButton("Save Cave")
+        self.save_button.setMinimumHeight(34)
+        self.save_button.setStyleSheet(ACTION_BUTTON_STYLE)
         self.save_button.clicked.connect(self.save_cave)
         button_layout.addWidget(self.run_button)
         button_layout.addWidget(self.save_button)
@@ -2225,7 +2254,8 @@ class CaveTab(QWidget):
         self.status = QTextEdit()
         self.status.setReadOnly(True)
         self.status.setPlaceholderText("")
-        controls_layout.addWidget(self.status, stretch=1)
+        self.status.hide()
+        controls_layout.addStretch(1)
 
         self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
         self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
@@ -2303,6 +2333,7 @@ class CaveTab(QWidget):
             self.expand_nan_neighbors_checkbox,
             self.manual_mask_button,
             self.lock_intensity_checkbox,
+            self.auto_intensity_button,
             self.vmin_slider,
             self.vmax_slider,
             self.run_button,
@@ -2323,6 +2354,12 @@ class CaveTab(QWidget):
             self.q_manual_button,
         ]:
             button.setEnabled(True)
+
+    def set_initial_center_splitter_sizes(self):
+        if not hasattr(self, "center_splitter"):
+            return
+        height = max(2, self.center_splitter.height())
+        self.center_splitter.setSizes([height // 2, height - height // 2])
 
     def is_development_copy(self):
         return (Path(__file__).resolve().parents[1] / ".git").exists()
@@ -2613,6 +2650,10 @@ class CaveTab(QWidget):
         self.vmax_slider.blockSignals(False)
 
         self.update_display_labels()
+
+    def auto_display_limits(self):
+        self.auto_set_display_limits()
+        self.update_display_limits_from_sliders()
 
     def current_display_limits(self):
         span = self.display_vmax - self.display_vmin
@@ -2912,6 +2953,17 @@ class CaveTab(QWidget):
             self.folder_path.setText(str(self.current_folder))
             self.refresh_files()
 
+    def set_folder_from_external_tab(self, folder):
+        folder = Path(folder).expanduser().resolve()
+        if self.current_folder.expanduser().resolve() == folder:
+            return
+        self._syncing_folder = True
+        self.current_folder = folder
+        if hasattr(self, "folder_path"):
+            self.folder_path.setText(str(self.current_folder))
+        self.refresh_files()
+        self._syncing_folder = False
+
     def refresh_files(self):
         if not hasattr(self, "file_list"):
             return
@@ -2927,6 +2979,8 @@ class CaveTab(QWidget):
             return
 
         self.current_folder = folder
+        if not self._syncing_folder:
+            self.folder_changed.emit(self.current_folder)
         self.file_list.clear()
 
         extension_patterns = self.extension_filter.text().split()
@@ -2955,12 +3009,6 @@ class CaveTab(QWidget):
             self.file_list.addItem(item_text)
             item = self.file_list.item(self.file_list.count() - 1)
             set_item_file_path(item, path)
-
-    def file_selection_changed(self, current, previous):
-        if current is None:
-            return
-
-        self.open_selected_file(current)
 
     def open_selected_file(self, item=None):
         if item is None:

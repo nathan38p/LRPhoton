@@ -1,9 +1,10 @@
+import fnmatch
 from pathlib import Path
 
 import h5py
 import numpy as np
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -16,9 +17,15 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QCheckBox,
     QGridLayout,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
+    QAbstractItemView,
+    QScrollArea,
     QSlider,
     QSizePolicy,
+    QSplitter,
 )
 
 from .cave_tab import (
@@ -29,6 +36,7 @@ from .cave_tab import (
     write_edf_file,
 )
 from .ui_style import (
+    ACTION_BUTTON_STYLE,
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
     FRAME_BUTTON_WIDTH,
@@ -36,8 +44,11 @@ from .ui_style import (
     FRAME_NAV_SPACING,
     FRAME_SPIN_WIDTH,
     GROUP_BOX_MARGINS,
+    GROUP_BOX_STYLE,
     PAGE_MARGINS,
+    PANEL_MARGINS,
 )
+from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path
 
 
 def write_average_h5_file(filename: str, image: np.ndarray, source_files, start_frame: int, end_frame: int):
@@ -53,9 +64,12 @@ def write_average_h5_file(filename: str, image: np.ndarray, source_files, start_
 class AverageTab(QWidget):
     """Average tab: average EDF/H5 images over a selected frame range."""
 
+    folder_changed = Signal(Path)
+
     def __init__(self):
         super().__init__()
 
+        self.current_folder = Path.home()
         self.sources = []
         self.frames = []
         self.current_frame_index = 0
@@ -66,9 +80,11 @@ class AverageTab(QWidget):
         self.display_vmin = 0.0
         self.display_vmax = 1.0
         self.slider_scale = 1000
+        self._syncing_folder = False
         self._syncing_frame_controls = False
 
         self.build_ui()
+        self.refresh_files()
         self.set_controls_enabled(False)
 
     def build_ui(self):
@@ -99,11 +115,102 @@ class AverageTab(QWidget):
         original_layout.addWidget(self.canvas_original, stretch=1)
         original_layout.addWidget(self.original_coordinate_label, stretch=0)
 
+        center_panel = QWidget()
+        center_panel.setFixedWidth(FILE_BROWSER_WIDTH)
+        center_layout = QVBoxLayout(center_panel)
+        center_layout.setContentsMargins(*PANEL_MARGINS)
+        center_layout.setSpacing(BLOCK_SPACING)
+
+        center_splitter = QSplitter(Qt.Vertical)
+        self.center_splitter = center_splitter
+        center_splitter.setChildrenCollapsible(True)
+        center_splitter.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        center_layout.addWidget(center_splitter, stretch=1)
+
+        file_box = QGroupBox("File browser")
+        file_box.setStyleSheet(GROUP_BOX_STYLE)
+        file_box.setMinimumHeight(0)
+        file_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        file_layout = QVBoxLayout(file_box)
+        file_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        file_layout.setSpacing(6)
+
+        self.folder_path = QLineEdit(str(self.current_folder))
+        self.folder_path.returnPressed.connect(self.refresh_files)
+        file_layout.addWidget(self.folder_path)
+
+        browse_button = QPushButton("Browse")
+        browse_button.clicked.connect(self.choose_folder)
+        file_layout.addWidget(browse_button)
+
+        filters_layout = QGridLayout()
+        self.name_filter = QLineEdit("*")
+        self.extension_filter = QLineEdit("*.edf *.h5 *.hdf5")
+        self.name_filter.textChanged.connect(self.refresh_files)
+        self.extension_filter.textChanged.connect(self.refresh_files)
+        filters_layout.addWidget(QLabel("Name:"), 0, 0)
+        filters_layout.addWidget(self.name_filter, 0, 1)
+        filters_layout.addWidget(QLabel("Extensions:"), 1, 0)
+        filters_layout.addWidget(self.extension_filter, 1, 1)
+        file_layout.addLayout(filters_layout)
+
+        file_options_layout = QHBoxLayout()
+        file_options_layout.setContentsMargins(0, 0, 0, 0)
+        self.show_subfolders_checkbox = QCheckBox("Show subfolders")
+        self.show_subfolders_checkbox.setChecked(False)
+        self.show_subfolders_checkbox.stateChanged.connect(self.refresh_files)
+        self.only_thumbs_up_checkbox = QCheckBox("Only 👍")
+        self.only_thumbs_up_checkbox.setChecked(False)
+        self.only_thumbs_up_checkbox.stateChanged.connect(self.refresh_files)
+        file_options_layout.addWidget(self.show_subfolders_checkbox)
+        file_options_layout.addWidget(self.only_thumbs_up_checkbox)
+        file_options_layout.addStretch(1)
+        file_layout.addLayout(file_options_layout)
+
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.refresh_files)
+        file_layout.addWidget(refresh_button)
+
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        install_file_rating_menu(self.file_list)
+        self.file_list.itemClicked.connect(self.open_selected_files)
+        file_layout.addWidget(self.file_list, stretch=1)
+
         controls_box = QGroupBox("Average tools")
-        controls_box.setFixedWidth(FILE_BROWSER_WIDTH)
-        controls_layout = QVBoxLayout(controls_box)
-        controls_layout.setContentsMargins(*GROUP_BOX_MARGINS)
-        controls_layout.setSpacing(6)
+        controls_box.setStyleSheet(GROUP_BOX_STYLE)
+        controls_box.setMinimumHeight(0)
+        controls_box.setMinimumWidth(0)
+        controls_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        controls_box_layout = QVBoxLayout(controls_box)
+        controls_box_layout.setContentsMargins(6, 18, 6, 6)
+        controls_box_layout.setSpacing(0)
+        controls_content = QWidget()
+        controls_content.setStyleSheet("background-color: #eeeeee;")
+        controls_layout = QVBoxLayout(controls_content)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(4)
+
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QScrollArea.NoFrame)
+        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_scroll.setMinimumHeight(0)
+        controls_scroll.setMinimumWidth(0)
+        controls_scroll.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        controls_scroll.setStyleSheet("""
+            QScrollArea {
+                background-color: #eeeeee;
+                border: 0px;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color: #eeeeee;
+            }
+        """)
+        controls_scroll.viewport().setStyleSheet("background-color: #eeeeee;")
+        controls_scroll.setWidget(controls_content)
+        controls_box_layout.addWidget(controls_scroll)
 
         average_box = QGroupBox("Average pattern")
         average_box.setMinimumWidth(0)
@@ -123,7 +230,14 @@ class AverageTab(QWidget):
         average_layout.addWidget(self.average_coordinate_label, stretch=0)
 
         top_layout.addWidget(original_box, 0, 0)
-        top_layout.addWidget(controls_box, 0, 1, alignment=Qt.AlignHCenter)
+        center_splitter.addWidget(file_box)
+        center_splitter.addWidget(controls_box)
+        center_splitter.setStretchFactor(0, 1)
+        center_splitter.setStretchFactor(1, 1)
+        self.set_initial_center_splitter_sizes()
+        QTimer.singleShot(0, self.set_initial_center_splitter_sizes)
+        QTimer.singleShot(100, self.set_initial_center_splitter_sizes)
+        top_layout.addWidget(center_panel, 0, 1, alignment=Qt.AlignHCenter)
         top_layout.addWidget(average_box, 0, 2)
 
         top_layout.setColumnMinimumWidth(0, 0)
@@ -133,10 +247,6 @@ class AverageTab(QWidget):
         top_layout.setColumnStretch(0, 1)
         top_layout.setColumnStretch(1, 0)
         top_layout.setColumnStretch(2, 1)
-
-        self.open_button = QPushButton("Open multi EDF / multi H5")
-        self.open_button.clicked.connect(self.open_files)
-        controls_layout.addWidget(self.open_button)
 
         range_box = QGroupBox("Frame range")
         range_layout = QGridLayout(range_box)
@@ -179,7 +289,8 @@ class AverageTab(QWidget):
         self.save_checkbox.setChecked(False)
         controls_layout.addWidget(self.save_checkbox)
 
-        intensity_box = QGroupBox("Display intensity")
+        intensity_box = QGroupBox("Contrast")
+        intensity_box.setStyleSheet(GROUP_BOX_STYLE)
         intensity_layout = QGridLayout(intensity_box)
         intensity_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         intensity_layout.setSpacing(4)
@@ -193,20 +304,28 @@ class AverageTab(QWidget):
 
         self.vmin_label = QLabel("Min: 0.000")
         self.vmax_label = QLabel("Max: 1.000")
+        self.auto_intensity_button = QPushButton("Auto")
+        self.auto_intensity_button.setFixedWidth(54)
+        self.auto_intensity_button.clicked.connect(self.auto_display_limits)
         self.lock_intensity_checkbox = QCheckBox("Lock min/max")
         self.lock_intensity_checkbox.setChecked(False)
 
         intensity_layout.addWidget(self.vmin_label, 0, 0)
         intensity_layout.addWidget(self.vmin_slider, 0, 1)
+        intensity_layout.addWidget(self.auto_intensity_button, 0, 2, 2, 1)
         intensity_layout.addWidget(self.vmax_label, 1, 0)
         intensity_layout.addWidget(self.vmax_slider, 1, 1)
-        intensity_layout.addWidget(self.lock_intensity_checkbox, 2, 0, 1, 2)
+        intensity_layout.addWidget(self.lock_intensity_checkbox, 2, 0, 1, 3)
         controls_layout.addWidget(intensity_box)
 
         button_layout = QHBoxLayout()
         self.run_button = QPushButton("Run Average")
+        self.run_button.setMinimumHeight(34)
+        self.run_button.setStyleSheet(ACTION_BUTTON_STYLE)
         self.run_button.clicked.connect(self.run_average)
         self.save_button = QPushButton("Save Average")
+        self.save_button.setMinimumHeight(34)
+        self.save_button.setStyleSheet(ACTION_BUTTON_STYLE)
         self.save_button.clicked.connect(self.save_average)
         button_layout.addWidget(self.run_button)
         button_layout.addWidget(self.save_button)
@@ -215,7 +334,8 @@ class AverageTab(QWidget):
         self.status = QTextEdit()
         self.status.setReadOnly(True)
         self.status.setPlaceholderText("")
-        controls_layout.addWidget(self.status, stretch=1)
+        self.status.hide()
+        controls_layout.addStretch(1)
 
         self.vmin_slider.valueChanged.connect(self.update_display_limits_from_sliders)
         self.vmax_slider.valueChanged.connect(self.update_display_limits_from_sliders)
@@ -271,6 +391,7 @@ class AverageTab(QWidget):
             self.prev_frame_button,
             self.next_frame_button,
             self.lock_intensity_checkbox,
+            self.auto_intensity_button,
             self.vmin_slider,
             self.vmax_slider,
             self.run_button,
@@ -279,17 +400,74 @@ class AverageTab(QWidget):
         ]:
             widget.setEnabled(enabled)
 
-        self.open_button.setEnabled(True)
         self.save_button.setEnabled(enabled and self.average_image is not None)
         self.update_frame_counter()
 
-    def open_files(self):
-        file_paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Open EDF or H5 files",
-            "",
-            "Data files (*.edf *.h5 *.hdf5);;EDF (*.edf);;HDF5 (*.h5 *.hdf5);;All files (*)",
-        )
+    def set_initial_center_splitter_sizes(self):
+        if not hasattr(self, "center_splitter"):
+            return
+        height = max(2, self.center_splitter.height())
+        self.center_splitter.setSizes([height // 2, height - height // 2])
+
+    def choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choose folder", str(self.current_folder))
+        if folder:
+            self.current_folder = Path(folder)
+            self.folder_path.setText(str(self.current_folder))
+            self.refresh_files()
+
+    def refresh_files(self):
+        if not hasattr(self, "file_list"):
+            return
+
+        folder = Path(self.folder_path.text()).expanduser()
+        if not folder.exists() or not folder.is_dir():
+            return
+
+        self.current_folder = folder
+        if not self._syncing_folder:
+            self.folder_changed.emit(self.current_folder)
+        self.file_list.clear()
+
+        extension_patterns = self.extension_filter.text().split() or ["*.edf", "*.h5", "*.hdf5"]
+        name_pattern = self.name_filter.text().strip() or "*"
+        iterator = folder.rglob("*") if self.show_subfolders_checkbox.isChecked() else folder.glob("*")
+
+        files = []
+        for path in iterator:
+            if not path.is_file():
+                continue
+            lower_name = path.name.lower()
+            if not any(fnmatch.fnmatch(lower_name, pattern.lower()) for pattern in extension_patterns):
+                continue
+            if not fnmatch.fnmatch(path.name, name_pattern):
+                continue
+            if self.only_thumbs_up_checkbox.isChecked() and not is_file_rated_up(path):
+                continue
+            files.append(path)
+
+        for path in sorted(files):
+            item = QListWidgetItem(str(path.relative_to(folder)))
+            set_item_file_path(item, path)
+            self.file_list.addItem(item)
+
+    def selected_files(self):
+        return [
+            Path(item.data(Qt.UserRole) or self.current_folder / item.text())
+            for item in self.file_list.selectedItems()
+        ]
+
+    def open_selected_files(self, item=None):
+        self.open_files(self.selected_files())
+
+    def open_files(self, file_paths=None):
+        if file_paths is None:
+            file_paths, _ = QFileDialog.getOpenFileNames(
+                self,
+                "Open EDF or H5 files",
+                str(self.current_folder),
+                "Data files (*.edf *.h5 *.hdf5);;EDF (*.edf);;HDF5 (*.h5 *.hdf5);;All files (*)",
+            )
 
         if not file_paths:
             return
@@ -305,6 +483,11 @@ class AverageTab(QWidget):
             for file_path in file_paths:
                 self.add_file(Path(file_path))
 
+            self.current_folder = Path(file_paths[0]).parent
+            if hasattr(self, "folder_path"):
+                self.folder_path.setText(str(self.current_folder))
+            self.folder_changed.emit(self.current_folder)
+
             if not self.frames:
                 raise ValueError("No image frame was found in the selected files.")
 
@@ -315,6 +498,16 @@ class AverageTab(QWidget):
             self.update_status()
         except Exception as error:
             QMessageBox.critical(self, "File reading error", str(error))
+
+    def set_folder_from_external_tab(self, folder):
+        folder = Path(folder).expanduser()
+        if folder.exists() and folder.is_dir():
+            self._syncing_folder = True
+            self.current_folder = folder
+            if hasattr(self, "folder_path"):
+                self.folder_path.setText(str(self.current_folder))
+                self.refresh_files()
+            self._syncing_folder = False
 
     def add_file(self, path: Path):
         suffix = path.suffix.lower()
@@ -498,6 +691,13 @@ class AverageTab(QWidget):
         self.vmin_slider.blockSignals(False)
         self.vmax_slider.blockSignals(False)
         self.update_display_labels()
+
+    def auto_display_limits(self):
+        image = self.current_image if self.current_image is not None else self.average_image
+        if image is None:
+            return
+        self.auto_set_display_limits(image)
+        self.update_display_limits_from_sliders()
 
     def current_display_limits(self):
         span = self.display_vmax - self.display_vmin

@@ -90,7 +90,9 @@ matplotlib ^
 h5py ^
 requests ^
 hdf5plugin ^
-fabio
+fabio ^
+scipy ^
+pyFAI
 
 if errorlevel 1 (
     echo.

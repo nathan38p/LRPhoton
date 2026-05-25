@@ -807,8 +807,10 @@ class AzimuthalTab(QWidget):
         self.image_canvas.set_coordinate_label(self.image_coordinate_label)
         image_layout.addWidget(self.image_canvas, stretch=1)
         image_layout.addWidget(self.image_coordinate_label, stretch=0)
-        image_limits_layout = QGridLayout()
-        image_limits_layout.setContentsMargins(0, 0, 0, 0)
+        image_limits_box = QGroupBox("Contrast")
+        image_limits_box.setStyleSheet(GROUP_BOX_STYLE)
+        image_limits_layout = QGridLayout(image_limits_box)
+        image_limits_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         image_limits_layout.setHorizontalSpacing(6)
         image_limits_layout.setVerticalSpacing(2)
 
@@ -816,6 +818,11 @@ class AzimuthalTab(QWidget):
         self.image_vmax_label = QLabel("Max: -")
         self.image_vmin_label.setAlignment(Qt.AlignCenter)
         self.image_vmax_label.setAlignment(Qt.AlignCenter)
+        self.image_lock_contrast_checkbox = QCheckBox("Lock min/max")
+        self.image_lock_contrast_checkbox.setToolTip("Keep current contrast limits when changing files or recalculating")
+        self.image_auto_contrast_button = QPushButton("Auto")
+        self.image_auto_contrast_button.setFixedWidth(54)
+        self.image_auto_contrast_button.clicked.connect(self.auto_image_intensity_limits)
 
         self.image_vmin_slider = QSlider(Qt.Horizontal)
         self.image_vmax_slider = QSlider(Qt.Horizontal)
@@ -826,10 +833,12 @@ class AzimuthalTab(QWidget):
 
         image_limits_layout.addWidget(self.image_vmin_label, 0, 0)
         image_limits_layout.addWidget(self.image_vmin_slider, 0, 1)
+        image_limits_layout.addWidget(self.image_auto_contrast_button, 0, 2, 2, 1)
         image_limits_layout.addWidget(self.image_vmax_label, 1, 0)
         image_limits_layout.addWidget(self.image_vmax_slider, 1, 1)
+        image_limits_layout.addWidget(self.image_lock_contrast_checkbox, 2, 0, 1, 3)
 
-        image_layout.addLayout(image_limits_layout)
+        image_layout.addWidget(image_limits_box)
         self.image_vmin_slider.valueChanged.connect(self.update_image_intensity_limits)
         self.image_vmax_slider.valueChanged.connect(self.update_image_intensity_limits)
 
@@ -903,7 +912,7 @@ class AzimuthalTab(QWidget):
             self.frame_start_spin, self.frame_end_spin, self.prev_frame_button,
             self.next_frame_button, self.frame_slider,
             self.image_vmin_label, self.image_vmax_label,
-            self.image_vmin_slider, self.image_vmax_slider,
+            self.image_vmin_slider, self.image_vmax_slider, self.image_lock_contrast_checkbox, self.image_auto_contrast_button,
         ]:
             widget.setEnabled(enabled)
 
@@ -969,6 +978,19 @@ class AzimuthalTab(QWidget):
         self.image_vmax_label.setText(f"Max: {vmax:.3g}")
         self.canvas.draw_idle()
 
+    def auto_image_intensity_limits(self):
+        if not hasattr(self, "image_canvas") or self.image_canvas.raw_image is None:
+            return
+
+        self.image_canvas.reset_display_limits()
+        self.image_canvas.show_image(
+            self.image_canvas.raw_image,
+            self.image_canvas.last_xc,
+            self.image_canvas.last_yc,
+            self.image_canvas.last_mask,
+        )
+        self.sync_image_intensity_sliders()
+
     def sync_image_intensity_sliders(self):
         data_min = self.image_canvas.display_data_min
         data_max = self.image_canvas.display_data_max
@@ -997,6 +1019,8 @@ class AzimuthalTab(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Choose folder", str(self.current_folder))
         if folder:
             self.current_folder = Path(folder)
+            if not self.image_lock_contrast_checkbox.isChecked():
+                self.image_canvas.reset_display_limits()
             self.folder_path.setText(str(self.current_folder))
             self.refresh_files()
 
@@ -1055,7 +1079,8 @@ class AzimuthalTab(QWidget):
     def selection_changed(self):
         selected = self.selected_files()
         self.set_controls_enabled(bool(selected))
-        self.image_canvas.reset_display_limits()
+        if not self.image_lock_contrast_checkbox.isChecked():
+            self.image_canvas.reset_display_limits()
 
         if selected:
             current_file = selected[0]

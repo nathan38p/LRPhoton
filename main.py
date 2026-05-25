@@ -8,8 +8,63 @@ import tempfile
 import zipfile
 import subprocess
 import base64
+import importlib.util
 from datetime import datetime
 from pathlib import Path
+
+
+REQUIRED_PYTHON_MODULES = [
+    ("PySide6", "PySide6"),
+    ("numpy", "numpy"),
+    ("matplotlib", "matplotlib"),
+    ("h5py", "h5py"),
+    ("requests", "requests"),
+    ("hdf5plugin", "hdf5plugin"),
+    ("fabio", "fabio"),
+    ("scipy", "scipy"),
+    ("pyFAI", "pyFAI"),
+]
+
+
+def ensure_required_python_modules():
+    if (
+        "--skip-dependency-check" in sys.argv
+        or os.getenv("LRPHOTON_SKIP_DEPENDENCY_CHECK") in ("1", "true", "True", "TRUE")
+    ):
+        return
+
+    missing_packages = [
+        package_name
+        for import_name, package_name in REQUIRED_PYTHON_MODULES
+        if importlib.util.find_spec(import_name) is None
+    ]
+    if not missing_packages:
+        return
+
+    pip_command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        *missing_packages,
+    ]
+
+    try:
+        subprocess.check_call(pip_command)
+    except subprocess.CalledProcessError:
+        try:
+            subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
+            subprocess.check_call(pip_command)
+        except Exception as error:
+            package_list = ", ".join(missing_packages)
+            raise RuntimeError(
+                f"Impossible to install missing LRPhoton dependencies: {package_list}.\n"
+                f"Run manually: {sys.executable} -m pip install {' '.join(missing_packages)}"
+            ) from error
+
+
+ensure_required_python_modules()
 
 
 import requests
@@ -65,15 +120,18 @@ if BackgroundTab is None:
 
 APP_NAME = "LRPhoton"
 APP_VERSION = "1.0.2"
+APP_AUTHOR = "Nathan Piaget"
 # Constants
 REPORT_EMAIL = "nathan.piaget@univ-grenoble-alpes.fr"
 # update test4
 GITHUB_OWNER = "nathan38p"
 GITHUB_REPO = "LRPhoton-releases"
 GITHUB_BRANCH = "main"
+GITHUB_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
 UPDATE_INFO_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits/{GITHUB_BRANCH}"
 SOURCE_ZIP_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
 LOCAL_VERSION_FILE = Path(__file__).resolve().parent / ".lrphoton_commit"
+USER_SETTINGS_FILE = Path.home() / ".lrphoton" / "settings.json"
 
 class ColoredTabBar(QTabBar):
     TAB_COLORS = {
@@ -152,8 +210,12 @@ class MainWindow(QMainWindow):
             )
         )
         logo.setFixedSize(42, 42)
+        logo.setCursor(Qt.PointingHandCursor)
+        logo.mousePressEvent = lambda event: self.open_about_dialog()
 
         title = QLabel(APP_NAME)
+        title.setCursor(Qt.PointingHandCursor)
+        title.mousePressEvent = lambda event: self.open_about_dialog()
         title.setStyleSheet("""
             QLabel {
                 font-size: 20px;
@@ -304,19 +366,23 @@ class MainWindow(QMainWindow):
         self.folder_synced_tabs = [
             self.view_tab,
             self.datplot_tab,
+            self.centre_tab,
             self.background_tab,
+            self.average_tab,
+            self.cave_tab,
             self.radial_tab,
             self.azimuthal_tab,
             self.unfold_tab,
             self.hermans_tab,
         ]
 
-        default_folder = str(Path.home())
+        default_folder = str(self.load_last_folder())
         for tab in self.folder_synced_tabs:
             if hasattr(tab, "set_folder_from_external_tab"):
                 tab.set_folder_from_external_tab(default_folder)
 
         for source_tab in self.folder_synced_tabs:
+            source_tab.folder_changed.connect(self.save_last_folder)
             for target_tab in self.folder_synced_tabs:
                 if source_tab is target_tab:
                     continue
@@ -328,6 +394,35 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(container)
 
+    def load_last_folder(self):
+        try:
+            data = json.loads(USER_SETTINGS_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return Path.home()
+
+        folder = Path(str(data.get("last_folder", ""))).expanduser()
+        if folder.exists() and folder.is_dir():
+            return folder
+        return Path.home()
+
+    def save_last_folder(self, folder):
+        folder = Path(folder).expanduser()
+        if not folder.exists() or not folder.is_dir():
+            return
+
+        try:
+            USER_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data = {}
+            if USER_SETTINGS_FILE.exists():
+                try:
+                    data = json.loads(USER_SETTINGS_FILE.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    data = {}
+            data["last_folder"] = str(folder.resolve())
+            USER_SETTINGS_FILE.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        except OSError:
+            pass
+
     def get_application_build(self):
         if self.is_development_copy():
             return "development"
@@ -337,6 +432,126 @@ class MainWindow(QMainWindow):
             return local_commit[:7]
 
         return "unknown"
+
+    def get_build_name(self):
+        return f"{APP_NAME} {APP_VERSION} - {self.get_application_build()}"
+
+    def get_build_datetime(self):
+        app_dir = Path(__file__).resolve().parent
+
+        if self.is_development_copy():
+            try:
+                result = subprocess.run(
+                    ["git", "log", "-1", "--format=%cI"],
+                    cwd=str(app_dir),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                commit_date = result.stdout.strip()
+                if commit_date:
+                    parsed_date = datetime.fromisoformat(commit_date.replace("Z", "+00:00"))
+                    return parsed_date.astimezone().strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                pass
+
+        candidates = [
+            path
+            for path in app_dir.rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix.lower() in {".py", ".png", ".svg", ".ico", ".icns", ".md", ".txt", ".bat", ".command"}
+        ]
+        if not candidates:
+            return "unknown"
+
+        latest_mtime = max(path.stat().st_mtime for path in candidates)
+        return datetime.fromtimestamp(latest_mtime).strftime("%d/%m/%Y %H:%M")
+
+    def add_about_logo(self, layout, image_path, label_text):
+        logo_label = QLabel()
+        logo_label.setAlignment(Qt.AlignCenter)
+        logo_label.setMinimumSize(110, 72)
+
+        pixmap = QPixmap(str(image_path))
+        if not pixmap.isNull():
+            logo_label.setPixmap(
+                pixmap.scaled(
+                    120,
+                    72,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
+        else:
+            logo_label.setText(label_text)
+            logo_label.setStyleSheet("""
+                QLabel {
+                    color: #777777;
+                    border: 1px dashed #cccccc;
+                    border-radius: 8px;
+                    padding: 12px;
+                    background: #f7f7f7;
+                }
+            """)
+
+        layout.addWidget(logo_label)
+
+    def open_about_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"About {APP_NAME}")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(420)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        logos_layout = QHBoxLayout()
+        logos_layout.setSpacing(18)
+        logos_layout.addStretch(1)
+        assets_dir = Path(__file__).resolve().parent / "assets"
+        self.add_about_logo(logos_layout, assets_dir / "LRPhoton.png", APP_NAME)
+        self.add_about_logo(logos_layout, assets_dir / "CNRS.png", "CNRS.png")
+        logos_layout.addStretch(1)
+        layout.addLayout(logos_layout)
+
+        title_label = QLabel(APP_NAME)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 22px;
+                font-weight: 700;
+                color: #222222;
+            }
+        """)
+        layout.addWidget(title_label)
+
+        info_label = QLabel(
+            f"<div style='text-align:center;'>"
+            f"<b>{APP_AUTHOR}</b><br>"
+            f"<a href='{GITHUB_URL}'>{GITHUB_URL}</a><br><br>"
+            f"Build: {self.get_build_name()}<br>"
+            f"Last build: {self.get_build_datetime()}"
+            f"</div>"
+        )
+        info_label.setAlignment(Qt.AlignCenter)
+        info_label.setOpenExternalLinks(True)
+        info_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        info_label.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                color: #333333;
+            }
+        """)
+        layout.addWidget(info_label)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        close_button.setFixedHeight(30)
+        layout.addWidget(close_button)
+
+        dialog.exec()
 
     def open_issue_report_dialog(self):
         from urllib.parse import quote
@@ -413,6 +628,30 @@ class MainWindow(QMainWindow):
         """
         app_dir = Path(__file__).resolve().parent
         return (app_dir / ".git").exists()
+
+    def get_app_dir_write_error(self):
+        app_dir = Path(__file__).resolve().parent
+        probe_path = app_dir / ".lrphoton_write_test"
+
+        try:
+            probe_path.write_text("ok", encoding="utf-8")
+            probe_path.unlink(missing_ok=True)
+            return None
+        except OSError as error:
+            try:
+                probe_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return error
+
+    def update_permission_message(self, error=None):
+        detail = f"\n\nSystem error: {error}" if error else ""
+        return (
+            "LRPhoton found an update, but the installation folder is not writable.\n\n"
+            "If LRPhoton is installed in C:\\Program Files\\LRPhoton or /Applications, "
+            "restart LRPhoton with administrator rights, or install the latest release manually."
+            f"{detail}"
+        )
 
     def get_local_commit(self):
         if LOCAL_VERSION_FILE.exists():
@@ -519,6 +758,9 @@ class MainWindow(QMainWindow):
 
     def install_update_from_github(self, remote_sha):
         app_dir = Path(__file__).resolve().parent
+        write_error = self.get_app_dir_write_error()
+        if write_error is not None:
+            raise PermissionError(self.update_permission_message(write_error))
 
         allowed_extensions = {
             ".py",
@@ -629,6 +871,16 @@ class MainWindow(QMainWindow):
 
             short_sha = remote_sha[:7]
             self.available_update_sha = remote_sha
+            write_error = self.get_app_dir_write_error()
+            if write_error is not None:
+                self.set_update_button_state("available", "Update needs admin")
+                if not silent and not self.silent_update_test:
+                    QMessageBox.warning(
+                        self,
+                        "Update needs administrator rights",
+                        self.update_permission_message(write_error),
+                    )
+                return
 
             if silent or self.silent_update_test:
                 self.set_update_button_state("disabled", "Updating…")
@@ -678,6 +930,16 @@ class MainWindow(QMainWindow):
 
     def on_update_button_clicked(self):
         if not self.available_update_sha:
+            return
+
+        write_error = self.get_app_dir_write_error()
+        if write_error is not None:
+            QMessageBox.warning(
+                self,
+                "Update needs administrator rights",
+                self.update_permission_message(write_error),
+            )
+            self.set_update_button_state("available", "Update needs admin")
             return
 
         self.set_update_button_state("disabled", "Updating…")

@@ -21,6 +21,11 @@ def _ratings_file_path():
     return Path.home() / ".lrphoton" / "file_ratings.json"
 
 
+def _rating_key(file_path):
+    name = Path(str(file_path)).name
+    return name or str(file_path)
+
+
 class FileRatingStore:
     def __init__(self, path=None):
         self.path = Path(path) if path else _ratings_file_path()
@@ -36,7 +41,7 @@ class FileRatingStore:
 
         ratings = data.get("ratings", {}) if isinstance(data, dict) else {}
         self.ratings = {
-            str(path): rating
+            _rating_key(path): rating
             for path, rating in ratings.items()
             if rating in {"up", "down"}
         }
@@ -49,10 +54,10 @@ class FileRatingStore:
         tmp_path.replace(self.path)
 
     def get(self, file_path):
-        return self.ratings.get(_normalize_path(file_path))
+        return self.ratings.get(_rating_key(file_path))
 
     def set(self, file_path, rating):
-        key = _normalize_path(file_path)
+        key = _rating_key(file_path)
         if rating in {"up", "down"}:
             self.ratings[key] = rating
         else:

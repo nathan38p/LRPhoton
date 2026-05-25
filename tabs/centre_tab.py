@@ -1,12 +1,15 @@
+import fnmatch
 from pathlib import Path
 import re
 import h5py
 
 import numpy as np
-from PySide6.QtCore import Qt, QEvent
+from PySide6.QtCore import Qt, QEvent, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget, QFileDialog, QMessageBox, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QPushButton, QDoubleSpinBox, QSpinBox, QTextEdit, QGroupBox, QSlider, QSizePolicy
+    QPushButton, QDoubleSpinBox, QSpinBox, QTextEdit, QGroupBox, QSlider, QSizePolicy,
+    QLineEdit, QListWidget, QListWidgetItem, QAbstractItemView, QScrollArea, QSplitter,
+    QCheckBox,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -26,10 +29,13 @@ from .ui_style import (
     FRAME_NAV_SPACING,
     FRAME_SPIN_WIDTH,
     GROUP_BOX_MARGINS,
+    GROUP_BOX_STYLE,
     PAGE_MARGINS,
+    PANEL_MARGINS,
     clear_plot_canvas,
     style_q_geometry_buttons,
 )
+from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path
 
 
 # ============================================================
@@ -702,11 +708,14 @@ class PlotCanvas(FigureCanvas):
 # ============================================================
 
 class CentreTab(QWidget):
+    folder_changed = Signal(Path)
+
     def __init__(self, user_email="", default_xc=ID13_DEFAULT_CENTER_X, default_yc=ID13_DEFAULT_CENTER_Y):
         super().__init__()
 
         self.user_email = user_email
         self.input_file = None
+        self.current_folder = Path.home()
         self.img_raw = None
         self.img = None
         self.xc = default_xc
@@ -717,8 +726,14 @@ class CentreTab(QWidget):
         self.current_header = {}
         self.file_loaded = False
         self.q_axis_unit = "nm"
+        self.display_vmin = None
+        self.display_vmax = None
+        self.display_data_min = 0.0
+        self.display_data_max = 1.0
+        self._syncing_folder = False
 
         self._build_ui(default_xc, default_yc)
+        self.refresh_files()
 
     def _build_ui(self, default_xc, default_yc):
         main = QGridLayout(self)
@@ -726,22 +741,30 @@ class CentreTab(QWidget):
         main.setSpacing(BLOCK_SPACING)
 
         image_box = QGroupBox("Scattering pattern")
-        control_box = QGroupBox("Center tools")
         graph_box = QGroupBox("I(q) directions")
 
         self.image_box = image_box
-        self.control_box = control_box
         self.graph_box = graph_box
 
         image_box.setMinimumWidth(0)
         image_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-        control_box.setFixedWidth(FILE_BROWSER_WIDTH)
-        control_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         graph_box.setMinimumWidth(0)
         graph_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
 
+        center_panel = QWidget()
+        center_panel.setFixedWidth(FILE_BROWSER_WIDTH)
+        center_layout = QVBoxLayout(center_panel)
+        center_layout.setContentsMargins(*PANEL_MARGINS)
+        center_layout.setSpacing(BLOCK_SPACING)
+
+        center_splitter = QSplitter(Qt.Vertical)
+        self.center_splitter = center_splitter
+        center_splitter.setChildrenCollapsible(True)
+        center_splitter.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        center_layout.addWidget(center_splitter, stretch=1)
+
         main.addWidget(image_box, 0, 0)
-        main.addWidget(control_box, 0, 1, alignment=Qt.AlignHCenter)
+        main.addWidget(center_panel, 0, 1, alignment=Qt.AlignHCenter)
         main.addWidget(graph_box, 0, 2)
 
         self.main_grid = main
@@ -852,11 +875,92 @@ class CentreTab(QWidget):
         adjust.addWidget(move_box, stretch=1)
         adjust.addWidget(rotate_box, stretch=1)
 
-        control = QVBoxLayout(control_box)
-        control.setContentsMargins(*GROUP_BOX_MARGINS)
-        control.setSpacing(6)
+        file_box = QGroupBox("File browser")
+        file_box.setStyleSheet(GROUP_BOX_STYLE)
+        file_box.setMinimumHeight(0)
+        file_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        file_layout = QVBoxLayout(file_box)
+        file_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        file_layout.setSpacing(6)
 
-        self.btn_open = QPushButton("Open EDF / H5")
+        self.folder_path = QLineEdit(str(self.current_folder))
+        self.folder_path.returnPressed.connect(self.refresh_files)
+        file_layout.addWidget(self.folder_path)
+
+        browse_button = QPushButton("Browse")
+        browse_button.clicked.connect(self.choose_folder)
+        file_layout.addWidget(browse_button)
+
+        filters_layout = QGridLayout()
+        self.name_filter = QLineEdit("*")
+        self.extension_filter = QLineEdit("*.edf *.h5 *.hdf5")
+        self.name_filter.textChanged.connect(self.refresh_files)
+        self.extension_filter.textChanged.connect(self.refresh_files)
+        filters_layout.addWidget(QLabel("Name:"), 0, 0)
+        filters_layout.addWidget(self.name_filter, 0, 1)
+        filters_layout.addWidget(QLabel("Extensions:"), 1, 0)
+        filters_layout.addWidget(self.extension_filter, 1, 1)
+        file_layout.addLayout(filters_layout)
+
+        file_options_layout = QHBoxLayout()
+        file_options_layout.setContentsMargins(0, 0, 0, 0)
+        self.show_subfolders_checkbox = QCheckBox("Show subfolders")
+        self.show_subfolders_checkbox.setChecked(False)
+        self.show_subfolders_checkbox.stateChanged.connect(self.refresh_files)
+        self.only_thumbs_up_checkbox = QCheckBox("Only 👍")
+        self.only_thumbs_up_checkbox.setChecked(False)
+        self.only_thumbs_up_checkbox.stateChanged.connect(self.refresh_files)
+        file_options_layout.addWidget(self.show_subfolders_checkbox)
+        file_options_layout.addWidget(self.only_thumbs_up_checkbox)
+        file_options_layout.addStretch(1)
+        file_layout.addLayout(file_options_layout)
+
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.refresh_files)
+        file_layout.addWidget(refresh_button)
+
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        install_file_rating_menu(self.file_list)
+        self.file_list.itemClicked.connect(self.open_selected_file)
+        file_layout.addWidget(self.file_list, stretch=1)
+
+        tools_box = QGroupBox("Center tools")
+        self.control_box = tools_box
+        tools_box.setStyleSheet(GROUP_BOX_STYLE)
+        tools_box.setMinimumHeight(0)
+        tools_box.setMinimumWidth(0)
+        tools_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+        tools_box_layout = QVBoxLayout(tools_box)
+        tools_box_layout.setContentsMargins(6, 18, 6, 6)
+        tools_box_layout.setSpacing(0)
+        tools_content = QWidget()
+        tools_content.setStyleSheet("background-color: #eeeeee;")
+        control = QVBoxLayout(tools_content)
+        control.setContentsMargins(0, 0, 0, 0)
+        control.setSpacing(4)
+
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QScrollArea.NoFrame)
+        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_scroll.setMinimumHeight(0)
+        controls_scroll.setMinimumWidth(0)
+        controls_scroll.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        controls_scroll.setStyleSheet("""
+            QScrollArea {
+                background-color: #eeeeee;
+                border: 0px;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color: #eeeeee;
+            }
+        """)
+        controls_scroll.viewport().setStyleSheet("background-color: #eeeeee;")
+        controls_scroll.setWidget(tools_content)
+        tools_box_layout.addWidget(controls_scroll)
 
         preset_layout = QHBoxLayout()
         preset_layout.setSpacing(4)
@@ -899,8 +1003,34 @@ class CentreTab(QWidget):
         self.status.setReadOnly(True)
         self.status.setText("")
 
-        control.addWidget(self.btn_open)
         control.addLayout(preset_layout)
+
+        contrast_box = QGroupBox("Contrast")
+        contrast_box.setStyleSheet(GROUP_BOX_STYLE)
+        contrast_layout = QGridLayout(contrast_box)
+        contrast_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        contrast_layout.setSpacing(4)
+        self.vmin_label = QLabel("Min: -")
+        self.vmax_label = QLabel("Max: -")
+        self.vmin_slider = QSlider(Qt.Horizontal)
+        self.vmax_slider = QSlider(Qt.Horizontal)
+        self.vmin_slider.setRange(0, 1000)
+        self.vmax_slider.setRange(0, 1000)
+        self.vmin_slider.setValue(0)
+        self.vmax_slider.setValue(1000)
+        self.auto_contrast_button = QPushButton("Auto")
+        self.auto_contrast_button.setFixedWidth(54)
+        self.auto_contrast_button.clicked.connect(self.auto_current_image_contrast)
+        self.lock_contrast_checkbox = QCheckBox("Lock min/max")
+        self.lock_contrast_checkbox.setChecked(False)
+        contrast_layout.addWidget(self.vmin_label, 0, 0)
+        contrast_layout.addWidget(self.vmin_slider, 0, 1)
+        contrast_layout.addWidget(self.auto_contrast_button, 0, 2, 2, 1)
+        contrast_layout.addWidget(self.vmax_label, 1, 0)
+        contrast_layout.addWidget(self.vmax_slider, 1, 1)
+        contrast_layout.addWidget(self.lock_contrast_checkbox, 2, 0, 1, 3)
+        control.addWidget(contrast_box)
+
         self.centre_x_label = QLabel("Center X:")
         self.centre_y_label = QLabel("Center Y:")
         self._add_control(control, self.centre_x_label, self.edit_xc)
@@ -910,7 +1040,16 @@ class CentreTab(QWidget):
         self._add_control(control, "Pixel Y (mm):", self.edit_px_y)
         self._add_control(control, "Wavelength (Å):", self.edit_lambda)
         self._add_control(control, "Beamstop radius (px):", self.edit_beamstop_radius)
-        control.addWidget(self.status)
+        self.status.hide()
+        control.addStretch(1)
+
+        center_splitter.addWidget(file_box)
+        center_splitter.addWidget(tools_box)
+        center_splitter.setStretchFactor(0, 1)
+        center_splitter.setStretchFactor(1, 1)
+        self.set_initial_center_splitter_sizes()
+        QTimer.singleShot(0, self.set_initial_center_splitter_sizes)
+        QTimer.singleShot(100, self.set_initial_center_splitter_sizes)
 
         graph_layout = QVBoxLayout(graph_box)
         graph_layout.setContentsMargins(*GROUP_BOX_MARGINS)
@@ -970,8 +1109,6 @@ class CentreTab(QWidget):
         ]:
             widget.setEnabled(False)
 
-        self.btn_open.clicked.connect(self.open_image_file)
-
         self.btn_xenocs.clicked.connect(lambda: self.set_instrument_mode("XENOCS"))
         self.btn_id02.clicked.connect(lambda: self.set_instrument_mode("ID02"))
         self.btn_id13.clicked.connect(lambda: self.set_instrument_mode("ID13"))
@@ -994,6 +1131,8 @@ class CentreTab(QWidget):
         self.edit_px_y.valueChanged.connect(self.manual_params_changed)
         self.edit_lambda.valueChanged.connect(self.manual_params_changed)
         self.edit_beamstop_radius.valueChanged.connect(self.manual_params_changed)
+        self.vmin_slider.valueChanged.connect(self.update_image_contrast_from_sliders)
+        self.vmax_slider.valueChanged.connect(self.update_image_contrast_from_sliders)
 
         self.set_controls_enabled(False)
         self.update_centre_warning_labels()
@@ -1038,12 +1177,22 @@ class CentreTab(QWidget):
         self.edit_distance.setEnabled(enabled)
         self.edit_lambda.setEnabled(enabled)
         self.edit_beamstop_radius.setEnabled(enabled)
+        self.vmin_slider.setEnabled(enabled)
+        self.vmax_slider.setEnabled(enabled)
+        self.auto_contrast_button.setEnabled(enabled)
+        self.lock_contrast_checkbox.setEnabled(enabled)
 
         if enabled:
             self.update_custom_editing_state()
         else:
             self.edit_px_x.setEnabled(False)
             self.edit_px_y.setEnabled(False)
+
+    def set_initial_center_splitter_sizes(self):
+        if not hasattr(self, "center_splitter"):
+            return
+        height = max(2, self.center_splitter.height())
+        self.center_splitter.setSizes([height // 2, height - height // 2])
 
     def set_instrument_mode(self, mode):
         self.instrument_mode = mode
@@ -1190,30 +1339,98 @@ class CentreTab(QWidget):
         self.edit_px_y.blockSignals(False)
         self.edit_lambda.blockSignals(False)
 
-    def open_image_file(self):
-        file, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open EDF or H5 file",
-            "",
-            "Image data (*.edf *.h5 *.hdf5);;EDF (*.edf);;HDF5 (*.h5 *.hdf5);;All files (*)"
-        )
-        if not file:
+    def choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choose folder", str(self.current_folder))
+        if folder:
+            self.current_folder = Path(folder)
+            self.folder_path.setText(str(self.current_folder))
+            self.refresh_files()
+
+    def refresh_files(self):
+        if not hasattr(self, "file_list"):
             return
 
+        folder = Path(self.folder_path.text()).expanduser()
+        if not folder.exists() or not folder.is_dir():
+            return
+
+        self.current_folder = folder
+        if not self._syncing_folder:
+            self.folder_changed.emit(self.current_folder)
+        self.file_list.clear()
+
+        extension_patterns = self.extension_filter.text().split() or ["*.edf", "*.h5", "*.hdf5"]
+        name_pattern = self.name_filter.text().strip() or "*"
+        iterator = folder.rglob("*") if self.show_subfolders_checkbox.isChecked() else folder.glob("*")
+
+        files = []
+        for path in iterator:
+            if not path.is_file():
+                continue
+            lower_name = path.name.lower()
+            if not any(fnmatch.fnmatch(lower_name, pattern.lower()) for pattern in extension_patterns):
+                continue
+            if not fnmatch.fnmatch(path.name, name_pattern):
+                continue
+            if self.only_thumbs_up_checkbox.isChecked() and not is_file_rated_up(path):
+                continue
+            files.append(path)
+
+        for path in sorted(files):
+            item = QListWidgetItem(str(path.relative_to(folder)))
+            set_item_file_path(item, path)
+            self.file_list.addItem(item)
+
+    def set_folder_from_external_tab(self, folder):
+        folder = Path(folder).expanduser()
+        if folder.exists() and folder.is_dir():
+            self._syncing_folder = True
+            self.current_folder = folder
+            if hasattr(self, "folder_path"):
+                self.folder_path.setText(str(self.current_folder))
+                self.refresh_files()
+            self._syncing_folder = False
+
+    def open_selected_file(self, item=None):
+        if item is None:
+            item = self.file_list.currentItem() if hasattr(self, "file_list") else None
+        if item is None:
+            self.open_image_file()
+            return
+
+        path = Path(item.data(Qt.UserRole) or self.current_folder / item.text())
+        self.open_image_file(path)
+
+    def open_image_file(self, file_path=None):
+        if file_path is None:
+            file, _ = QFileDialog.getOpenFileName(
+                self,
+                "Open EDF or H5 file",
+                str(self.current_folder),
+                "Image data (*.edf *.h5 *.hdf5);;EDF (*.edf);;HDF5 (*.h5 *.hdf5);;All files (*)"
+            )
+            if not file:
+                return
+            file_path = file
+
         try:
-            path = Path(file)
+            path = Path(file_path)
             suffix = path.suffix.lower()
 
             if suffix == ".edf":
-                img, header, *_ = read_edf_file(file)
+                img, header, *_ = read_edf_file(path)
                 file_type = "EDF"
             elif suffix in [".h5", ".hdf5"]:
-                img, header = read_h5_first_image(file)
+                img, header = read_h5_first_image(path)
                 file_type = "H5"
             else:
                 raise ValueError("Unsupported file format. Please select an EDF, H5 or HDF5 file.")
 
             self.input_file = path
+            self.current_folder = path.parent
+            if hasattr(self, "folder_path"):
+                self.folder_path.setText(str(self.current_folder))
+            self.folder_changed.emit(self.current_folder)
             self.current_header = header
             self.file_loaded = True
             self.set_controls_enabled(True)
@@ -1221,6 +1438,8 @@ class CentreTab(QWidget):
             self.img_raw = img.astype(float)
             self.img_raw[self.img_raw > 4e9] = np.nan
             self.img_raw[self.img_raw < 0] = np.nan
+            if self.display_vmin is None or not self.lock_contrast_checkbox.isChecked():
+                self.auto_set_image_contrast(self.img_raw)
 
             self.apply_instrument_preset()
 
@@ -1268,12 +1487,86 @@ class CentreTab(QWidget):
             mask = (x - self.xc) ** 2 + (y - self.yc) ** 2 <= r ** 2
             self.img[mask] = np.nan
 
+    def auto_set_image_contrast(self, image):
+        img_disp = image.astype(float).copy()
+        img_disp[~np.isfinite(img_disp)] = np.nan
+        img_disp[img_disp < 0] = np.nan
+        with np.errstate(invalid="ignore", divide="ignore"):
+            display = np.log10(img_disp + 1)
+
+        finite = display[np.isfinite(display)]
+        if finite.size == 0:
+            self.display_data_min = 0.0
+            self.display_data_max = 1.0
+        else:
+            self.display_data_min = float(np.nanpercentile(finite, 1))
+            self.display_data_max = float(np.nanpercentile(finite, 99.5))
+            if self.display_data_max <= self.display_data_min:
+                self.display_data_max = self.display_data_min + 1.0
+
+        self.display_vmin = self.display_data_min
+        self.display_vmax = self.display_data_max
+        self.sync_image_contrast_sliders()
+
+    def auto_current_image_contrast(self):
+        if self.img_raw is None:
+            return
+        self.auto_set_image_contrast(self.img_raw)
+        self.show_center_image()
+
+    def sync_image_contrast_sliders(self):
+        span = self.display_data_max - self.display_data_min
+        if span <= 0:
+            self.vmin_label.setText("Min: -")
+            self.vmax_label.setText("Max: -")
+            return
+
+        min_pos = int(round((self.display_vmin - self.display_data_min) / span * 1000))
+        max_pos = int(round((self.display_vmax - self.display_data_min) / span * 1000))
+        min_pos = max(0, min(1000, min_pos))
+        max_pos = max(0, min(1000, max_pos))
+
+        self.vmin_slider.blockSignals(True)
+        self.vmax_slider.blockSignals(True)
+        self.vmin_slider.setValue(min_pos)
+        self.vmax_slider.setValue(max_pos)
+        self.vmin_slider.blockSignals(False)
+        self.vmax_slider.blockSignals(False)
+        self.vmin_label.setText(f"Min: {self.display_vmin:.3g}")
+        self.vmax_label.setText(f"Max: {self.display_vmax:.3g}")
+
+    def update_image_contrast_from_sliders(self):
+        span = self.display_data_max - self.display_data_min
+        if span <= 0:
+            return
+
+        min_pos = self.vmin_slider.value()
+        max_pos = self.vmax_slider.value()
+        if min_pos >= max_pos:
+            sender = self.sender()
+            if sender is self.vmin_slider:
+                max_pos = min(1000, min_pos + 1)
+                self.vmax_slider.blockSignals(True)
+                self.vmax_slider.setValue(max_pos)
+                self.vmax_slider.blockSignals(False)
+            else:
+                min_pos = max(0, max_pos - 1)
+                self.vmin_slider.blockSignals(True)
+                self.vmin_slider.setValue(min_pos)
+                self.vmin_slider.blockSignals(False)
+
+        self.display_vmin = self.display_data_min + span * min_pos / 1000.0
+        self.display_vmax = self.display_data_min + span * max_pos / 1000.0
+        self.vmin_label.setText(f"Min: {self.display_vmin:.3g}")
+        self.vmax_label.setText(f"Max: {self.display_vmax:.3g}")
+        self.show_center_image()
+
     def show_center_image(self):
         if self.img is None:
             self.canvas_img.clear_image()
             return
 
-        self.canvas_img.show_image(self.img, self.xc, self.yc, "", None, None)
+        self.canvas_img.show_image(self.img, self.xc, self.yc, "", self.display_vmin, self.display_vmax)
         ax = self.canvas_img.ax
 
         theta = np.deg2rad(self.theta_deg)

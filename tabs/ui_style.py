@@ -95,6 +95,57 @@ Q_GEOMETRY_BUTTON_ACTIVE_STYLE = """
 """
 
 
+ACTION_BUTTON_STYLE = """
+    QPushButton {
+        background-color: #ffffff;
+        color: #222222;
+        border: 1px solid #cfcfcf;
+        border-radius: 6px;
+        padding: 6px 10px;
+    }
+    QPushButton:hover {
+        background-color: #f7f7f7;
+        border-color: #b8b8b8;
+    }
+    QPushButton:pressed {
+        background-color: #ededed;
+    }
+    QPushButton:disabled {
+        background-color: #e4e4e4;
+        color: #8d8d8d;
+        border-color: #d6d6d6;
+    }
+"""
+
+
+COMPACT_COMBO_STYLE = """
+    QComboBox {
+        background-color: #ffffff;
+        color: #222222;
+        border: 1px solid #cfcfcf;
+        border-radius: 6px;
+        padding: 2px 18px 2px 6px;
+    }
+    QComboBox:hover {
+        border-color: #b8b8b8;
+    }
+    QComboBox:disabled {
+        background-color: #eeeeee;
+        color: #9a9a9a;
+        border-color: #dddddd;
+    }
+    QComboBox::drop-down {
+        border: 0px;
+        width: 16px;
+    }
+    QComboBox::down-arrow {
+        image: none;
+        width: 0px;
+        height: 0px;
+    }
+"""
+
+
 def style_q_geometry_buttons(buttons, active_mode=None, manual_button=None):
     minimum_widths = {
         "XENOCS": 72,

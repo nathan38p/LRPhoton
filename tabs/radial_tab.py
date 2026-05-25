@@ -914,6 +914,7 @@ class ImageCanvas(FigureCanvas):
         self.q_map = None
         self.last_xc = None
         self.last_yc = None
+        self.last_mask = None
 
         self.mpl_connect("scroll_event", self._on_scroll)
         self.mpl_connect("button_press_event", self._on_press)
@@ -1157,6 +1158,7 @@ class ImageCanvas(FigureCanvas):
         self.raw_image = image
         self.last_xc = xc
         self.last_yc = yc
+        self.last_mask = mask
 
         self.ax.clear()
         self.ax.set_axis_off()
@@ -1314,10 +1316,23 @@ class RadialTab(QWidget):
 
         self.image_canvas.show_image(
             self.image_canvas.raw_image,
-            self.center_x.value(),
-            self.center_y.value(),
-            None,
+            self.image_canvas.last_xc,
+            self.image_canvas.last_yc,
+            self.image_canvas.last_mask,
         )
+
+    def auto_image_intensity_limits(self):
+        if not hasattr(self, "image_canvas") or self.image_canvas.raw_image is None:
+            return
+
+        self.image_canvas.reset_display_limits()
+        self.image_canvas.show_image(
+            self.image_canvas.raw_image,
+            self.image_canvas.last_xc,
+            self.image_canvas.last_yc,
+            self.image_canvas.last_mask,
+        )
+        self.sync_image_intensity_sliders()
 
     def sync_image_intensity_sliders(self):
         data_min = self.image_canvas.display_data_min
@@ -1545,11 +1560,15 @@ class RadialTab(QWidget):
         self.canvas.setContentsMargins(0, 0, 0, 0)
         clear_plot_canvas(self.canvas)
         self.toolbar = NavigationToolbar(self.canvas, self)
+        self.fit_button = QPushButton("Fit")
+        self.fit_button.setToolTip("Fit I(q) = A q^-n on the current 1D plot")
+        self.fit_button.clicked.connect(self.open_power_law_fit_dialog)
         toolbar_box, self.toolbar_extra_layout, self.save_graph_button = make_matplotlib_toolbar_block(
             self,
             "I(q) graph",
             self.toolbar,
             option_widgets=[
+                self.fit_button,
                 self.plot_mode,
                 self.show_legend,
             ],
@@ -1595,8 +1614,10 @@ class RadialTab(QWidget):
         image_layout.addWidget(self.image_canvas, stretch=1)
         image_layout.addWidget(self.image_coordinate_label, stretch=0)
         
-        image_limits_layout = QGridLayout()
-        image_limits_layout.setContentsMargins(0, 0, 0, 0)
+        image_limits_box = QGroupBox("Contrast")
+        image_limits_box.setStyleSheet(GROUP_BOX_STYLE)
+        image_limits_layout = QGridLayout(image_limits_box)
+        image_limits_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         image_limits_layout.setHorizontalSpacing(6)
         image_limits_layout.setVerticalSpacing(2)
 
@@ -1604,6 +1625,11 @@ class RadialTab(QWidget):
         self.image_vmax_label = QLabel("Max: -")
         self.image_vmin_label.setAlignment(Qt.AlignCenter)
         self.image_vmax_label.setAlignment(Qt.AlignCenter)
+        self.image_lock_contrast_checkbox = QCheckBox("Lock min/max")
+        self.image_lock_contrast_checkbox.setToolTip("Keep current contrast limits when changing files or recalculating")
+        self.image_auto_contrast_button = QPushButton("Auto")
+        self.image_auto_contrast_button.setFixedWidth(54)
+        self.image_auto_contrast_button.clicked.connect(self.auto_image_intensity_limits)
 
         self.image_vmin_slider = QSlider(Qt.Horizontal)
         self.image_vmax_slider = QSlider(Qt.Horizontal)
@@ -1614,10 +1640,12 @@ class RadialTab(QWidget):
 
         image_limits_layout.addWidget(self.image_vmin_label, 0, 0)
         image_limits_layout.addWidget(self.image_vmin_slider, 0, 1)
+        image_limits_layout.addWidget(self.image_auto_contrast_button, 0, 2, 2, 1)
         image_limits_layout.addWidget(self.image_vmax_label, 1, 0)
         image_limits_layout.addWidget(self.image_vmax_slider, 1, 1)
+        image_limits_layout.addWidget(self.image_lock_contrast_checkbox, 2, 0, 1, 3)
 
-        image_layout.addLayout(image_limits_layout)
+        image_layout.addWidget(image_limits_box)
 
         self.image_vmin_slider.valueChanged.connect(self.update_image_intensity_limits)
         self.image_vmax_slider.valueChanged.connect(self.update_image_intensity_limits)
@@ -1700,9 +1728,9 @@ class RadialTab(QWidget):
             self.frame_slider, self.prev_frame_button, self.next_frame_button,
             self.use_sector,
             self.sector_min, self.sector_max,
-            self.n_bins, self.plot_mode, self.show_legend, self.integrate_button,
+            self.n_bins, self.plot_mode, self.fit_button, self.show_legend, self.integrate_button,
             self.image_vmin_label, self.image_vmax_label,
-            self.image_vmin_slider, self.image_vmax_slider,
+            self.image_vmin_slider, self.image_vmax_slider, self.image_lock_contrast_checkbox, self.image_auto_contrast_button,
         ]:
             widget.setEnabled(enabled)
 
@@ -1853,7 +1881,8 @@ class RadialTab(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Choose folder", str(self.current_folder))
         if folder:
             self.current_folder = Path(folder)
-            self.image_canvas.reset_display_limits()
+            if not self.image_lock_contrast_checkbox.isChecked():
+                self.image_canvas.reset_display_limits()
             self.folder_path.setText(str(self.current_folder))
             self.refresh_files()
 
@@ -1911,7 +1940,8 @@ class RadialTab(QWidget):
 
     def selection_changed(self):
         selected = self.selected_files()
-        self.image_canvas.reset_display_limits()
+        if not self.image_lock_contrast_checkbox.isChecked():
+            self.image_canvas.reset_display_limits()
         self.set_controls_enabled(bool(selected))
 
         self.h5_dataset_name = None
@@ -1953,7 +1983,8 @@ class RadialTab(QWidget):
 
     def set_instrument_mode(self, mode):
         self.instrument_mode = mode
-        self.image_canvas.reset_display_limits()
+        if not self.image_lock_contrast_checkbox.isChecked():
+            self.image_canvas.reset_display_limits()
         buttons = {
             "XENOCS": self.btn_xenocs,
             "ID02": self.btn_id02,
@@ -2344,6 +2375,207 @@ class RadialTab(QWidget):
     def update_id13_comparison(self):
         if self.selected_files() and self.last_results:
             self.integrate_selected_files()
+
+    def open_power_law_fit_dialog(self):
+        if not self.last_results:
+            QMessageBox.warning(self, "No curves", "Run a radial integration before fitting.")
+            return
+        if self.plot_mode.currentText() in ["2θ linear", "2θ log"]:
+            QMessageBox.warning(self, "Not an I(q) plot", "Power-law fitting is only available on q-based I(q) plots.")
+            return
+        if self.plot_mode.currentText() == "Kratky":
+            QMessageBox.warning(self, "Kratky plot", "Switch to an I(q) mode before fitting I(q) = A q^-n.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Power-law fit")
+        dialog.resize(900, 650)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        controls = QVBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(6)
+        curve_row = QHBoxLayout()
+        curve_row.setContentsMargins(0, 0, 0, 0)
+        curve_row.setSpacing(8)
+        fit_row = QHBoxLayout()
+        fit_row.setContentsMargins(0, 0, 0, 0)
+        fit_row.setSpacing(8)
+
+        curve_combo = QComboBox()
+        for label in self.last_results:
+            curve_combo.addItem(label, label)
+        for label in self.last_comparison_results:
+            curve_combo.addItem(label, label)
+
+        exponent_combo = QComboBox()
+        exponent_combo.addItems(["free n", "q^-1", "q^-2", "q^-3", "q^-4"])
+
+        q_min_spin = QDoubleSpinBox()
+        q_max_spin = QDoubleSpinBox()
+        for spin in (q_min_spin, q_max_spin):
+            spin.setDecimals(6)
+            spin.setRange(0.0, 1e9)
+            spin.setSingleStep(0.01)
+            spin.setMinimumWidth(110)
+
+        xlim = self.canvas.ax.get_xlim()
+        q_min_spin.setValue(max(0.0, float(min(xlim))))
+        q_max_spin.setValue(max(0.0, float(max(xlim))))
+
+        fit_button = QPushButton("Fit")
+        result_label = QLabel("I(q) = A q^-n")
+        result_label.setMinimumWidth(260)
+        coordinate_label = QLabel("q = - | I = -")
+        coordinate_label.setMinimumHeight(26)
+        coordinate_label.setAlignment(Qt.AlignCenter)
+        coordinate_label.setStyleSheet("""
+            QLabel {
+                background-color: #f4f4f4;
+                border-radius: 8px;
+                padding: 5px;
+                font-family: Menlo, Monaco, monospace;
+                font-size: 11px;
+            }
+        """)
+
+        curve_row.addWidget(QLabel("Curve:"))
+        curve_row.addWidget(curve_combo, stretch=1)
+        fit_row.addWidget(QLabel("Model:"))
+        fit_row.addWidget(exponent_combo)
+        fit_row.addWidget(QLabel("q min:"))
+        fit_row.addWidget(q_min_spin)
+        fit_row.addWidget(QLabel("q max:"))
+        fit_row.addWidget(q_max_spin)
+        fit_row.addWidget(fit_button)
+        fit_row.addWidget(result_label, stretch=1)
+        controls.addLayout(curve_row)
+        controls.addLayout(fit_row)
+        layout.addLayout(controls)
+
+        fig = Figure()
+        fit_canvas = FigureCanvas(fig)
+        fit_ax = fig.add_subplot(111)
+        fit_toolbar = NavigationToolbar(fit_canvas, dialog)
+        fit_toolbar.coordinates = False
+        layout.addWidget(fit_toolbar)
+        layout.addWidget(fit_canvas, stretch=1)
+        layout.addWidget(coordinate_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        fit_state = {"x_fit": None, "y_fit": None, "label": None}
+
+        def curve_arrays(label):
+            if label in self.last_results:
+                q, intensity, _counts = self.last_results[label]
+            elif label in self.last_comparison_results:
+                q, intensity, _counts, _wavelength = self.last_comparison_results[label]
+            else:
+                return None, None
+            return np.asarray(self.make_plot_x(q), dtype=float), np.asarray(intensity, dtype=float)
+
+        def redraw_fit_plot():
+            fit_ax.clear()
+            mode = self.plot_mode.currentText()
+
+            for line in self.canvas.ax.get_lines():
+                if line.get_label().startswith("_"):
+                    continue
+                fit_ax.plot(
+                    line.get_xdata(),
+                    line.get_ydata(),
+                    color=line.get_color(),
+                    linewidth=line.get_linewidth(),
+                    linestyle=line.get_linestyle(),
+                    label=line.get_label(),
+                )
+
+            if fit_state["x_fit"] is not None:
+                fit_ax.plot(
+                    fit_state["x_fit"],
+                    fit_state["y_fit"],
+                    color="black",
+                    linestyle="--",
+                    linewidth=2.0,
+                    label=fit_state["label"],
+                )
+
+            fit_ax.set_xscale(self.canvas.ax.get_xscale())
+            fit_ax.set_yscale(self.canvas.ax.get_yscale())
+            fit_ax.set_xlabel(self.q_axis_label())
+            fit_ax.set_ylabel("Intensity / a.u." if mode != "Kratky" else "q²I(q)")
+            fit_ax.grid(True, which="both")
+            fit_ax.legend(loc="best")
+            fit_ax.set_xlim(self.canvas.ax.get_xlim())
+            fit_ax.set_ylim(self.canvas.ax.get_ylim())
+            fig.tight_layout()
+            fit_canvas.draw_idle()
+
+        def run_fit():
+            label = curve_combo.currentData()
+            x, y = curve_arrays(label)
+            if x is None:
+                return
+
+            q_min = min(q_min_spin.value(), q_max_spin.value())
+            q_max = max(q_min_spin.value(), q_max_spin.value())
+            valid = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0) & (x >= q_min) & (x <= q_max)
+            if np.count_nonzero(valid) < 2:
+                QMessageBox.warning(dialog, "Fit impossible", "Not enough positive I(q) points in this q range.")
+                return
+
+            x_fit_data = x[valid]
+            y_fit_data = y[valid]
+            log_q = np.log(x_fit_data)
+            log_i = np.log(y_fit_data)
+            model_text = exponent_combo.currentText()
+
+            if model_text == "free n":
+                slope, log_a = np.polyfit(log_q, log_i, 1)
+                exponent = -float(slope)
+            else:
+                exponent = float(model_text.replace("q^-", ""))
+                log_a = float(np.mean(log_i + exponent * log_q))
+
+            amplitude = float(np.exp(log_a))
+            q_line = np.linspace(float(np.nanmin(x_fit_data)), float(np.nanmax(x_fit_data)), 300)
+            y_line = amplitude * q_line ** (-exponent)
+            predicted = amplitude * x_fit_data ** (-exponent)
+            residual = log_i - np.log(predicted)
+            rmse = float(np.sqrt(np.mean(residual ** 2)))
+
+            fit_state["x_fit"] = q_line
+            fit_state["y_fit"] = y_line
+            fit_state["label"] = f"{label} fit: q^-{exponent:.3g}"
+            result_label.setText(f"A = {amplitude:.4g} | n = {exponent:.4g} | log RMSE = {rmse:.3g}")
+            redraw_fit_plot()
+
+        def update_fit_coordinates(event):
+            if event.inaxes != fit_ax or event.xdata is None or event.ydata is None:
+                coordinate_label.setText("q = - | I = -")
+                return
+            unit_label = "Å⁻¹" if self.q_axis_unit == "A" else "nm⁻¹"
+            coordinate_label.setText(f"q = {event.xdata:.6g} {unit_label} | I = {event.ydata:.6g}")
+
+        def clear_fit_coordinates(event=None):
+            coordinate_label.setText("q = - | I = -")
+
+        fit_button.clicked.connect(run_fit)
+        curve_combo.currentIndexChanged.connect(redraw_fit_plot)
+        exponent_combo.currentIndexChanged.connect(redraw_fit_plot)
+        q_min_spin.valueChanged.connect(redraw_fit_plot)
+        q_max_spin.valueChanged.connect(redraw_fit_plot)
+        fit_canvas.mpl_connect("motion_notify_event", update_fit_coordinates)
+        fit_canvas.mpl_connect("axes_leave_event", clear_fit_coordinates)
+
+        redraw_fit_plot()
+        dialog.exec()
 
 
     def update_graph_coordinates(self, event):

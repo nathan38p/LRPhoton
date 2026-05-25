@@ -5,5 +5,5 @@ h5py
 fabio
 requests
 hdf5plugin
+scipy
 pyFAI
-requests

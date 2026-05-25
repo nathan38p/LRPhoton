@@ -692,6 +692,10 @@ class DatPlotTab(QWidget):
 
         self.plot_mode.setFixedWidth(120)
 
+        self.fit_button = QPushButton("Fit")
+        self.fit_button.setToolTip("Fit I(q) = A q^-n on the current 1D plot")
+        self.fit_button.clicked.connect(self.open_power_law_fit_dialog)
+
         self.show_legend = QCheckBox("Legend")
         self.show_legend.setChecked(True)
         self.show_legend.stateChanged.connect(self.update_plot)
@@ -700,6 +704,7 @@ class DatPlotTab(QWidget):
             title="Plot",
             toolbar=self.toolbar,
             option_widgets=[
+                self.fit_button,
                 self.plot_mode,
                 self.show_legend,
             ],
@@ -1076,6 +1081,214 @@ class DatPlotTab(QWidget):
         ax.set_xlim(previous_xlim)
         ax.set_ylim(previous_ylim)
         finalize_plot_canvas(self.canvas)
+
+    def open_power_law_fit_dialog(self):
+        if not self.curves:
+            QMessageBox.warning(self, "No curves", "Load at least one I(q) curve before fitting.")
+            return
+        if self.curves_are_really_0_to_360():
+            QMessageBox.warning(self, "Not an I(q) plot", "Power-law fitting is only available for I(q) curves.")
+            return
+        if self.plot_mode.currentText() == "Kratky":
+            QMessageBox.warning(self, "Kratky plot", "Switch to an I(q) mode before fitting I(q) = A q^-n.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Power-law fit")
+        dialog.resize(900, 650)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        controls = QVBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(6)
+        curve_row = QHBoxLayout()
+        curve_row.setContentsMargins(0, 0, 0, 0)
+        curve_row.setSpacing(8)
+        fit_row = QHBoxLayout()
+        fit_row.setContentsMargins(0, 0, 0, 0)
+        fit_row.setSpacing(8)
+
+        curve_combo = QComboBox()
+        for key, curve in self.curves.items():
+            curve_combo.addItem(curve["legend"], key)
+
+        exponent_combo = QComboBox()
+        exponent_combo.addItems(["free n", "q^-1", "q^-2", "q^-3", "q^-4"])
+
+        q_min_spin = QDoubleSpinBox()
+        q_max_spin = QDoubleSpinBox()
+        for spin in (q_min_spin, q_max_spin):
+            spin.setDecimals(6)
+            spin.setRange(0.0, 1e9)
+            spin.setSingleStep(0.01)
+            spin.setMinimumWidth(110)
+
+        xlim = self.canvas.ax.get_xlim()
+        q_min_spin.setValue(max(0.0, float(min(xlim))))
+        q_max_spin.setValue(max(0.0, float(max(xlim))))
+
+        fit_button = QPushButton("Fit")
+        result_label = QLabel("I(q) = A q^-n")
+        result_label.setMinimumWidth(260)
+        coordinate_label = QLabel("q = - | I = -")
+        coordinate_label.setMinimumHeight(26)
+        coordinate_label.setAlignment(Qt.AlignCenter)
+        coordinate_label.setStyleSheet("""
+            QLabel {
+                background-color: #f4f4f4;
+                border-radius: 8px;
+                padding: 5px;
+                font-family: Menlo, Monaco, monospace;
+                font-size: 11px;
+            }
+        """)
+
+        curve_row.addWidget(QLabel("Curve:"))
+        curve_row.addWidget(curve_combo, stretch=1)
+        fit_row.addWidget(QLabel("Model:"))
+        fit_row.addWidget(exponent_combo)
+        fit_row.addWidget(QLabel("q min:"))
+        fit_row.addWidget(q_min_spin)
+        fit_row.addWidget(QLabel("q max:"))
+        fit_row.addWidget(q_max_spin)
+        fit_row.addWidget(fit_button)
+        fit_row.addWidget(result_label, stretch=1)
+        controls.addLayout(curve_row)
+        controls.addLayout(fit_row)
+        layout.addLayout(controls)
+
+        fig = Figure()
+        fit_canvas = FigureCanvas(fig)
+        fit_ax = fig.add_subplot(111)
+        fit_toolbar = NavigationToolbar(fit_canvas, dialog)
+        fit_toolbar.coordinates = False
+        layout.addWidget(fit_toolbar)
+        layout.addWidget(fit_canvas, stretch=1)
+        layout.addWidget(coordinate_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        fit_state = {"x_fit": None, "y_fit": None, "label": None}
+
+        def current_curve_arrays():
+            key = curve_combo.currentData()
+            curve = self.curves.get(key)
+            if curve is None:
+                return None, None, None
+            x = np.asarray(self.make_plot_x(curve["x"]), dtype=float)
+            y = np.asarray(curve["y"], dtype=float)
+            return curve, x, y
+
+        def redraw_fit_plot():
+            fit_ax.clear()
+            mode = self.plot_mode.currentText()
+
+            for curve in self.curves.values():
+                x = np.asarray(self.make_plot_x(curve["x"]), dtype=float)
+                y = np.asarray(curve["y"], dtype=float)
+                valid = np.isfinite(x) & np.isfinite(y)
+                if mode in ("log linear", "log log"):
+                    valid &= x > 0
+                if mode in ("linear log", "log log"):
+                    valid &= y > 0
+                if np.any(valid):
+                    fit_ax.plot(
+                        x[valid],
+                        y[valid],
+                        linewidth=1.4,
+                        color=curve["color"],
+                        label=curve["legend"],
+                    )
+
+            if fit_state["x_fit"] is not None:
+                fit_ax.plot(
+                    fit_state["x_fit"],
+                    fit_state["y_fit"],
+                    color="black",
+                    linestyle="--",
+                    linewidth=2.0,
+                    label=fit_state["label"],
+                )
+
+            fit_ax.set_xscale(self.canvas.ax.get_xscale())
+            fit_ax.set_yscale(self.canvas.ax.get_yscale())
+            fit_ax.set_xlabel(self.q_axis_label())
+            fit_ax.set_ylabel("Intensity / a.u.")
+            fit_ax.grid(True, which="both")
+            fit_ax.legend(loc="best")
+
+            x0, x1 = self.canvas.ax.get_xlim()
+            y0, y1 = self.canvas.ax.get_ylim()
+            if np.isfinite([x0, x1, y0, y1]).all():
+                fit_ax.set_xlim(x0, x1)
+                fit_ax.set_ylim(y0, y1)
+
+            fig.tight_layout()
+            fit_canvas.draw_idle()
+
+        def run_fit():
+            curve, x, y = current_curve_arrays()
+            if curve is None:
+                return
+
+            q_min = min(q_min_spin.value(), q_max_spin.value())
+            q_max = max(q_min_spin.value(), q_max_spin.value())
+            valid = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0) & (x >= q_min) & (x <= q_max)
+            if np.count_nonzero(valid) < 2:
+                QMessageBox.warning(dialog, "Fit impossible", "Not enough positive I(q) points in this q range.")
+                return
+
+            x_fit_data = x[valid]
+            y_fit_data = y[valid]
+            log_q = np.log(x_fit_data)
+            log_i = np.log(y_fit_data)
+
+            model_text = exponent_combo.currentText()
+            if model_text == "free n":
+                slope, log_a = np.polyfit(log_q, log_i, 1)
+                exponent = -float(slope)
+            else:
+                exponent = float(model_text.replace("q^-", ""))
+                log_a = float(np.mean(log_i + exponent * log_q))
+
+            amplitude = float(np.exp(log_a))
+            q_line = np.linspace(float(np.nanmin(x_fit_data)), float(np.nanmax(x_fit_data)), 300)
+            y_line = amplitude * q_line ** (-exponent)
+            predicted = amplitude * x_fit_data ** (-exponent)
+            residual = log_i - np.log(predicted)
+            rmse = float(np.sqrt(np.mean(residual ** 2)))
+
+            fit_state["x_fit"] = q_line
+            fit_state["y_fit"] = y_line
+            fit_state["label"] = f"{curve['legend']} fit: q^-{exponent:.3g}"
+            result_label.setText(f"A = {amplitude:.4g} | n = {exponent:.4g} | log RMSE = {rmse:.3g}")
+            redraw_fit_plot()
+
+        def update_fit_coordinates(event):
+            if event.inaxes != fit_ax or event.xdata is None or event.ydata is None:
+                coordinate_label.setText("q = - | I = -")
+                return
+            unit_label = "Å⁻¹" if self.q_axis_unit == "A" else "nm⁻¹"
+            coordinate_label.setText(f"q = {event.xdata:.6g} {unit_label} | I = {event.ydata:.6g}")
+
+        def clear_fit_coordinates(event=None):
+            coordinate_label.setText("q = - | I = -")
+
+        fit_button.clicked.connect(run_fit)
+        curve_combo.currentIndexChanged.connect(redraw_fit_plot)
+        exponent_combo.currentIndexChanged.connect(redraw_fit_plot)
+        q_min_spin.valueChanged.connect(redraw_fit_plot)
+        q_max_spin.valueChanged.connect(redraw_fit_plot)
+        fit_canvas.mpl_connect("motion_notify_event", update_fit_coordinates)
+        fit_canvas.mpl_connect("axes_leave_event", clear_fit_coordinates)
+
+        redraw_fit_plot()
+        dialog.exec()
 
     def update_plot_preserving_view(self):
         ax = self.canvas.ax
@@ -1695,6 +1908,7 @@ class DatPlotTab(QWidget):
         enabled = bool(self.curves)
         for widget in [
             getattr(self, "plot_mode", None),
+            getattr(self, "fit_button", None),
             getattr(self, "show_legend", None),
             getattr(self, "save_plot_button", None),
             getattr(self, "mask_range_button", None),
