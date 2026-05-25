@@ -83,6 +83,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QStackedWidget,
     QScrollArea,
+    QSizePolicy,
     QTabBar,
     QVBoxLayout,
     QWidget
@@ -223,6 +224,7 @@ class MainWindow(QMainWindow):
         self.resize_to_available_screen()
 
         container = QWidget()
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         main_layout = QVBoxLayout(container)
         main_layout.setContentsMargins(22, 18, 22, 10)
         main_layout.setSpacing(8)
@@ -394,11 +396,11 @@ class MainWindow(QMainWindow):
         self.pages_scroll_area = QScrollArea()
         self.pages_scroll_area.setWidgetResizable(True)
         self.pages_scroll_area.setFrameShape(QFrame.NoFrame)
-        self.pages_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.pages_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.pages_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.pages_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.pages_scroll_area.setWidget(self.pages)
 
-        main_layout.addWidget(self.pages_scroll_area)
+        main_layout.addWidget(self.pages_scroll_area, 1)
 
         self.setCentralWidget(container)
         self.show()
