@@ -82,6 +82,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
     QStackedWidget,
+    QScrollArea,
     QTabBar,
     QVBoxLayout,
     QWidget
@@ -185,7 +186,7 @@ class ColoredTabBar(QTabBar):
 
     def tabSizeHint(self, index):
         size = super().tabSizeHint(index)
-        return QSize(size.width() + 10, size.height() + 2)
+        return QSize(size.width() + 4, size.height() + 2)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -222,8 +223,8 @@ class MainWindow(QMainWindow):
 
         container = QWidget()
         main_layout = QVBoxLayout(container)
-        main_layout.setContentsMargins(24, 18, 24, 24)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(8)
 
         # ============================================================
         # HEADER
@@ -231,8 +232,8 @@ class MainWindow(QMainWindow):
 
         header = QFrame()
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(8, 0, 8, 0)
-        header_layout.setSpacing(12)
+        header_layout.setContentsMargins(4, 0, 4, 0)
+        header_layout.setSpacing(8)
 
         logo_path = ensure_asset_file("LRPhoton.png")
 
@@ -389,7 +390,14 @@ class MainWindow(QMainWindow):
         """)
         self.pages.addWidget(loading_label)
 
-        main_layout.addWidget(self.pages)
+        self.pages_scroll_area = QScrollArea()
+        self.pages_scroll_area.setWidgetResizable(True)
+        self.pages_scroll_area.setFrameShape(QFrame.NoFrame)
+        self.pages_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.pages_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.pages_scroll_area.setWidget(self.pages)
+
+        main_layout.addWidget(self.pages_scroll_area)
 
         self.setCentralWidget(container)
         self.show()
@@ -407,8 +415,9 @@ class MainWindow(QMainWindow):
 
         # Start maximized on Windows and macOS for a more app-like experience.
         if sys.platform == "darwin" or sys.platform.startswith("win"):
+            self.setMinimumSize(900, 620)
             self.setGeometry(geometry)
-            self.showMaximized()
+            QTimer.singleShot(0, self.showMaximized)
             return
 
         width = min(1300, max(900, geometry.width() - 80))
@@ -1165,7 +1174,7 @@ def main():
         }
 
         QTabBar::tab {
-            padding: 7px 18px;
+            padding: 7px 12px;
             margin-right: 2px;
             border-radius: 8px;
             border: none;
