@@ -400,11 +400,6 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(self.pages_scroll_area)
 
-        # Prevent child widgets with fixed preferred sizes from forcing the
-        # top-level window wider than the Windows/UTM desktop.
-        container.setMinimumSize(0, 0)
-        self.pages_scroll_area.setMinimumSize(0, 0)
-        self.pages.setMinimumSize(0, 0)
         self.setCentralWidget(container)
         self.show()
         QApplication.processEvents()
@@ -419,32 +414,13 @@ class MainWindow(QMainWindow):
 
         geometry = screen.availableGeometry()
 
-        # On Windows inside UTM, do not use the full reported screen width.
-        # The guest can report the full virtual desktop while the visible UTM
-        # viewport is a little narrower, so the right side gets clipped. Keep
-        # the internal LRPhoton margins unchanged and only make the native
-        # top-level window slightly smaller and centered in the visible area.
+        # On Windows, force a real maximized window so LRPhoton opens in
+        # fullscreen/maximized mode like a normal desktop app.
         if sys.platform.startswith("win"):
-            self.setMinimumSize(760, 560)
-
-            def apply_windows_utm_geometry():
-                current_screen = QApplication.primaryScreen()
-                if current_screen is None:
-                    return
-
-                available = current_screen.availableGeometry()
-                self.showNormal()
-
-                width = max(760, available.width() - 96)
-                height = max(560, available.height() - 40)
-                x = available.x() + max(0, (available.width() - width) // 2)
-                y = available.y() + 28
-
-                self.setGeometry(x, y, width, height)
-
-            apply_windows_utm_geometry()
-            QTimer.singleShot(0, apply_windows_utm_geometry)
-            QTimer.singleShot(200, apply_windows_utm_geometry)
+            self.setMinimumSize(900, 620)
+            self.setGeometry(geometry)
+            QTimer.singleShot(0, self.showMaximized)
+            QTimer.singleShot(200, self.showMaximized)
             return
 
         # macOS fullscreen/maximized behaviour is cleaner with the exact
