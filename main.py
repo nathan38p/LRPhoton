@@ -414,8 +414,20 @@ class MainWindow(QMainWindow):
 
         geometry = screen.availableGeometry()
 
-        # Start maximized on Windows and macOS for a more app-like experience.
-        if sys.platform == "darwin" or sys.platform.startswith("win"):
+        # Windows maximized windows can still slightly overflow when custom
+        # title bars / DPI scaling are involved. Start with a geometry a few
+        # pixels smaller than the available area before maximizing.
+        if sys.platform.startswith("win"):
+            self.setMinimumSize(900, 620)
+            self.setGeometry(
+                geometry.adjusted(8, 8, -8, -8)
+            )
+            QTimer.singleShot(0, self.showMaximized)
+            return
+
+        # macOS fullscreen/maximized behaviour is cleaner with the exact
+        # available geometry.
+        if sys.platform == "darwin":
             self.setMinimumSize(900, 620)
             self.setGeometry(geometry)
             QTimer.singleShot(0, self.showMaximized)
