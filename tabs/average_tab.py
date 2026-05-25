@@ -36,7 +36,6 @@ from .cave_tab import (
     write_edf_file,
 )
 from .ui_style import (
-    ACTION_BUTTON_STYLE,
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
     FRAME_BUTTON_WIDTH,
@@ -319,12 +318,40 @@ class AverageTab(QWidget):
         controls_layout.addWidget(intensity_box)
 
         button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(4)
+
+        average_button_style = """
+            QPushButton {
+                background-color: #dddddd;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
+            QPushButton:hover {
+                background-color: #d4d4d4;
+            }
+            QPushButton:pressed {
+                background-color: #c8c8c8;
+            }
+            QPushButton:disabled {
+                background-color: #eeeeee;
+                color: #aaaaaa;
+                border: none;
+            }
+        """
+
         self.run_button = QPushButton("Run Average")
-        self.run_button.setMinimumHeight(34)
+        self.run_button.setStyleSheet(average_button_style)
         self.run_button.clicked.connect(self.run_average)
+
         self.save_button = QPushButton("Save Average")
-        self.save_button.setMinimumHeight(34)
+        self.save_button.setStyleSheet(average_button_style)
         self.save_button.clicked.connect(self.save_average)
+
+        self.run_button.setFixedHeight(refresh_button.sizeHint().height())
+        self.save_button.setFixedHeight(refresh_button.sizeHint().height())
+
         button_layout.addWidget(self.run_button)
         button_layout.addWidget(self.save_button)
         controls_layout.addLayout(button_layout)
