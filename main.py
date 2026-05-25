@@ -224,7 +224,7 @@ class MainWindow(QMainWindow):
 
         container = QWidget()
         main_layout = QVBoxLayout(container)
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setContentsMargins(22, 18, 22, 10)
         main_layout.setSpacing(8)
 
         # ============================================================
@@ -654,12 +654,19 @@ class MainWindow(QMainWindow):
         """)
         layout.addWidget(title_label)
 
+        if self.is_development_copy():
+            build_info_html = f"Build: {self.get_build_name()}"
+        else:
+            build_info_html = (
+                f"Build: {self.get_build_name()}<br>"
+                f"Last build: {self.get_build_datetime()}"
+            )
+
         info_label = QLabel(
             f"<div style='text-align:center;'>"
-            f"<b>{APP_AUTHOR}</b><br>"
+            f"<b>{APP_AUTHOR}</b><br><br>"
             f"<a href='{GITHUB_URL}'>{GITHUB_URL}</a><br><br>"
-            f"Build: {self.get_build_name()}<br>"
-            f"Last build: {self.get_build_datetime()}"
+            f"{build_info_html}"
             f"</div>"
         )
         info_label.setAlignment(Qt.AlignCenter)
@@ -673,28 +680,12 @@ class MainWindow(QMainWindow):
         """)
         layout.addWidget(info_label)
 
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(dialog.accept)
-        close_button.setFixedHeight(34)
-        close_button.setCursor(Qt.PointingHandCursor)
-        close_button.setStyleSheet("""
-            QPushButton {
-                font-size: 13px;
-                font-weight: 500;
-                color: #222222;
-                background: #f8f8f8;
-                border: 1px solid #dddddd;
-                border-radius: 8px;
-                padding: 6px 18px;
-            }
-            QPushButton:hover {
-                background: #eeeeee;
-            }
-            QPushButton:pressed {
-                background: #e4e4e4;
-            }
-        """)
-        layout.addWidget(close_button)
+        if not self.is_development_copy():
+            close_button = QPushButton("Close")
+            close_button.clicked.connect(dialog.accept)
+            close_button.setFixedHeight(30)
+            close_button.setCursor(Qt.PointingHandCursor)
+            layout.addWidget(close_button)
 
         dialog.exec()
 
