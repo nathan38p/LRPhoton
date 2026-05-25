@@ -91,9 +91,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QColor, QPainter, QPixmap, QIcon
 
 
+# Application version and author
 APP_NAME = "LRPhoton"
-APP_VERSION = "1.0.2"
-APP_AUTHOR = "Nathan Piaget"
+APP_VERSION = "2026.05"
+APP_AUTHOR = "Nathan Piaget - Laboratoire Rhéologie et Procédés"
 # Constants
 REPORT_EMAIL = "nathan.piaget@univ-grenoble-alpes.fr"
 # update test6
@@ -674,7 +675,25 @@ class MainWindow(QMainWindow):
 
         close_button = QPushButton("Close")
         close_button.clicked.connect(dialog.accept)
-        close_button.setFixedHeight(30)
+        close_button.setFixedHeight(34)
+        close_button.setCursor(Qt.PointingHandCursor)
+        close_button.setStyleSheet("""
+            QPushButton {
+                font-size: 13px;
+                font-weight: 500;
+                color: #222222;
+                background: #f8f8f8;
+                border: 1px solid #dddddd;
+                border-radius: 8px;
+                padding: 6px 18px;
+            }
+            QPushButton:hover {
+                background: #eeeeee;
+            }
+            QPushButton:pressed {
+                background: #e4e4e4;
+            }
+        """)
         layout.addWidget(close_button)
 
         dialog.exec()
