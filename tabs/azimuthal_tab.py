@@ -242,6 +242,106 @@ def get_header_float(header: dict, *names):
     return None
 
 
+def read_dat_header_float(file_path: Path, key: str):
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
+            for line in file:
+                stripped = line.strip()
+                if not stripped.startswith("#"):
+                    continue
+                parts = stripped[1:].strip().split()
+                if len(parts) >= 2 and parts[0].lower() == key.lower():
+                    return float(parts[1].replace(",", "."))
+    except Exception:
+        return None
+    return None
+
+
+def matching_manufacturer_azim_profile(file_path: Path):
+    path = Path(file_path)
+    candidates = [
+        path.with_name(f"{path.stem}_azimProf.dat"),
+    ]
+    if path.stem.endswith("_cave"):
+        candidates.append(path.with_name(f"{path.stem[:-5]}_cave_azimProf.dat"))
+    else:
+        candidates.append(path.with_name(f"{path.stem}_cave_azimProf.dat"))
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def matching_manufacturer_q_range(file_path: Path):
+    profile = matching_manufacturer_azim_profile(file_path)
+    if profile is None:
+        return None
+
+    q_min = read_dat_header_float(profile, "QMin")
+    q_max = read_dat_header_float(profile, "QMax")
+    if q_min is None or q_max is None or q_max <= q_min:
+        return None
+    return q_min, q_max
+
+
+def azimuthal_normalization_factor(header: dict, mode: str):
+    if mode == "raw":
+        return 1.0, "raw"
+
+    exposure = get_header_float(header, "ExposureTime", "Exposure", "exposure_time", "count_time", "CountTime")
+    flux = get_header_float(header, "TransmittedFlux", "Monitor", "monitor", "Flux", "IncidentFlux")
+
+    if mode == "exposure":
+        if exposure and exposure > 0:
+            return 1.0 / exposure, f"/ ExposureTime ({exposure:.6g})"
+        return 1.0, "raw, missing ExposureTime"
+
+    if mode == "flux":
+        if flux and flux > 0:
+            return 1.0 / flux, f"/ TransmittedFlux ({flux:.6g})"
+        return 1.0, "raw, missing TransmittedFlux"
+
+    if mode == "exposure_flux":
+        if exposure and exposure > 0 and flux and flux > 0:
+            return 1.0 / (exposure * flux), f"/ ExposureTime / TransmittedFlux ({exposure:.6g}, {flux:.6g})"
+        return 1.0, "raw, missing ExposureTime or TransmittedFlux"
+
+    return 1.0, "raw"
+
+
+def remove_isolated_profile_spikes(x, y, threshold=4.0):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if y.size < 7:
+        return y, 0
+
+    cleaned = y.copy()
+    replaced = 0
+    for index in range(y.size):
+        neighbor_indices = [
+            (index - 3) % y.size,
+            (index - 2) % y.size,
+            (index - 1) % y.size,
+            (index + 1) % y.size,
+            (index + 2) % y.size,
+            (index + 3) % y.size,
+        ]
+        neighbors = y[neighbor_indices]
+        neighbors = neighbors[np.isfinite(neighbors)]
+        if neighbors.size < 4 or not np.isfinite(y[index]):
+            continue
+
+        median = float(np.median(neighbors))
+        mad = float(np.median(np.abs(neighbors - median)))
+        local_scale = max(mad * 1.4826, abs(median) * 0.03, 1e-12)
+        if abs(y[index] - median) > threshold * local_scale:
+            cleaned[index] = median
+            replaced += 1
+
+    return cleaned, replaced
+
+
 ID02_DEFAULT_CENTER_X = 914.4
 ID02_DEFAULT_CENTER_Y = 996.5
 ID02_DEFAULT_DISTANCE_M = 10.0002
@@ -255,7 +355,20 @@ CENTER_Y_KEYS = ("Center_2", "center_2", "CenterY", "center_y", "BeamCenterY", "
 # AZIMUTHAL INTEGRATION TOOLS
 # ============================================================
 
-def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_a, q_min, q_max, psi_points):
+def azimuthal_average(
+    image,
+    xc,
+    yc,
+    distance_m,
+    pixel_x_mm,
+    pixel_y_mm,
+    wavelength_a,
+    q_min,
+    q_max,
+    psi_points,
+    min_pixels_per_bin=1,
+    axis_mask_px=0,
+):
     if distance_m <= 0:
         raise ValueError("Detector distance must be > 0.")
     if pixel_x_mm <= 0 or pixel_y_mm <= 0:
@@ -286,9 +399,12 @@ def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelen
     psi = (np.degrees(np.arctan2(dy_px, dx_px)) + 360) % 360
 
     valid = np.isfinite(img) & np.isfinite(q) & np.isfinite(psi)
+    valid &= img > 0
     valid &= img < 4e9
     valid &= q >= q_min
     valid &= q <= q_max
+    if axis_mask_px > 0:
+        valid &= (np.abs(dx_px) > axis_mask_px) & (np.abs(dy_px) > axis_mask_px)
 
     psi_values = psi[valid]
     i_values = img[valid]
@@ -305,8 +421,99 @@ def azimuthal_average(image, xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelen
         intensity = sums / counts
         psi_mean = psi_sums / counts
 
-    valid_bins = counts > 0
+    valid_bins = counts >= max(1, int(min_pixels_per_bin))
     return psi_mean[valid_bins], intensity[valid_bins], counts[valid_bins], valid, q
+
+
+def pyfai_azimuthal_average(
+    image,
+    xc,
+    yc,
+    distance_m,
+    pixel_x_mm,
+    pixel_y_mm,
+    wavelength_a,
+    q_min,
+    q_max,
+    psi_points,
+    min_pixels_per_bin=1,
+    axis_mask_px=0,
+):
+    try:
+        from pyFAI.integrator.azimuthal import AzimuthalIntegrator
+    except Exception:
+        from pyFAI.azimuthalIntegrator import AzimuthalIntegrator
+
+    img = image.astype(np.float64)
+    invalid_mask = ~np.isfinite(img) | (img <= 0) | (img >= 4e9)
+    pixel1_m = float(pixel_y_mm) * 1e-3
+    pixel2_m = float(pixel_x_mm) * 1e-3
+    wavelength_m = float(wavelength_a) * 1e-10
+
+    integrator = AzimuthalIntegrator(
+        dist=float(distance_m),
+        poni1=float(yc) * pixel1_m,
+        poni2=float(xc) * pixel2_m,
+        pixel1=pixel1_m,
+        pixel2=pixel2_m,
+        wavelength=wavelength_m,
+    )
+
+    radial_range = None
+    if q_min > 0 and np.isfinite(q_max) and q_max > q_min:
+        radial_range = (float(q_min), float(q_max))
+
+    try:
+        q_map = np.asarray(integrator.qArray(img.shape), dtype=float)
+    except Exception:
+        y, x = np.indices(img.shape)
+        dx_px = x + 1 - float(xc)
+        dy_px = y + 1 - float(yc)
+        dx_m = dx_px * float(pixel_x_mm) * 1e-3
+        dy_m = dy_px * float(pixel_y_mm) * 1e-3
+        r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+        two_theta = np.arctan2(r_m, float(distance_m))
+        q_map = (4 * np.pi / (float(wavelength_a) * 0.1)) * np.sin(two_theta / 2)
+
+    try:
+        chi_map = np.asarray(integrator.center_array(img.shape, "chi_rad"), dtype=float)
+    except Exception:
+        chi_map = np.asarray(integrator.chiArray(img.shape), dtype=float)
+
+    psi_map = (np.degrees(chi_map) + 360.0) % 360.0
+    weights = img.copy()
+    try:
+        solid_angle = np.asarray(integrator.solidAngleArray(img.shape), dtype=float)
+        weights = np.divide(weights, solid_angle, out=weights, where=np.isfinite(solid_angle) & (solid_angle > 0))
+    except Exception:
+        pass
+
+    y, x = np.indices(img.shape)
+    dx_px = x + 1 - float(xc)
+    dy_px = y + 1 - float(yc)
+
+    valid_mask = (~invalid_mask) & np.isfinite(q_map) & np.isfinite(psi_map) & np.isfinite(weights)
+    valid_mask &= q_map >= q_min
+    valid_mask &= q_map <= q_max
+    if axis_mask_px > 0:
+        valid_mask &= (np.abs(dx_px) > axis_mask_px) & (np.abs(dy_px) > axis_mask_px)
+
+    psi_values = psi_map[valid_mask]
+    intensity_values = weights[valid_mask]
+    if psi_values.size == 0:
+        raise ValueError("No valid pixel found in the selected q crown.")
+
+    edges = np.linspace(0, 360, int(psi_points) + 1)
+    sums, _ = np.histogram(psi_values, bins=edges, weights=intensity_values)
+    counts, _ = np.histogram(psi_values, bins=edges)
+    psi_sums, _ = np.histogram(psi_values, bins=edges, weights=psi_values)
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        intensity = sums / counts
+        psi = psi_sums / counts
+
+    valid_bins = np.isfinite(psi) & np.isfinite(intensity) & (counts >= max(1, int(min_pixels_per_bin)))
+    return psi[valid_bins], intensity[valid_bins], counts[valid_bins], valid_mask, q_map
 
 
 # ============================================================
@@ -725,14 +932,44 @@ class AzimuthalTab(QWidget):
         self.use_q_range = QCheckBox("Use q range")
         self.use_q_range.setChecked(True)
         self.use_q_range.stateChanged.connect(self.update_q_range_state)
-        self.q_min = self.double_spin(0.1, decimals=8, minimum=0)
-        self.q_max = self.double_spin(1.0, decimals=8, minimum=0)
+        self.q_min = self.double_spin(0.01, decimals=8, minimum=0)
+        self.q_max = self.double_spin(0.1, decimals=8, minimum=0)
+        parameter_field_width = 130
         self.n_points = QSpinBox()
         self.n_points.setRange(10, 10000)
         self.n_points.setValue(360)
         self.n_points.setFixedHeight(24)
+        self.integration_engine = QComboBox()
+        self.integration_engine.addItems(["pyFAI", "LRPhoton mean"])
+        self.integration_engine.setCurrentText("pyFAI")
+        self.integration_engine.setFixedWidth(150)
+        self.min_pixels_per_bin = QSpinBox()
+        self.min_pixels_per_bin.setRange(1, 1000000)
+        self.min_pixels_per_bin.setValue(1)
+        self.min_pixels_per_bin.setFixedHeight(24)
+        self.min_pixels_per_bin.setMinimumWidth(parameter_field_width)
+        self.axis_mask_pixels = QSpinBox()
+        self.axis_mask_pixels.setRange(0, 20)
+        self.axis_mask_pixels.setValue(0)
+        self.axis_mask_pixels.setFixedHeight(24)
+        self.axis_mask_pixels.setMinimumWidth(parameter_field_width)
+        self.remove_isolated_spikes = QCheckBox("Remove isolated spikes")
+        self.remove_isolated_spikes.setChecked(True)
+        self.normalization_mode = QComboBox()
+        self.normalization_mode.addItem("Raw detector intensity", "raw")
+        self.normalization_mode.addItem("Counts/s: I / ExposureTime", "exposure")
+        self.normalization_mode.addItem("I / TransmittedFlux", "flux")
+        self.normalization_mode.addItem("Counts/s/flux", "exposure_flux")
+        self.normalization_mode.setCurrentIndex(0)
+        self.normalization_mode.setFixedWidth(220)
+        self.intensity_scale = QDoubleSpinBox()
+        self.intensity_scale.setDecimals(6)
+        self.intensity_scale.setRange(1e-9, 1e9)
+        self.intensity_scale.setValue(1.0)
+        self.intensity_scale.setSingleStep(0.1)
+        self.intensity_scale.setFixedHeight(24)
+        self.intensity_scale.setMinimumWidth(parameter_field_width)
 
-        parameter_field_width = 130
         self.q_min.setMinimumWidth(parameter_field_width)
         self.q_max.setMinimumWidth(parameter_field_width)
         self.n_points.setMinimumWidth(parameter_field_width)
@@ -742,8 +979,6 @@ class AzimuthalTab(QWidget):
         form.addWidget(self.q_min, 1, 1)
         form.addWidget(QLabel("q max (nm⁻¹):"), 2, 0)
         form.addWidget(self.q_max, 2, 1)
-        form.addWidget(QLabel("ψ points:"), 3, 0)
-        form.addWidget(self.n_points, 3, 1)
         params_layout.addLayout(form)
 
         self.integrate_button = QPushButton("Integrate I(ψ)")
@@ -908,6 +1143,8 @@ class AzimuthalTab(QWidget):
         for widget in [
             self.center_x, self.center_y, self.distance, self.pixel_x, self.pixel_y,
             self.wavelength, self.use_q_range, self.q_min, self.q_max, self.n_points,
+            self.integration_engine, self.min_pixels_per_bin, self.axis_mask_pixels,
+            self.remove_isolated_spikes, self.normalization_mode, self.intensity_scale,
             self.integrate_button, self.show_legend,
             self.frame_start_spin, self.frame_end_spin, self.prev_frame_button,
             self.next_frame_button, self.frame_slider,
@@ -1214,7 +1451,7 @@ class AzimuthalTab(QWidget):
 
     def open_geometry_dialog(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Geometry")
+        dialog.setWindowTitle("Geometry + integration")
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
 
@@ -1233,10 +1470,64 @@ class AzimuthalTab(QWidget):
             dialog_spins[key] = spin
             form.addRow(label, spin)
 
+        settings_box = QGroupBox("Integration settings")
+        settings_form = QFormLayout(settings_box)
+        settings_form.setContentsMargins(*GROUP_BOX_MARGINS)
+        settings_form.setSpacing(6)
+
+        engine_combo = QComboBox()
+        for index in range(self.integration_engine.count()):
+            engine_combo.addItem(self.integration_engine.itemText(index))
+        engine_combo.setCurrentText(self.integration_engine.currentText())
+        engine_combo.setFixedWidth(150)
+
+        points_spin = QSpinBox()
+        points_spin.setRange(self.n_points.minimum(), self.n_points.maximum())
+        points_spin.setValue(self.n_points.value())
+        points_spin.setFixedWidth(150)
+
+        min_pixels_spin = QSpinBox()
+        min_pixels_spin.setRange(self.min_pixels_per_bin.minimum(), self.min_pixels_per_bin.maximum())
+        min_pixels_spin.setValue(self.min_pixels_per_bin.value())
+        min_pixels_spin.setFixedWidth(150)
+
+        axis_mask_spin = QSpinBox()
+        axis_mask_spin.setRange(self.axis_mask_pixels.minimum(), self.axis_mask_pixels.maximum())
+        axis_mask_spin.setValue(self.axis_mask_pixels.value())
+        axis_mask_spin.setFixedWidth(150)
+
+        despike_checkbox = QCheckBox("Remove isolated spikes")
+        despike_checkbox.setChecked(self.remove_isolated_spikes.isChecked())
+
+        normalize_combo = QComboBox()
+        for index in range(self.normalization_mode.count()):
+            normalize_combo.addItem(
+                self.normalization_mode.itemText(index),
+                self.normalization_mode.itemData(index),
+            )
+        normalize_combo.setCurrentIndex(self.normalization_mode.currentIndex())
+        normalize_combo.setFixedWidth(220)
+
+        scale_spin = QDoubleSpinBox()
+        scale_spin.setDecimals(self.intensity_scale.decimals())
+        scale_spin.setRange(self.intensity_scale.minimum(), self.intensity_scale.maximum())
+        scale_spin.setSingleStep(self.intensity_scale.singleStep())
+        scale_spin.setValue(self.intensity_scale.value())
+        scale_spin.setFixedWidth(150)
+
+        settings_form.addRow("Engine", engine_combo)
+        settings_form.addRow("ψ points", points_spin)
+        settings_form.addRow("Min pixels/bin", min_pixels_spin)
+        settings_form.addRow("Axis mask (px)", axis_mask_spin)
+        settings_form.addRow("", despike_checkbox)
+        settings_form.addRow("Intensity correction", normalize_combo)
+        settings_form.addRow("I scale", scale_spin)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addLayout(form)
+        layout.addWidget(settings_box)
         layout.addWidget(buttons)
 
         if dialog.exec() != QDialog.Accepted:
@@ -1248,6 +1539,13 @@ class AzimuthalTab(QWidget):
         self.pixel_x.setValue(dialog_spins["pixel_x"].value())
         self.pixel_y.setValue(dialog_spins["pixel_y"].value())
         self.wavelength.setValue(dialog_spins["wavelength"].value())
+        self.integration_engine.setCurrentText(engine_combo.currentText())
+        self.n_points.setValue(points_spin.value())
+        self.min_pixels_per_bin.setValue(min_pixels_spin.value())
+        self.axis_mask_pixels.setValue(axis_mask_spin.value())
+        self.remove_isolated_spikes.setChecked(despike_checkbox.isChecked())
+        self.normalization_mode.setCurrentIndex(normalize_combo.currentIndex())
+        self.intensity_scale.setValue(scale_spin.value())
         self.set_instrument_mode("Custom")
         selected = self.selected_files()
         if selected:
@@ -1261,6 +1559,11 @@ class AzimuthalTab(QWidget):
                 _, header = read_image_file(file_path)
             except Exception:
                 header = {}
+            q_range = matching_manufacturer_q_range(file_path)
+            if q_range is not None:
+                self.use_q_range.setChecked(True)
+                self.q_min.setValue(q_range[0])
+                self.q_max.setValue(q_range[1])
 
         if self.instrument_mode == "XENOCS":
             cx = get_header_float(header, *CENTER_X_KEYS)
@@ -1324,7 +1627,7 @@ class AzimuthalTab(QWidget):
         messages = []
         for file_path in files:
             try:
-                image, _ = read_image_file(file_path, frame_index=self.current_frame - 1)
+                image, header = read_image_file(file_path, frame_index=self.current_frame - 1)
                 if self.use_q_range.isChecked():
                     q_min = self.q_min.value()
                     q_max = self.q_max.value()
@@ -1332,18 +1635,63 @@ class AzimuthalTab(QWidget):
                     q_min = 0
                     q_max = np.inf
 
-                psi, intensity, counts, mask, q_map = azimuthal_average(
-                    image,
-                    self.center_x.value(),
-                    self.center_y.value(),
-                    self.distance.value(),
-                    self.pixel_x.value(),
-                    self.pixel_y.value(),
-                    self.wavelength.value(),
-                    q_min,
-                    q_max,
-                    self.n_points.value(),
+                engine = self.integration_engine.currentText()
+                if engine == "pyFAI":
+                    try:
+                        psi, intensity, counts, mask, q_map = pyfai_azimuthal_average(
+                            image,
+                            self.center_x.value(),
+                            self.center_y.value(),
+                            self.distance.value(),
+                            self.pixel_x.value(),
+                            self.pixel_y.value(),
+                            self.wavelength.value(),
+                            q_min,
+                            q_max,
+                            self.n_points.value(),
+                            self.min_pixels_per_bin.value(),
+                            self.axis_mask_pixels.value(),
+                        )
+                    except Exception as pyfai_error:
+                        psi, intensity, counts, mask, q_map = azimuthal_average(
+                            image,
+                            self.center_x.value(),
+                            self.center_y.value(),
+                            self.distance.value(),
+                            self.pixel_x.value(),
+                            self.pixel_y.value(),
+                            self.wavelength.value(),
+                            q_min,
+                            q_max,
+                            self.n_points.value(),
+                            self.min_pixels_per_bin.value(),
+                            self.axis_mask_pixels.value(),
+                        )
+                        engine = f"LRPhoton mean fallback, pyFAI error: {pyfai_error}"
+                else:
+                    psi, intensity, counts, mask, q_map = azimuthal_average(
+                        image,
+                        self.center_x.value(),
+                        self.center_y.value(),
+                        self.distance.value(),
+                        self.pixel_x.value(),
+                        self.pixel_y.value(),
+                        self.wavelength.value(),
+                        q_min,
+                        q_max,
+                        self.n_points.value(),
+                        self.min_pixels_per_bin.value(),
+                        self.axis_mask_pixels.value(),
+                    )
+
+                normalization_factor, normalization_label = azimuthal_normalization_factor(
+                    header,
+                    self.normalization_mode.currentData(),
                 )
+                intensity = intensity * normalization_factor * self.intensity_scale.value()
+                despiked_count = 0
+                if self.remove_isolated_spikes.isChecked():
+                    intensity, despiked_count = remove_isolated_profile_spikes(psi, intensity)
 
                 ax.plot(psi, intensity, linewidth=1.2, label=file_path.stem)
                 self.last_results[file_path.stem] = (psi, intensity, counts)
@@ -1355,6 +1703,10 @@ class AzimuthalTab(QWidget):
 
                 messages.append(
                     f"Integrated: {file_path.name} ({psi.size} ψ points) | q crown = {q_min:.8g} -> {q_max:.8g} nm⁻¹"
+                    f" | engine = {engine} ; min {self.min_pixels_per_bin.value()} pixels/bin"
+                    f" ; axis mask = {self.axis_mask_pixels.value()} px ; I<=0 masked"
+                    f" ; isolated spikes removed = {despiked_count}"
+                    f" | intensity = {normalization_label} ; scale = {self.intensity_scale.value():.8g}"
                 )
 
             except Exception as error:
@@ -1450,6 +1802,14 @@ class AzimuthalTab(QWidget):
             out_file = self.current_folder / f"{source_stem}{range_suffix}_azimProf.dat"
             data = np.column_stack([psi, intensity, counts])
             with open(out_file, "w", encoding="utf-8") as file:
+                file.write(f"# integration_engine {self.integration_engine.currentText()}\n")
+                file.write(f"# psi_points {self.n_points.value()}\n")
+                file.write(f"# min_pixels_per_bin {self.min_pixels_per_bin.value()}\n")
+                file.write(f"# axis_mask_px {self.axis_mask_pixels.value()}\n")
+                file.write(f"# remove_isolated_spikes {self.remove_isolated_spikes.isChecked()}\n")
+                file.write("# nonpositive_pixels masked\n")
+                file.write(f"# intensity_correction {self.normalization_mode.currentText()}\n")
+                file.write(f"# intensity_scale {self.intensity_scale.value():.8g}\n")
                 file.write("# psi_deg I_psi pixel_count\n")
                 np.savetxt(file, data, fmt="%.8e %.8e %d")
 

@@ -281,6 +281,65 @@ def get_header_float(header: dict, *names):
     return None
 
 
+def header_q_geometry_values(header: dict):
+    cx = get_header_float(header, *CENTER_X_KEYS)
+    cy = get_header_float(header, *CENTER_Y_KEYS)
+    dist = get_header_float(header, "SampleDistance", "sampledistance", "sample_distance")
+    px = get_header_float(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX")
+    py = get_header_float(header, "PSize_2", "psize_2", "PSize_Y", "PixelSizeY")
+    wav = get_header_float(header, "WaveLength", "Wavelength", "wavelength")
+
+    values = {
+        "cx": cx,
+        "cy": cy,
+        "dist": dist,
+        "px": px,
+        "py": py,
+        "wav": wav,
+    }
+    missing = [key for key, value in values.items() if value is None]
+    return values, missing
+
+
+def header_pixel_to_mm(value):
+    return value * 1000.0 if value is not None and value < 1e-3 else value
+
+
+def header_wavelength_to_a(value):
+    if value is None:
+        return None
+    if value < 1e-6:
+        return value * 1e10
+    if value < 0.5:
+        return value * 10.0
+    return value
+
+
+def radial_normalization_factor(header: dict, mode: str):
+    if mode == "raw":
+        return 1.0, "raw"
+
+    exposure = get_header_float(header, "ExposureTime", "Exposure", "exposure_time", "count_time", "CountTime")
+    flux = get_header_float(header, "TransmittedFlux", "Monitor", "monitor", "Flux", "IncidentFlux")
+
+    if mode == "exposure":
+        if exposure and exposure > 0:
+            return 1.0 / exposure, f"/ ExposureTime ({exposure:.6g})"
+        return 1.0, "raw, missing ExposureTime"
+
+    if mode == "flux":
+        if flux and flux > 0:
+            return 1.0 / flux, f"/ TransmittedFlux ({flux:.6g})"
+        return 1.0, "raw, missing TransmittedFlux"
+
+    if mode == "exposure_flux":
+        if exposure and exposure > 0 and flux and flux > 0:
+            return 1.0 / (exposure * flux), f"/ ExposureTime / TransmittedFlux ({exposure:.6g}, {flux:.6g})"
+        return 1.0, "raw, missing ExposureTime or TransmittedFlux"
+
+    return 1.0, "raw"
+
+
 ID02_DEFAULT_CENTER_X = 914.4
 ID02_DEFAULT_CENTER_Y = 996.5
 ID02_DEFAULT_DISTANCE_M = 10.0002
@@ -550,7 +609,7 @@ def id13_pyfai_like_average(image, q_min, q_max, sector_min=0, sector_max=360):
     else:
         q_min_eff, q_max_eff = float(q_min), float(q_max)
 
-    valid = np.isfinite(q) & (q > 0) & np.isfinite(intensity) & (intensity < 4e9) & (intensity > 0) & sector_mask
+    valid = np.isfinite(q) & (q > 0) & np.isfinite(intensity) & (intensity < 4e9) & sector_mask
     if q_min_eff > 0:
         valid &= q >= q_min_eff
     if q_max_eff > 0:
@@ -575,7 +634,7 @@ def id13_pyfai_like_average(image, q_min, q_max, sector_min=0, sector_max=360):
     with np.errstate(invalid="ignore", divide="ignore"):
         averaged = sums / counts
 
-    valid_bins = (counts > 0) & np.isfinite(averaged) & (averaged > 0)
+    valid_bins = (counts > 0) & np.isfinite(averaged)
     return q_axis[valid_bins], averaged[valid_bins], counts[valid_bins], config
 
 
@@ -610,6 +669,7 @@ def radial_average(
     log_bins,
     sector_min=0,
     sector_max=360,
+    min_pixels_per_bin=1,
 ):
     """
     Clean radial integration I(q).
@@ -618,7 +678,9 @@ def radial_average(
     - q = 0 at the beam centre.
     - q is calculated from detector geometry.
     - The intensity is the arithmetic mean of valid finite pixels inside each q bin.
-    - NaN, Inf, negative values and detector-gap values >= 4e9 are excluded.
+    - NaN, Inf and detector-gap values >= 4e9 are excluded.
+    - Negative and zero intensities are kept in the bin average. Filtering them
+      before averaging biases background-subtracted noisy regions upward.
     """
     if distance_m <= 0:
         raise ValueError("Detector distance must be > 0.")
@@ -661,7 +723,7 @@ def radial_average(
     else:
         sector_mask = (psi >= sector_min) | (psi <= sector_max)
 
-    intensity_valid = np.isfinite(img) & (img < 4e9) & (img > 0)
+    intensity_valid = np.isfinite(img) & (img < 4e9)
     geometry_valid = np.isfinite(q) & (q > 0) & sector_mask
     valid = geometry_valid & intensity_valid
     weights = img
@@ -698,12 +760,106 @@ def radial_average(
     with np.errstate(invalid="ignore", divide="ignore"):
         intensity = sums / counts
 
-    valid_bins = (counts > 0) & np.isfinite(intensity) & (intensity > 0)
+    valid_bins = (counts >= max(1, int(min_pixels_per_bin))) & np.isfinite(intensity)
     q_axis = q_axis[valid_bins]
     intensity = intensity[valid_bins]
     counts = counts[valid_bins]
 
     return q_axis, intensity, counts, valid
+
+
+def pyfai_radial_average(
+    image,
+    xc,
+    yc,
+    distance_m,
+    pixel_x_mm,
+    pixel_y_mm,
+    wavelength_a,
+    q_min,
+    q_max,
+    n_bins,
+    sector_min=0,
+    sector_max=360,
+    min_pixels_per_bin=1,
+):
+    try:
+        from pyFAI.integrator.azimuthal import AzimuthalIntegrator
+    except Exception:
+        from pyFAI.azimuthalIntegrator import AzimuthalIntegrator
+
+    img = image.astype(np.float64)
+    invalid_mask = ~np.isfinite(img) | (img >= 4e9)
+    pixel1_m = float(pixel_y_mm) * 1e-3
+    pixel2_m = float(pixel_x_mm) * 1e-3
+    wavelength_m = wavelength_to_nm(float(wavelength_a)) * 1e-9
+
+    integrator = AzimuthalIntegrator(
+        dist=float(distance_m),
+        poni1=float(yc) * pixel1_m,
+        poni2=float(xc) * pixel2_m,
+        pixel1=pixel1_m,
+        pixel2=pixel2_m,
+        wavelength=wavelength_m,
+    )
+
+    radial_range = None
+    if q_min > 0 or q_max > 0:
+        q_values = []
+        if q_min > 0:
+            q_values.append(float(q_min))
+        else:
+            q_values.append(None)
+        if q_max > 0:
+            q_values.append(float(q_max))
+        else:
+            q_values.append(None)
+        radial_range = tuple(q_values)
+
+    azimuth_range = None
+    raw_sector_min = float(sector_min)
+    raw_sector_max = float(sector_max)
+    if abs(raw_sector_max - raw_sector_min) >= 1e-9 and abs((raw_sector_max - raw_sector_min) % 360.0) >= 1e-9:
+        # pyFAI uses chi in [-180, 180]. For wrapping sectors, keep the local
+        # integrator path; it handles 0..360 sectors explicitly.
+        if -180.0 <= raw_sector_min <= 180.0 and -180.0 <= raw_sector_max <= 180.0 and raw_sector_min < raw_sector_max:
+            azimuth_range = (raw_sector_min, raw_sector_max)
+
+    result = integrator.integrate1d(
+        img,
+        int(n_bins),
+        unit="q_nm^-1",
+        radial_range=radial_range,
+        azimuth_range=azimuth_range,
+        mask=invalid_mask,
+        method=("bbox", "csr", "cython"),
+        correctSolidAngle=True,
+    )
+
+    q_axis = np.asarray(getattr(result, "radial", result[0]), dtype=float)
+    intensity = np.asarray(getattr(result, "intensity", result[1]), dtype=float)
+
+    _local_q, _local_i, counts, valid_mask = radial_average(
+        image,
+        xc,
+        yc,
+        distance_m,
+        pixel_x_mm,
+        pixel_y_mm,
+        wavelength_a,
+        q_min,
+        q_max,
+        n_bins,
+        False,
+        sector_min,
+        sector_max,
+        min_pixels_per_bin,
+    )
+    if counts.size != q_axis.size:
+        counts = np.ones_like(q_axis, dtype=int)
+
+    valid_bins = np.isfinite(q_axis) & np.isfinite(intensity) & (counts >= max(1, int(min_pixels_per_bin)))
+    return q_axis[valid_bins], intensity[valid_bins], counts[valid_bins], valid_mask
 
 # ============================================================
 # =========================== CANVAS ==========================
@@ -1517,9 +1673,32 @@ class RadialTab(QWidget):
         self.sector_max = self.double_spin(360, decimals=3, minimum=-360)
         self.n_bins = QSpinBox()
         self.n_bins.setRange(10, 10000)
-        self.n_bins.setValue(200)
+        self.n_bins.setValue(1000)
         self.n_bins.setMinimumWidth(130)
         self.n_bins.setFixedHeight(24)
+        self.integration_engine = QComboBox()
+        self.integration_engine.addItems(["pyFAI", "LRPhoton mean"])
+        self.integration_engine.setCurrentText("pyFAI")
+        self.integration_engine.setFixedWidth(130)
+        self.normalization_mode = QComboBox()
+        self.normalization_mode.addItem("Raw detector intensity", "raw")
+        self.normalization_mode.addItem("Counts/s: I / ExposureTime", "exposure")
+        self.normalization_mode.addItem("I / TransmittedFlux", "flux")
+        self.normalization_mode.addItem("Counts/s/flux", "exposure_flux")
+        self.normalization_mode.setCurrentIndex(0)
+        self.normalization_mode.setFixedWidth(220)
+        self.min_pixels_per_bin = QSpinBox()
+        self.min_pixels_per_bin.setRange(1, 1000000)
+        self.min_pixels_per_bin.setValue(1)
+        self.min_pixels_per_bin.setMinimumWidth(130)
+        self.min_pixels_per_bin.setFixedHeight(24)
+        self.intensity_scale = QDoubleSpinBox()
+        self.intensity_scale.setDecimals(6)
+        self.intensity_scale.setRange(1e-9, 1e9)
+        self.intensity_scale.setValue(1.0)
+        self.intensity_scale.setSingleStep(0.1)
+        self.intensity_scale.setMinimumWidth(130)
+        self.intensity_scale.setFixedHeight(24)
         self.plot_mode = QComboBox()
         self.plot_mode.addItems(["linear linear", "linear log", "log log", "log linear", "Kratky", "2θ linear", "2θ log"])
         self.plot_mode.setCurrentText("log log")
@@ -1544,8 +1723,6 @@ class RadialTab(QWidget):
         form.addWidget(QLabel("Sector max ψ (°):"), 2, 0)
         form.addWidget(self.sector_max, 2, 1)
 
-        form.addWidget(QLabel("Bins:"), 3, 0)
-        form.addWidget(self.n_bins, 3, 1)
         params_layout.addLayout(form)
 
         self.integrate_button = QPushButton("Integrate I(q)")
@@ -1728,7 +1905,7 @@ class RadialTab(QWidget):
             self.frame_slider, self.prev_frame_button, self.next_frame_button,
             self.use_sector,
             self.sector_min, self.sector_max,
-            self.n_bins, self.plot_mode, self.fit_button, self.show_legend, self.integrate_button,
+            self.n_bins, self.integration_engine, self.normalization_mode, self.min_pixels_per_bin, self.intensity_scale, self.plot_mode, self.fit_button, self.show_legend, self.integrate_button,
             self.image_vmin_label, self.image_vmax_label,
             self.image_vmin_slider, self.image_vmax_slider, self.image_lock_contrast_checkbox, self.image_auto_contrast_button,
         ]:
@@ -1998,7 +2175,7 @@ class RadialTab(QWidget):
 
     def open_geometry_dialog(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Geometry")
+        dialog.setWindowTitle("Geometry + integration")
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
 
@@ -2017,10 +2194,54 @@ class RadialTab(QWidget):
             dialog_spins[key] = spin
             form.addRow(label, spin)
 
+        settings_box = QGroupBox("Integration settings")
+        settings_form = QFormLayout(settings_box)
+        settings_form.setContentsMargins(*GROUP_BOX_MARGINS)
+        settings_form.setSpacing(6)
+
+        bins_spin = QSpinBox()
+        bins_spin.setRange(self.n_bins.minimum(), self.n_bins.maximum())
+        bins_spin.setValue(self.n_bins.value())
+        bins_spin.setFixedWidth(150)
+
+        engine_combo = QComboBox()
+        for index in range(self.integration_engine.count()):
+            engine_combo.addItem(self.integration_engine.itemText(index))
+        engine_combo.setCurrentText(self.integration_engine.currentText())
+        engine_combo.setFixedWidth(150)
+
+        normalize_combo = QComboBox()
+        for index in range(self.normalization_mode.count()):
+            normalize_combo.addItem(
+                self.normalization_mode.itemText(index),
+                self.normalization_mode.itemData(index),
+            )
+        normalize_combo.setCurrentIndex(self.normalization_mode.currentIndex())
+        normalize_combo.setFixedWidth(220)
+
+        min_pixels_spin = QSpinBox()
+        min_pixels_spin.setRange(self.min_pixels_per_bin.minimum(), self.min_pixels_per_bin.maximum())
+        min_pixels_spin.setValue(self.min_pixels_per_bin.value())
+        min_pixels_spin.setFixedWidth(150)
+
+        scale_spin = QDoubleSpinBox()
+        scale_spin.setDecimals(self.intensity_scale.decimals())
+        scale_spin.setRange(self.intensity_scale.minimum(), self.intensity_scale.maximum())
+        scale_spin.setSingleStep(self.intensity_scale.singleStep())
+        scale_spin.setValue(self.intensity_scale.value())
+        scale_spin.setFixedWidth(150)
+
+        settings_form.addRow("Bins", bins_spin)
+        settings_form.addRow("Engine", engine_combo)
+        settings_form.addRow("Intensity correction", normalize_combo)
+        settings_form.addRow("Min pixels/bin", min_pixels_spin)
+        settings_form.addRow("I scale", scale_spin)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addLayout(form)
+        layout.addWidget(settings_box)
         layout.addWidget(buttons)
 
         if dialog.exec() != QDialog.Accepted:
@@ -2032,6 +2253,11 @@ class RadialTab(QWidget):
         self.pixel_x.setValue(dialog_spins["pixel_x"].value())
         self.pixel_y.setValue(dialog_spins["pixel_y"].value())
         self.wavelength.setValue(dialog_spins["wavelength"].value())
+        self.n_bins.setValue(bins_spin.value())
+        self.integration_engine.setCurrentText(engine_combo.currentText())
+        self.normalization_mode.setCurrentIndex(normalize_combo.currentIndex())
+        self.min_pixels_per_bin.setValue(min_pixels_spin.value())
+        self.intensity_scale.setValue(scale_spin.value())
         self.set_instrument_mode("Custom")
 
     def apply_preset_from_file(self, file_path=None):
@@ -2052,42 +2278,35 @@ class RadialTab(QWidget):
                 header = {}
 
         if self.instrument_mode == "XENOCS":
-            cx = get_header_float(header, *CENTER_X_KEYS)
-            cy = get_header_float(header, *CENTER_Y_KEYS)
-            dist = get_header_float(header, "SampleDistance", "sampledistance", "sample_distance")
-            px = get_header_float(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX")
-            py = get_header_float(header, "PSize_2", "psize_2", "PSize_Y", "PixelSizeY")
-            wav = get_header_float(header, "WaveLength", "Wavelength", "wavelength")
+            values, missing = header_q_geometry_values(header)
 
-            self.center_x.setValue(cx if cx is not None else 0)
-            self.center_y.setValue(cy if cy is not None else 0)
-            self.distance.setValue(dist if dist is not None else 0)
-            self.pixel_x.setValue(px * 1000 if px is not None else 0.075000)
-            self.pixel_y.setValue(py * 1000 if py is not None else 0.075000)
-            if wav is not None:
-                if wav < 1e-6:
-                    self.wavelength.setValue(wav * 1e10)  # m -> Å for display
-                elif wav < 0.5:
-                    self.wavelength.setValue(wav * 10.0)  # nm -> Å for display
-                else:
-                    self.wavelength.setValue(wav)  # already Å
-            else:
+            if missing:
+                self.center_x.setValue(0)
+                self.center_y.setValue(0)
+                self.distance.setValue(0)
+                self.pixel_x.setValue(0)
+                self.pixel_y.setValue(0)
                 self.wavelength.setValue(0)
+                return
+
+            self.center_x.setValue(values["cx"])
+            self.center_y.setValue(values["cy"])
+            self.distance.setValue(values["dist"])
+            self.pixel_x.setValue(header_pixel_to_mm(values["px"]))
+            self.pixel_y.setValue(header_pixel_to_mm(values["py"]))
+            self.wavelength.setValue(header_wavelength_to_a(values["wav"]))
             return
 
         if self.instrument_mode == "ID02":
-            cx = get_header_float(header, *CENTER_X_KEYS)
-            cy = get_header_float(header, *CENTER_Y_KEYS)
-            dist = get_header_float(header, "SampleDistance", "sampledistance", "sample_distance")
-            px = get_header_float(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX")
-            py = get_header_float(header, "PSize_2", "psize_2", "PSize_Y", "PixelSizeY")
-            wav = get_header_float(header, "WaveLength", "Wavelength", "wavelength")
-            self.center_x.setValue(cx if cx is not None else ID02_DEFAULT_CENTER_X)
-            self.center_y.setValue(cy if cy is not None else ID02_DEFAULT_CENTER_Y)
-            self.distance.setValue(dist if dist is not None else ID02_DEFAULT_DISTANCE_M)
-            self.pixel_x.setValue(px * 1000 if px is not None else ID02_DEFAULT_PIXEL_MM)
-            self.pixel_y.setValue(py * 1000 if py is not None else ID02_DEFAULT_PIXEL_MM)
-            self.wavelength.setValue(wav * 1e10 if wav is not None else ID02_DEFAULT_WAVELENGTH_A)
+            values, _ = header_q_geometry_values(header)
+            self.center_x.setValue(values["cx"] if values["cx"] is not None else ID02_DEFAULT_CENTER_X)
+            self.center_y.setValue(values["cy"] if values["cy"] is not None else ID02_DEFAULT_CENTER_Y)
+            self.distance.setValue(values["dist"] if values["dist"] is not None else ID02_DEFAULT_DISTANCE_M)
+            self.pixel_x.setValue(header_pixel_to_mm(values["px"]) if values["px"] is not None else ID02_DEFAULT_PIXEL_MM)
+            self.pixel_y.setValue(header_pixel_to_mm(values["py"]) if values["py"] is not None else ID02_DEFAULT_PIXEL_MM)
+            self.wavelength.setValue(
+                header_wavelength_to_a(values["wav"]) if values["wav"] is not None else ID02_DEFAULT_WAVELENGTH_A
+            )
             return
 
         if self.instrument_mode == "ID13":
@@ -2152,7 +2371,7 @@ class RadialTab(QWidget):
             try:
                 h5_dataset_name = self.h5_dataset_name if file_path.suffix.lower() in [".h5", ".hdf5"] else None
                 h5_frame_index = self.frame_spin.value() - 1 if file_path.suffix.lower() in [".h5", ".hdf5"] else 0
-                image, _ = read_image_file(file_path, h5_dataset_name, h5_frame_index)
+                image, header = read_image_file(file_path, h5_dataset_name, h5_frame_index)
                 q_min = 0
                 q_max = 0
                 sector_min = self.sector_min.value() if self.use_sector.isChecked() else 0
@@ -2186,24 +2405,67 @@ class RadialTab(QWidget):
                 q_map = (4.0 * np.pi / wavelength_nm_map) * np.sin(two_theta_map / 2.0)
                 # --- end q_map calculation ---
 
-                q, intensity, counts, mask = radial_average(
-                    image,
-                    self.center_x.value(),
-                    self.center_y.value(),
-                    self.distance.value(),
-                    self.pixel_x.value(),
-                    self.pixel_y.value(),
-                    self.wavelength.value(),
-                    q_min,
-                    q_max,
-                    self.n_bins.value(),
-                    use_log_bins,
-                    sector_min,
-                    sector_max,
-                )
+                engine = self.integration_engine.currentText()
+                if engine == "pyFAI":
+                    try:
+                        q, intensity, counts, mask = pyfai_radial_average(
+                            image,
+                            self.center_x.value(),
+                            self.center_y.value(),
+                            self.distance.value(),
+                            self.pixel_x.value(),
+                            self.pixel_y.value(),
+                            self.wavelength.value(),
+                            q_min,
+                            q_max,
+                            self.n_bins.value(),
+                            sector_min,
+                            sector_max,
+                            self.min_pixels_per_bin.value(),
+                        )
+                    except Exception as pyfai_error:
+                        q, intensity, counts, mask = radial_average(
+                            image,
+                            self.center_x.value(),
+                            self.center_y.value(),
+                            self.distance.value(),
+                            self.pixel_x.value(),
+                            self.pixel_y.value(),
+                            self.wavelength.value(),
+                            q_min,
+                            q_max,
+                            self.n_bins.value(),
+                            use_log_bins,
+                            sector_min,
+                            sector_max,
+                            self.min_pixels_per_bin.value(),
+                        )
+                        engine = f"LRPhoton mean fallback, pyFAI error: {pyfai_error}"
+                else:
+                    q, intensity, counts, mask = radial_average(
+                        image,
+                        self.center_x.value(),
+                        self.center_y.value(),
+                        self.distance.value(),
+                        self.pixel_x.value(),
+                        self.pixel_y.value(),
+                        self.wavelength.value(),
+                        q_min,
+                        q_max,
+                        self.n_bins.value(),
+                        use_log_bins,
+                        sector_min,
+                        sector_max,
+                        self.min_pixels_per_bin.value(),
+                    )
 
-                y = self.make_plot_y(q, intensity)
-                x = self.make_plot_x(q)
+                normalization_factor, normalization_label = radial_normalization_factor(
+                    header,
+                    self.normalization_mode.currentData(),
+                )
+                intensity = intensity * normalization_factor
+
+                x, y = self.make_plot_arrays(q, intensity)
                 line, = ax.plot(x, y, linewidth=1.2, label=file_path.stem)
                 self.last_results[file_path.stem] = (q, intensity, counts)
 
@@ -2254,7 +2516,8 @@ class RadialTab(QWidget):
                     f"  centre = {diagnostics['center']} ; image = {diagnostics['image_shape']} px\n"
                     f"  q per pixel ≈ {diagnostics['q_per_pixel_x']:.8g} nm⁻¹/px ; q corner max ≈ {diagnostics['q_corner_max']:.8g} nm⁻¹\n"
                     f"  exported q range = {np.nanmin(q):.10g} -> {np.nanmax(q):.10g} nm⁻¹"
-                    f" ; arithmetic mean ; invalid pixels excluded ; no smoothing"
+                    f" ; engine = {engine} ; normalization = {normalization_label}"
+                    f" ; invalid pixels excluded ; min {self.min_pixels_per_bin.value()} pixels/bin ; no smoothing"
                 )
                 if comparison_message is not None:
                     messages.append(comparison_message)
@@ -2288,9 +2551,47 @@ class RadialTab(QWidget):
 
 
     def make_plot_y(self, q, intensity):
+        scaled_intensity = intensity * self.intensity_scale.value()
         if self.plot_mode.currentText() == "Kratky":
-            return self.make_plot_x(q) ** 2 * intensity
-        return intensity
+            return self.make_plot_x(q) ** 2 * scaled_intensity
+        return scaled_intensity
+
+    def make_plot_arrays(self, q, intensity, wavelength_value=None):
+        x = np.asarray(self.make_plot_x(q, wavelength_value), dtype=float)
+        y = np.asarray(self.make_plot_y(q, intensity), dtype=float)
+        mode = self.plot_mode.currentText()
+        valid = np.isfinite(x) & np.isfinite(y)
+        if mode in ["log log", "log linear"]:
+            valid &= x > 0
+        if mode in ["log log", "linear log", "2θ log"]:
+            valid &= y > 0
+        x = x.copy()
+        y = y.copy()
+        if mode in ["log log", "linear log", "2θ log"]:
+            y = self.interpolate_nonpositive_log_y(x, y, valid)
+            valid = np.isfinite(x) & np.isfinite(y)
+            if mode in ["log log"]:
+                valid &= x > 0
+            if mode in ["2θ log"]:
+                valid &= x >= 0
+        x[~valid] = np.nan
+        y[~valid] = np.nan
+        return x, y
+
+    def interpolate_nonpositive_log_y(self, x, y, valid):
+        positive = valid & np.isfinite(y) & (y > 0)
+        if np.count_nonzero(positive) < 2:
+            return y
+
+        indices = np.arange(y.size, dtype=float)
+        log_y = np.full(y.size, np.nan, dtype=float)
+        log_y[positive] = np.log10(y[positive])
+
+        interpolated = np.interp(indices, indices[positive], log_y[positive])
+        y_display = y.copy()
+        fill = valid & (~positive)
+        y_display[fill] = 10.0 ** interpolated[fill]
+        return y_display
 
     def q_display_factor(self):
         return 0.1 if self.q_axis_unit == "A" else 1.0
@@ -2342,12 +2643,14 @@ class RadialTab(QWidget):
             label = line.get_label()
             if label in self.last_results:
                 q, intensity, counts = self.last_results[label]
-                line.set_xdata(self.make_plot_x(q))
-                line.set_ydata(self.make_plot_y(q, intensity))
+                x, y = self.make_plot_arrays(q, intensity)
+                line.set_xdata(x)
+                line.set_ydata(y)
             elif label in self.last_comparison_results:
                 q, intensity, counts, wavelength = self.last_comparison_results[label]
-                line.set_xdata(self.make_plot_x(q, wavelength))
-                line.set_ydata(self.make_plot_y(q, intensity))
+                x, y = self.make_plot_arrays(q, intensity, wavelength)
+                line.set_xdata(x)
+                line.set_ydata(y)
 
         self.apply_plot_axes()
         apply_plot_display_style(self.canvas.ax)
@@ -2659,11 +2962,15 @@ class RadialTab(QWidget):
         for source_stem, (q, intensity, counts) in self.last_results.items():
             frame_suffix = f"_frame{self.frame_spin.value():04d}" if self.h5_n_frames > 1 else ""
             out_file = self.current_folder / f"{source_stem}{frame_suffix}{range_suffix}_azimAvg.dat"
-            data = np.column_stack([q, intensity, counts])
+            scaled_intensity = intensity * self.intensity_scale.value()
+            data = np.column_stack([q, scaled_intensity, counts])
             with open(out_file, "w", encoding="utf-8") as file:
                 file.write("# q_nm-1 I_q pixel_count\n")
-                file.write("# averaging arithmetic_mean\n")
+                file.write(f"# integration_engine {self.integration_engine.currentText()}\n")
+                file.write(f"# normalization {self.normalization_mode.currentText()}\n")
+                file.write(f"# intensity_scale {self.intensity_scale.value():.8g}\n")
                 file.write("# invalid_pixel_handling excluded\n")
+                file.write(f"# min_pixels_per_bin {self.min_pixels_per_bin.value()}\n")
                 file.write("# smoothing none\n")
                 np.savetxt(file, data, fmt="%.8e %.8e %d")
 

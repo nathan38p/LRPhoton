@@ -517,6 +517,8 @@ class ImageCanvas(FigureCanvas):
         self._pan_start_ylim = None
         self._data_xlim = None
         self._data_ylim = None
+        self.sync_partner = None
+        self._syncing_view = False
 
         self.fig = Figure()
         self.ax = self.fig.add_subplot(111)
@@ -542,6 +544,25 @@ class ImageCanvas(FigureCanvas):
 
     def set_q_calculator(self, calculator):
         self.q_calculator = calculator
+
+    def set_sync_partner(self, partner):
+        self.sync_partner = partner
+
+    def apply_synced_limits_from(self, source):
+        if self._syncing_view or source is self or self.raw_image is None:
+            return
+        self._syncing_view = True
+        try:
+            self.ax.set_xlim(source.ax.get_xlim())
+            self.ax.set_ylim(source.ax.get_ylim())
+            self.draw_idle()
+        finally:
+            self._syncing_view = False
+
+    def sync_partner_view(self):
+        if self._syncing_view or self.sync_partner is None:
+            return
+        self.sync_partner.apply_synced_limits_from(self)
 
     def event(self, event):
         if getattr(self, "raw_image", None) is not None:
@@ -629,6 +650,7 @@ class ImageCanvas(FigureCanvas):
                 self.ax.set_xlim(x0 + dx, x1 + dx)
                 self.ax.set_ylim(y0 + dy, y1 + dy)
                 self.draw_idle()
+                self.sync_partner_view()
 
             event.accept()
             return
@@ -681,6 +703,7 @@ class ImageCanvas(FigureCanvas):
         self.ax.set_xlim(xdata - new_width * rel_x, xdata + new_width * (1 - rel_x))
         self.ax.set_ylim(ydata - new_height * rel_y, ydata + new_height * (1 - rel_y))
         self.draw_idle()
+        self.sync_partner_view()
 
     def _zoom_from_qpoint(self, qpoint, zoom_factor):
         try:
@@ -703,12 +726,14 @@ class ImageCanvas(FigureCanvas):
         self.ax.set_xlim(x0 + shift_x, x1 + shift_x)
         self.ax.set_ylim(y0 + shift_y, y1 + shift_y)
         self.draw_idle()
+        self.sync_partner_view()
 
     def reset_view(self):
         if self._data_xlim is not None and self._data_ylim is not None:
             self.ax.set_xlim(self._data_xlim)
             self.ax.set_ylim(self._data_ylim)
             self.draw_idle()
+            self.sync_partner_view()
 
     def _on_motion(self, event):
         if self.coordinate_label is None:
@@ -2061,6 +2086,8 @@ class CaveTab(QWidget):
         self.canvas_cave.set_q_calculator(self.calculate_q_at_pixel)
         cave_layout.addWidget(self.canvas_cave, stretch=1)
         cave_layout.addWidget(self.cave_coordinate_label, stretch=0)
+        self.canvas_original.set_sync_partner(self.canvas_cave)
+        self.canvas_cave.set_sync_partner(self.canvas_original)
 
         top_layout.addWidget(original_box, stretch=1)
         center_splitter.addWidget(file_box)
@@ -3214,6 +3241,7 @@ class CaveTab(QWidget):
             vmax=vmax,
             reference_angle_deg=angle,
         )
+        self.canvas_cave.apply_synced_limits_from(self.canvas_original)
 
     def run_cave(self):
         if self.image is None:

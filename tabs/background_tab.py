@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QDir
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -680,13 +680,23 @@ class BackgroundTab(QWidget):
     def set_folder_from_external_tab(self, folder_path):
         self.set_working_folder(folder_path)
 
+    def open_data_file_dialog(self, title):
+        start_folder = self.current_folder if self.current_folder and os.path.isdir(self.current_folder) else QDir.homePath()
+        dialog = QFileDialog(self, title, start_folder)
+        dialog.setFileMode(QFileDialog.ExistingFile)
+        dialog.setNameFilter("Data files (*.edf *.h5 *.hdf5 *.dat *.txt);;All files (*)")
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        dialog.setWindowModality(Qt.ApplicationModal)
+        dialog.raise_()
+        dialog.activateWindow()
+        if dialog.exec() == QFileDialog.Accepted:
+            selected_files = dialog.selectedFiles()
+            if selected_files:
+                return selected_files[0]
+        return ""
+
     def select_sample_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select sample file",
-            self.current_folder,
-            "Data files (*.edf *.h5 *.hdf5 *.dat *.txt);;All files (*)",
-        )
+        file_path = self.open_data_file_dialog("Select sample file")
         if file_path:
             self.sample_file_path = file_path
             self.sample_file_edit.setText(file_path)
@@ -707,12 +717,7 @@ class BackgroundTab(QWidget):
                 self.status_label.setText(f"Sample loading error: {exc}")
 
     def select_background_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select background file",
-            self.current_folder,
-            "Data files (*.edf *.h5 *.hdf5 *.dat *.txt);;All files (*)",
-        )
+        file_path = self.open_data_file_dialog("Select background file")
         if file_path:
             self.background_file_path = file_path
             self.background_file_edit.setText(file_path)
@@ -728,11 +733,19 @@ class BackgroundTab(QWidget):
                 self.status_label.setText(f"Background loading error: {exc}")
 
     def select_output_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(
-            self,
-            "Select output folder",
-            self.current_folder,
-        )
+        start_folder = self.current_folder if self.current_folder and os.path.isdir(self.current_folder) else QDir.homePath()
+        dialog = QFileDialog(self, "Select output folder", start_folder)
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        dialog.setWindowModality(Qt.ApplicationModal)
+        dialog.raise_()
+        dialog.activateWindow()
+        folder_path = ""
+        if dialog.exec() == QFileDialog.Accepted:
+            selected_folders = dialog.selectedFiles()
+            if selected_folders:
+                folder_path = selected_folders[0]
         if folder_path:
             self.output_folder_path = folder_path
             self.output_folder_edit.setText(folder_path)
