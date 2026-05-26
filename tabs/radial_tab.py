@@ -609,7 +609,7 @@ def id13_pyfai_like_average(image, q_min, q_max, sector_min=0, sector_max=360):
     else:
         q_min_eff, q_max_eff = float(q_min), float(q_max)
 
-    valid = np.isfinite(q) & (q > 0) & np.isfinite(intensity) & (intensity < 4e9) & sector_mask
+    valid = np.isfinite(q) & (q > 0) & np.isfinite(intensity) & (intensity > 0) & (intensity < 4e9) & sector_mask
     if q_min_eff > 0:
         valid &= q >= q_min_eff
     if q_max_eff > 0:
@@ -634,7 +634,7 @@ def id13_pyfai_like_average(image, q_min, q_max, sector_min=0, sector_max=360):
     with np.errstate(invalid="ignore", divide="ignore"):
         averaged = sums / counts
 
-    valid_bins = (counts > 0) & np.isfinite(averaged)
+    valid_bins = (counts > 0) & np.isfinite(averaged) & (averaged > 0)
     return q_axis[valid_bins], averaged[valid_bins], counts[valid_bins], config
 
 
@@ -678,9 +678,7 @@ def radial_average(
     - q = 0 at the beam centre.
     - q is calculated from detector geometry.
     - The intensity is the arithmetic mean of valid finite pixels inside each q bin.
-    - NaN, Inf and detector-gap values >= 4e9 are excluded.
-    - Negative and zero intensities are kept in the bin average. Filtering them
-      before averaging biases background-subtracted noisy regions upward.
+    - NaN, Inf, non-positive pixels and detector-gap values >= 4e9 are excluded.
     """
     if distance_m <= 0:
         raise ValueError("Detector distance must be > 0.")
@@ -723,7 +721,7 @@ def radial_average(
     else:
         sector_mask = (psi >= sector_min) | (psi <= sector_max)
 
-    intensity_valid = np.isfinite(img) & (img < 4e9)
+    intensity_valid = np.isfinite(img) & (img > 0) & (img < 4e9)
     geometry_valid = np.isfinite(q) & (q > 0) & sector_mask
     valid = geometry_valid & intensity_valid
     weights = img
@@ -760,7 +758,7 @@ def radial_average(
     with np.errstate(invalid="ignore", divide="ignore"):
         intensity = sums / counts
 
-    valid_bins = (counts >= max(1, int(min_pixels_per_bin))) & np.isfinite(intensity)
+    valid_bins = (counts >= max(1, int(min_pixels_per_bin))) & np.isfinite(intensity) & (intensity > 0)
     q_axis = q_axis[valid_bins]
     intensity = intensity[valid_bins]
     counts = counts[valid_bins]
@@ -789,7 +787,24 @@ def pyfai_radial_average(
         from pyFAI.azimuthalIntegrator import AzimuthalIntegrator
 
     img = image.astype(np.float64)
-    invalid_mask = ~np.isfinite(img) | (img >= 4e9)
+    invalid_mask = ~np.isfinite(img) | (img <= 0) | (img >= 4e9)
+    if np.any(invalid_mask):
+        return radial_average(
+            image,
+            xc,
+            yc,
+            distance_m,
+            pixel_x_mm,
+            pixel_y_mm,
+            wavelength_a,
+            q_min,
+            q_max,
+            n_bins,
+            False,
+            sector_min,
+            sector_max,
+            min_pixels_per_bin,
+        )
     pixel1_m = float(pixel_y_mm) * 1e-3
     pixel2_m = float(pixel_x_mm) * 1e-3
     wavelength_m = wavelength_to_nm(float(wavelength_a)) * 1e-9
@@ -858,7 +873,13 @@ def pyfai_radial_average(
     if counts.size != q_axis.size:
         counts = np.ones_like(q_axis, dtype=int)
 
-    valid_bins = np.isfinite(q_axis) & np.isfinite(intensity) & (counts >= max(1, int(min_pixels_per_bin)))
+    valid_bins = (
+        np.isfinite(q_axis)
+        & np.isfinite(intensity)
+        & (q_axis > 0)
+        & (intensity > 0)
+        & (counts >= max(1, int(min_pixels_per_bin)))
+    )
     return q_axis[valid_bins], intensity[valid_bins], counts[valid_bins], valid_mask
 
 # ============================================================

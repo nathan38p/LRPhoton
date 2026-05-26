@@ -13,11 +13,14 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QFileDialog,
+    QDialog,
+    QDialogButtonBox,
     QGroupBox,
     QDoubleSpinBox,
     QSpinBox,
     QTextEdit,
     QGridLayout,
+    QFormLayout,
     QListWidget,
     QMessageBox,
     QSlider,
@@ -879,6 +882,7 @@ class HermansTab(QWidget):
         self.total_frames = 1
         self._updating_frame_controls = False
         self.instrument_mode = "XENOCS"
+        self.custom_anisotropy_geometry = None
         self.q_axis_unit = "nm"
         self._order_fit_timer = QTimer(self)
         self._order_fit_timer.setSingleShot(True)
@@ -1562,8 +1566,8 @@ class HermansTab(QWidget):
         self.btn_custom.clicked.connect(lambda: self.set_instrument_mode("Custom"))
         self.line_params_button = QPushButton("+")
         self.line_params_button.setFixedWidth(28)
-        self.line_params_button.setToolTip("Show line parameters")
-        self.line_params_button.clicked.connect(lambda: self.params_box.setVisible(not self.params_box.isVisible()))
+        self.line_params_button.setToolTip("Edit pyFAI geometry parameters")
+        self.line_params_button.clicked.connect(self.open_geometry_dialog)
 
         for button in [
             self.btn_xenocs,
@@ -2028,6 +2032,155 @@ class HermansTab(QWidget):
             y = self.center_y_spin.value() if self.center_y_spin.value() != 0 else header_float(header, CENTER_Y_KEYS, ny / 2)
 
         self.set_center_spins(x, y)
+
+    def current_anisotropy_geometry(self):
+        header = self.current_header or {}
+        image = self.current_image
+        ny, nx = image.shape if image is not None else (0, 0)
+
+        if self.instrument_mode == "Custom" and self.custom_anisotropy_geometry:
+            geometry = dict(self.custom_anisotropy_geometry)
+        elif self.instrument_mode == "ID13":
+            geometry = {
+                "center_x": ID13_DEFAULT_CENTER_X,
+                "center_y": ID13_DEFAULT_CENTER_Y,
+                "distance": ID13_DEFAULT_DISTANCE_M,
+                "pixel_x": ID13_DEFAULT_PIXEL_MM,
+                "pixel_y": ID13_DEFAULT_PIXEL_MM,
+                "wavelength": ID13_DEFAULT_WAVELENGTH_A,
+            }
+        else:
+            if self.instrument_mode == "ID02":
+                default_center_x = ID02_DEFAULT_CENTER_X
+                default_center_y = ID02_DEFAULT_CENTER_Y
+                default_distance = ID02_DEFAULT_DISTANCE_M
+                default_pixel = ID02_DEFAULT_PIXEL_MM
+                default_wavelength = ID02_DEFAULT_WAVELENGTH_A
+            else:
+                default_center_x = 612.0
+                default_center_y = 649.0
+                default_distance = 0.9
+                default_pixel = 0.075
+                default_wavelength = 1.54189
+
+            geometry = {
+                "center_x": header_float(header, CENTER_X_KEYS, default_center_x),
+                "center_y": header_float(header, CENTER_Y_KEYS, default_center_y),
+                "distance": header_float(
+                    header,
+                    ["SampleDistance", "sampledistance", "sample_distance", "Distance", "DetectorDistance"],
+                    default_distance,
+                ),
+                "pixel_x": header_float(header, ["PSize_1", "psize_1", "PixelSizeX", "pixel_x"], default_pixel),
+                "pixel_y": header_float(header, ["PSize_2", "psize_2", "PixelSizeY", "pixel_y"], default_pixel),
+                "wavelength": header_float(header, ["Wavelength", "wavelength"], default_wavelength),
+            }
+
+        if self.center_x_spin.value() != 0:
+            geometry["center_x"] = self.center_x_spin.value()
+        elif geometry.get("center_x", 0) == 0 and nx:
+            geometry["center_x"] = nx / 2
+
+        if self.center_y_spin.value() != 0:
+            geometry["center_y"] = self.center_y_spin.value()
+        elif geometry.get("center_y", 0) == 0 and ny:
+            geometry["center_y"] = ny / 2
+
+        if geometry["pixel_x"] < 1e-3:
+            geometry["pixel_x"] *= 1000
+        if geometry["pixel_y"] < 1e-3:
+            geometry["pixel_y"] *= 1000
+        if geometry["wavelength"] < 1e-6:
+            geometry["wavelength"] *= 1e10
+
+        return geometry
+
+    def open_geometry_dialog(self):
+        geometry = self.current_anisotropy_geometry()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("pyFAI geometry + anisotropy")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+
+        def dialog_spin(value, decimals=6, minimum=0.0, maximum=1e9, suffix=""):
+            spin = QDoubleSpinBox()
+            spin.setDecimals(decimals)
+            spin.setRange(minimum, maximum)
+            spin.setValue(float(value))
+            spin.setFixedWidth(150)
+            spin.setKeyboardTracking(False)
+            if suffix:
+                spin.setSuffix(suffix)
+            return spin
+
+        dialog_spins = {
+            "center_x": dialog_spin(geometry["center_x"], decimals=3, minimum=-1e6, maximum=1e6),
+            "center_y": dialog_spin(geometry["center_y"], decimals=3, minimum=-1e6, maximum=1e6),
+            "distance": dialog_spin(geometry["distance"], decimals=16, suffix=" m"),
+            "pixel_x": dialog_spin(geometry["pixel_x"], decimals=6, suffix=" mm"),
+            "pixel_y": dialog_spin(geometry["pixel_y"], decimals=6, suffix=" mm"),
+            "wavelength": dialog_spin(geometry["wavelength"], decimals=16, suffix=" Å"),
+        }
+
+        form.addRow("Center X", dialog_spins["center_x"])
+        form.addRow("Center Y", dialog_spins["center_y"])
+        form.addRow("Distance", dialog_spins["distance"])
+        form.addRow("Pixel X", dialog_spins["pixel_x"])
+        form.addRow("Pixel Y", dialog_spins["pixel_y"])
+        form.addRow("Wavelength", dialog_spins["wavelength"])
+
+        settings_box = QGroupBox("Anisotropy settings")
+        settings_form = QFormLayout(settings_box)
+        settings_form.setContentsMargins(*GROUP_BOX_MARGINS)
+        settings_form.setSpacing(6)
+
+        h_min_spin = dialog_spin(self.h_psi_min.value(), decimals=3, maximum=360.0, suffix=" °")
+        h_max_spin = dialog_spin(self.h_psi_max.value(), decimals=3, maximum=360.0, suffix=" °")
+        v_min_spin = dialog_spin(self.v_psi_min.value(), decimals=3, maximum=360.0, suffix=" °")
+        v_max_spin = dialog_spin(self.v_psi_max.value(), decimals=3, maximum=360.0, suffix=" °")
+        q_min_spin = dialog_spin(self.q_min_filter.value(), decimals=4, maximum=1000.0, suffix=" nm⁻¹")
+        q_max_spin = dialog_spin(self.q_max_filter.value(), decimals=4, maximum=1000.0, suffix=" nm⁻¹")
+        reference_spin = dialog_spin(self.reference_angle.value(), decimals=3, minimum=-180.0, maximum=180.0, suffix=" °")
+        q_range_checkbox = QCheckBox("Use q range")
+        q_range_checkbox.setChecked(self.use_q_range.isChecked())
+
+        settings_form.addRow("Horizontal ψ min", h_min_spin)
+        settings_form.addRow("Horizontal ψ max", h_max_spin)
+        settings_form.addRow("Vertical ψ min", v_min_spin)
+        settings_form.addRow("Vertical ψ max", v_max_spin)
+        settings_form.addRow("", q_range_checkbox)
+        settings_form.addRow("q min", q_min_spin)
+        settings_form.addRow("q max", q_max_spin)
+        settings_form.addRow("Reference angle", reference_spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addLayout(form)
+        layout.addWidget(settings_box)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self.custom_anisotropy_geometry = {
+            key: spin.value()
+            for key, spin in dialog_spins.items()
+        }
+        self.set_center_spins(
+            self.custom_anisotropy_geometry["center_x"],
+            self.custom_anisotropy_geometry["center_y"],
+        )
+        self.h_psi_min.setValue(h_min_spin.value())
+        self.h_psi_max.setValue(h_max_spin.value())
+        self.v_psi_min.setValue(v_min_spin.value())
+        self.v_psi_max.setValue(v_max_spin.value())
+        self.use_q_range.setChecked(q_range_checkbox.isChecked())
+        self.q_min_filter.setValue(q_min_spin.value())
+        self.q_max_filter.setValue(q_max_spin.value())
+        self.reference_angle.setValue(reference_spin.value())
+        self.set_instrument_mode("Custom")
 
     def update_fit_mode(self, *args):
         use_fit = self.fit_with_data_radio.isChecked()
@@ -2759,38 +2912,15 @@ class HermansTab(QWidget):
             return
 
         image = self.current_image
-        header = self.current_header or {}
-
-        ny, nx = image.shape
         if self.center_x_spin.value() == 0 and self.center_y_spin.value() == 0:
             self.apply_instrument_preset()
-        xc = self.center_x_spin.value()
-        yc = self.center_y_spin.value()
-        if self.instrument_mode == "ID02":
-            default_distance = ID02_DEFAULT_DISTANCE_M
-            default_pixel = ID02_DEFAULT_PIXEL_MM
-            default_wavelength = ID02_DEFAULT_WAVELENGTH_A
-        elif self.instrument_mode == "ID13":
-            distance = ID13_DEFAULT_DISTANCE_M
-            pixel_x = ID13_DEFAULT_PIXEL_MM
-            pixel_y = ID13_DEFAULT_PIXEL_MM
-            wavelength = ID13_DEFAULT_WAVELENGTH_A
-        else:
-            default_distance = 0.9
-            default_pixel = 0.075
-            default_wavelength = 1.54189
-        if self.instrument_mode != "ID13":
-            distance = header_float(header, ["SampleDistance", "sampledistance", "sample_distance", "Distance", "DetectorDistance"], default_distance)
-            pixel_x = header_float(header, ["PSize_1", "psize_1", "PixelSizeX", "pixel_x"], default_pixel)
-            pixel_y = header_float(header, ["PSize_2", "psize_2", "PixelSizeY", "pixel_y"], default_pixel)
-            wavelength = header_float(header, ["Wavelength", "wavelength"], default_wavelength)
-
-        if pixel_x < 1e-3:
-            pixel_x *= 1000
-        if pixel_y < 1e-3:
-            pixel_y *= 1000
-        if wavelength < 1e-6:
-            wavelength *= 1e10
+        geometry = self.current_anisotropy_geometry()
+        xc = geometry["center_x"]
+        yc = geometry["center_y"]
+        distance = geometry["distance"]
+        pixel_x = geometry["pixel_x"]
+        pixel_y = geometry["pixel_y"]
+        wavelength = geometry["wavelength"]
 
         horizontal_ranges = [(self.h_psi_min.value(), self.h_psi_max.value())]
         vertical_ranges = [(self.v_psi_min.value(), self.v_psi_max.value())]

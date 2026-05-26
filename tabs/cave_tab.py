@@ -230,13 +230,20 @@ def write_edf_file(filename: str, image: np.ndarray, raw_header_text: str, byte_
         file.write(output.tobytes(order="C"))
 
 
+def sanitize_cave_output_image(image: np.ndarray):
+    output = image.astype(np.float32, copy=True)
+    output[~np.isfinite(output)] = np.nan
+    output[output < 0] = np.nan
+    return output
+
+
 # New function for writing cave-filled H5 frames
 def write_h5_frame_file(filename: str, image: np.ndarray, source_file: str, source_dataset_name: str, frame_index: int):
     filename = Path(filename)
     source_file = Path(source_file)
 
     with h5py.File(filename, "w") as out:
-        dataset = out.create_dataset("/entry_0000/instrument/eiger/data", data=image.astype(np.float32), compression="gzip")
+        dataset = out.create_dataset("/entry_0000/instrument/eiger/data", data=sanitize_cave_output_image(image), compression="gzip")
         dataset.attrs["source_file"] = str(source_file.name)
         dataset.attrs["source_dataset"] = str(source_dataset_name)
         dataset.attrs["source_frame"] = int(frame_index)
@@ -3273,7 +3280,7 @@ class CaveTab(QWidget):
                 output_path += ".edf"
 
             try:
-                write_edf_file(output_path, self.image_filled, self.raw_header_text, self.byte_order)
+                write_edf_file(output_path, sanitize_cave_output_image(self.image_filled), self.raw_header_text, self.byte_order)
                 self.status.append(f"\nSaved cave EDF:\n{output_path}")
             except Exception as error:
                 QMessageBox.critical(self, "Save error", str(error))
