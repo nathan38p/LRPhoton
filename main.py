@@ -851,8 +851,15 @@ class MainWindow(QMainWindow):
         detail = f"\n\nSystem error: {error}" if error else ""
         return (
             "LRPhoton found an update, but the installation folder is not writable.\n\n"
-            "If LRPhoton is installed in C:\\Program Files\\LRPhoton or /Applications, "
-            "restart LRPhoton with administrator rights, or install the latest release manually."
+            "If you do not have administrator rights, install the update manually:\n"
+            f"1. Open {GITHUB_URL}\n"
+            "2. Click the green Code button, then Download ZIP.\n"
+            "3. Extract the ZIP.\n"
+            "4. Open the extracted LRPhoton folder.\n"
+            "5. Copy its contents into C:\\Program Files\\LRPhoton "
+            "(or C:\\Programmes\\LRPhoton if that is where LRPhoton is installed), "
+            "replacing the existing files.\n\n"
+            "If Windows refuses the copy, ask someone with administrator rights to do this step."
             f"{detail}"
         )
 

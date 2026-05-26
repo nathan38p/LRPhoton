@@ -59,23 +59,49 @@ echo Python architecture:
 echo.
 
 set "SOURCE=%~dp0"
-set "DEST=C:\Program Files\LRPhoton"
+
+net session >nul 2>&1
+if errorlevel 1 (
+    echo No administrator rights detected.
+    echo LRPhoton will be installed for the current user.
+    set "DEST=%LOCALAPPDATA%\Programs\LRPhoton"
+) else (
+    echo Administrator rights detected.
+    echo LRPhoton will be installed for all users.
+    set "DEST=C:\Program Files\LRPhoton"
+)
+
+for %%I in ("%SOURCE%.") do set "SOURCE_FULL=%%~fI"
+for %%I in ("%DEST%") do set "DEST_FULL=%%~fI"
 
 echo Creating installation folder...
 mkdir "%DEST%" >nul 2>&1
 
 echo.
-echo Copying files...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Copy-Item -Path '%SOURCE%*' -Destination '%DEST%' -Recurse -Force"
+if /I "%SOURCE_FULL%"=="%DEST_FULL%" (
+    echo Install.bat is already running from the installation folder.
+    echo Skipping file copy.
+) else (
+    echo Copying files...
+    robocopy "%SOURCE%" "%DEST%" /E /XD .git __pycache__ .venv venv build dist /XF .DS_Store /NFL /NDL /NJH /NJS /NP
 
-if errorlevel 1 (
-    echo.
-    echo ERROR: File copy failed.
-    echo Make sure Install.bat is running as administrator.
-    echo.
-    echo Press any key to close Install.bat...
-    pause
-    exit /b 1
+    if errorlevel 8 (
+        echo.
+        echo ERROR: File copy failed.
+        echo Make sure Install.bat is running as administrator.
+        echo.
+        echo If you do not have administrator rights, install LRPhoton manually:
+        echo 1. Go to the LRPhoton GitHub page.
+        echo 2. Click the green Code button, then Download ZIP.
+        echo 3. Extract the ZIP.
+        echo 4. Copy the contents of the LRPhoton folder into:
+        echo    C:\Program Files\LRPhoton
+        echo    or C:\Programmes\LRPhoton if this is your installation folder.
+        echo.
+        echo Press any key to close Install.bat...
+        pause
+        exit /b 1
+    )
 )
 
 echo.

@@ -82,6 +82,7 @@ def read_dat_curves(file_path):
 
     curve_defs = []
     file_x_label = ""
+    is_manual_dataset = "# Created manually in Plot 1D" in raw_text
     for raw_line in raw_text.splitlines():
         line = raw_line.strip()
         if line.startswith("# x_label "):
@@ -139,6 +140,7 @@ def read_dat_curves(file_path):
                     "axis": normalize_plot_axis(info.get("axis", "left")),
                     "x_label": str(info.get("x_label") or file_x_label or ""),
                     "y_label": str(info.get("y_label") or info.get("label") or ""),
+                    "manual_dataset": is_manual_dataset,
                 }
             )
 
@@ -189,6 +191,7 @@ def read_dat_curves(file_path):
             "axis": "left",
             "x_label": "",
             "y_label": "",
+            "manual_dataset": False,
         }
     ]
 
@@ -1390,6 +1393,7 @@ class DatPlotTab(QWidget):
                     "axis": normalize_plot_axis(loaded_curve.get("axis", "left")),
                     "x_label": loaded_curve.get("x_label", ""),
                     "y_label": loaded_curve.get("y_label", ""),
+                    "manual_dataset": bool(loaded_curve.get("manual_dataset", False)),
                     "color": default_color(index),
                 }
 
@@ -2356,6 +2360,11 @@ class DatPlotTab(QWidget):
         if event.button != 3:
             return
 
+        axis_hit = self.axis_label_hit(event)
+        if axis_hit is not None:
+            self.rename_axis_label(axis_hit)
+            return
+
         curve_key = self.nearest_curve_key_at(event)
         if curve_key is None:
             return
@@ -2378,6 +2387,57 @@ class DatPlotTab(QWidget):
             if "original_y" in curve:
                 curve["y"] = np.asarray(curve["original_y"], dtype=float).copy()
                 self.update_plot()
+
+    def axis_label_hit(self, event):
+        try:
+            if self.canvas.ax.xaxis.label.contains(event)[0]:
+                return ("x", None)
+        except Exception:
+            pass
+
+        axis_map = {"left": self.canvas.ax}
+        axis_map.update(getattr(self, "extra_axes", {}))
+        for axis_name, axis in axis_map.items():
+            try:
+                if axis.yaxis.label.contains(event)[0]:
+                    return ("y", axis_name)
+            except Exception:
+                continue
+        return None
+
+    def rename_axis_label(self, axis_hit):
+        kind, axis_name = axis_hit
+        if kind == "x":
+            current = self.canvas.ax.get_xlabel()
+            text, ok = QInputDialog.getText(self, "Rename X axis", "X axis title:", text=current)
+            if not ok:
+                return
+            label = text.strip()
+            self.x_label.blockSignals(True)
+            self.x_label.setText(label)
+            self.x_label.blockSignals(False)
+            for curve in self.curves.values():
+                curve["x_label"] = label
+            self.update_plot()
+            return
+
+        current = ""
+        axis_map = {"left": self.canvas.ax}
+        axis_map.update(getattr(self, "extra_axes", {}))
+        if axis_name in axis_map:
+            current = axis_map[axis_name].get_ylabel()
+        text, ok = QInputDialog.getText(self, "Rename Y axis", "Y axis title:", text=current)
+        if not ok:
+            return
+        label = text.strip()
+        if axis_name == "left":
+            self.y_label.blockSignals(True)
+            self.y_label.setText(label)
+            self.y_label.blockSignals(False)
+        for curve in self.curves.values():
+            if normalize_plot_axis(curve.get("axis", "left")) == axis_name:
+                curve["y_label"] = label
+        self.update_plot()
 
     def graph_button_release(self, event):
         self._dragging_peak_label = None
@@ -2477,7 +2537,8 @@ class DatPlotTab(QWidget):
         return True
 
     def apply_default_plot_mode(self):
-        mode = "linear linear" if self.curves_are_really_0_to_360() else "log log"
+        has_manual_dataset = any(curve.get("manual_dataset", False) for curve in self.curves.values())
+        mode = "linear linear" if has_manual_dataset or self.curves_are_really_0_to_360() else "log log"
 
         if self.plot_mode.currentText() == mode:
             return
