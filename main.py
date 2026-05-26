@@ -1180,9 +1180,12 @@ class MainWindow(QMainWindow):
         app_dir = Path(__file__).resolve().parent
         try:
             if sys.platform == "darwin":
-                launcher = app_dir / "LRPhoton.command"
-                if launcher.exists():
-                    subprocess.Popen(["open", str(launcher)])
+                app_launcher = app_dir.parent / "LRPhoton.app"
+                command_launcher = app_dir / "LRPhoton.command"
+                if app_launcher.exists():
+                    subprocess.Popen(["open", str(app_launcher)])
+                elif command_launcher.exists():
+                    subprocess.Popen(["open", str(command_launcher)])
                 else:
                     subprocess.Popen([sys.executable, str(app_dir / "main.py")], cwd=str(app_dir))
 

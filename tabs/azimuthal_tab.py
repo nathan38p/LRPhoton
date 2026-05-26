@@ -954,7 +954,7 @@ class AzimuthalTab(QWidget):
         self.axis_mask_pixels.setFixedHeight(24)
         self.axis_mask_pixels.setMinimumWidth(parameter_field_width)
         self.remove_isolated_spikes = QCheckBox("Remove isolated spikes")
-        self.remove_isolated_spikes.setChecked(True)
+        self.remove_isolated_spikes.setChecked(False)
         self.normalization_mode = QComboBox()
         self.normalization_mode.addItem("Raw detector intensity", "raw")
         self.normalization_mode.addItem("Counts/s: I / ExposureTime", "exposure")

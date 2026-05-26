@@ -1079,7 +1079,7 @@ class HermansTab(QWidget):
             params_layout, 0, "Baseline", 0.0, -1.0, 1.0
         )
         self.peak_spin, self.peak_slider = self.add_slider_control(
-            params_layout, 1, "Peak ψ₀ (°)", 85.0, 70.0, 130.0
+            params_layout, 1, "Peak ψ₀ (°)", 85.0, 0.0, 360.0
         )
 
         self.fit_mode_label = QLabel("Fit:")

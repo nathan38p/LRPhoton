@@ -41,8 +41,11 @@ C:\Users\<your-user-name>\AppData\Local\Programs\LRPhoton
 The macOS installer will:
 
 * copy the LRPhoton folder into `/Applications/LRPhoton`
+* install all required Python dependencies
 * create `/Applications/LRPhoton.app`
 * apply the LRPhoton icon to the application launcher
+
+On Apple Silicon Macs, install the macOS universal2/arm64 Python build. If an Intel-only Python is used, macOS may show a Rosetta compatibility warning.
 
 `LRPhoton.app` is only a small launcher that opens:
 
