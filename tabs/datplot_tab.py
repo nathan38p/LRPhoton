@@ -63,14 +63,87 @@ from .ui_style import (
 )
 
 
+PLOT_Y_AXES = ("left", "left2", "right", "right2")
+
+
 # ============================================================
 # ========================== TOOLS ============================
 # ============================================================
 
 def read_dat_curve(file_path):
+    curves = read_dat_curves(file_path)
+    first = curves[0]
+    return first["x"], first["y"]
+
+
+def read_dat_curves(file_path):
     file_path = Path(file_path)
-    text = file_path.read_text(encoding="utf-8", errors="ignore")
-    text = text.replace(",", ".")
+    raw_text = file_path.read_text(encoding="utf-8", errors="ignore")
+
+    curve_defs = []
+    file_x_label = ""
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("# x_label "):
+            file_x_label = line[len("# x_label "):].strip()
+            continue
+        if not line.startswith("# curve "):
+            continue
+        try:
+            payload = json.loads(line[len("# curve "):])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            curve_defs.append(payload)
+
+    text = raw_text.replace(",", ".")
+
+    if curve_defs:
+        rows = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            for separator in [";", "\t", ","]:
+                line = line.replace(separator, " ")
+            values = []
+            for part in line.split():
+                try:
+                    values.append(float(part))
+                except ValueError:
+                    values.append(np.nan)
+            if values:
+                rows.append(values)
+
+        curves = []
+        for index, info in enumerate(curve_defs):
+            x_col = 2 * index
+            y_col = x_col + 1
+            points = []
+            for row in rows:
+                if len(row) <= y_col:
+                    continue
+                x, y = row[x_col], row[y_col]
+                if np.isfinite(x) and np.isfinite(y):
+                    points.append((x, y))
+            if not points:
+                continue
+            array = np.asarray(points, dtype=float)
+            order = np.argsort(array[:, 0])
+            array = array[order]
+            curves.append(
+                {
+                    "x": array[:, 0],
+                    "y": array[:, 1],
+                    "legend": str(info.get("label") or f"{file_path.stem} {index + 1}"),
+                    "axis": normalize_plot_axis(info.get("axis", "left")),
+                    "x_label": str(info.get("x_label") or file_x_label or ""),
+                    "y_label": str(info.get("y_label") or info.get("label") or ""),
+                }
+            )
+
+        if curves:
+            return curves
 
     data = []
 
@@ -108,7 +181,21 @@ def read_dat_curve(file_path):
 
     order = np.argsort(array[:, 0])
     array = array[order]
-    return array[:, 0], array[:, 1]
+    return [
+        {
+            "x": array[:, 0],
+            "y": array[:, 1],
+            "legend": file_path.stem,
+            "axis": "left",
+            "x_label": "",
+            "y_label": "",
+        }
+    ]
+
+
+def normalize_plot_axis(value):
+    axis = str(value or "left").strip().lower()
+    return axis if axis in PLOT_Y_AXES else "left"
 
 
 def default_color(index):
@@ -395,6 +482,7 @@ class DatPlotTab(QWidget):
         self._refreshing_curve_table = False
         self._refreshing_guide_table = False
         self.q_axis_unit = "nm"
+        self.extra_axes = {}
 
         self.build_ui()
         self.refresh_files()
@@ -539,6 +627,11 @@ class DatPlotTab(QWidget):
         self.file_list.itemSelectionChanged.connect(self.selection_changed)
         file_layout.addWidget(self.file_list, stretch=1)
 
+        self.create_dat_button = QPushButton("Create .dat")
+        self.create_dat_button.setToolTip("Create a multi-curve .dat from the curves currently loaded in Plot 1D")
+        self.create_dat_button.clicked.connect(self.open_create_dat_dialog)
+        file_layout.addWidget(self.create_dat_button)
+
         # Plot settings widgets (previously in settings_box, now just created here)
         self.plot_mode = QComboBox()
         self.plot_mode.addItems(["linear linear", "linear log", "log linear", "log log", "Kratky"])
@@ -573,22 +666,24 @@ class DatPlotTab(QWidget):
         curve_box.setMinimumHeight(170)
         curve_panel_layout.addWidget(curve_box, stretch=1)
 
-        self.curve_table = CurveTableWidget(0, 4)
+        self.curve_table = CurveTableWidget(0, 5)
         self.curve_table.setMinimumHeight(140)
-        self.curve_table.setHorizontalHeaderLabels(["File", "Legend", "Color", ""])
+        self.curve_table.setHorizontalHeaderLabels(["File", "Legend", "Axis", "Color", ""])
         self.curve_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.curve_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.curve_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
         self.curve_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
-        self.curve_table.setColumnWidth(2, 44)
-        self.curve_table.setColumnWidth(3, 30)
+        self.curve_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
+        self.curve_table.setColumnWidth(2, 58)
+        self.curve_table.setColumnWidth(3, 44)
+        self.curve_table.setColumnWidth(4, 30)
         self.curve_table.verticalHeader().setVisible(False)
         self.curve_table.verticalHeader().setDefaultSectionSize(28)
         self.curve_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.curve_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.curve_table.setDropIndicatorShown(True)
         self.curve_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.curve_table.setItemDelegateForColumn(2, ColorCellDelegate(self.curve_table))
+        self.curve_table.setItemDelegateForColumn(3, ColorCellDelegate(self.curve_table))
         self.curve_table.cellChanged.connect(self.curve_table_changed)
         self.curve_table.cellDoubleClicked.connect(self.curve_table_double_clicked)
         self.curve_table.customContextMenuRequested.connect(self.open_curve_table_menu)
@@ -844,6 +939,360 @@ class DatPlotTab(QWidget):
         except Exception as error:
             QMessageBox.warning(self, "Save plot error", f"Could not save plot:\n\n{error}")
 
+    def open_create_dat_dialog(self):
+        selected_files = self.selected_files()
+        if len(selected_files) == 1:
+            try:
+                raw_text = Path(selected_files[0]).read_text(encoding="utf-8", errors="ignore")
+                if "# LRPhoton multi-curve dat" in raw_text:
+                    self.open_manual_dat_dialog(edit_path=selected_files[0])
+                    return
+            except Exception:
+                pass
+
+        if not self.curves:
+            self.open_manual_dat_dialog()
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Create multi-curve .dat")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        table = QTableWidget(len(self.curves), 6)
+        table.setHorizontalHeaderLabels(["Use", "Legend", "Axis", "X title", "Y title", "Source"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        table.setColumnWidth(0, 48)
+        table.setColumnWidth(2, 80)
+        table.verticalHeader().setVisible(False)
+
+        keys = list(self.curves.keys())
+        axis_widgets = {}
+        for row, key in enumerate(keys):
+            curve = self.curves[key]
+            use_item = QTableWidgetItem("")
+            use_item.setFlags(use_item.flags() | Qt.ItemIsUserCheckable)
+            use_item.setCheckState(Qt.Checked)
+            table.setItem(row, 0, use_item)
+
+            table.setItem(row, 1, QTableWidgetItem(curve["legend"]))
+
+            axis_combo = QComboBox()
+            axis_combo.addItems(PLOT_Y_AXES)
+            axis_combo.setCurrentText(normalize_plot_axis(curve.get("axis", "left")))
+            table.setCellWidget(row, 2, axis_combo)
+            axis_widgets[row] = axis_combo
+
+            table.setItem(row, 3, QTableWidgetItem(curve.get("x_label") or self.x_label.text() or self.q_axis_label()))
+            table.setItem(row, 4, QTableWidgetItem(curve.get("y_label") or curve["legend"]))
+
+            source_item = QTableWidgetItem(key)
+            source_item.setFlags(source_item.flags() & ~Qt.ItemIsEditable)
+            table.setItem(row, 5, source_item)
+
+        layout.addWidget(table)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected = []
+        for row, key in enumerate(keys):
+            use_item = table.item(row, 0)
+            if use_item is None or use_item.checkState() != Qt.Checked:
+                continue
+            legend_item = table.item(row, 1)
+            legend = legend_item.text().strip() if legend_item and legend_item.text().strip() else self.curves[key]["legend"]
+            x_title_item = table.item(row, 3)
+            y_title_item = table.item(row, 4)
+            selected.append(
+                {
+                    "key": key,
+                    "legend": legend,
+                    "axis": normalize_plot_axis(axis_widgets[row].currentText()),
+                    "x_label": x_title_item.text().strip() if x_title_item else "",
+                    "y_label": y_title_item.text().strip() if y_title_item else "",
+                }
+            )
+
+        if not selected:
+            QMessageBox.warning(self, "Create .dat", "Select at least one curve.")
+            return
+
+        default_name = "multi_curve.dat" if len(selected) > 1 else f"{selected[0]['legend']}.dat"
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save multi-curve .dat",
+            str(self.current_folder / default_name),
+            "DAT file (*.dat)",
+        )
+        if not out_path:
+            return
+        if Path(out_path).suffix.lower() != ".dat":
+            out_path += ".dat"
+
+        try:
+            self.write_multi_curve_dat(Path(out_path), selected)
+        except Exception as error:
+            QMessageBox.warning(self, "Create .dat error", f"Could not create the file:\n\n{error}")
+            return
+
+        self.refresh_files()
+
+    def open_manual_dat_dialog(self, edit_path=None):
+        initial_curves = None
+        if edit_path is not None:
+            try:
+                initial_curves = read_dat_curves(edit_path)
+            except Exception as error:
+                QMessageBox.warning(self, "Edit .dat error", f"Could not read this manual dataset:\n\n{error}")
+                return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit .dat" if edit_path is not None else "Create .dat")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        curve_count = QSpinBox()
+        curve_count.setRange(1, 6)
+        curve_count.setValue(len(initial_curves) if initial_curves else 1)
+        row_count = QSpinBox()
+        row_count.setRange(2, 1000)
+        initial_rows = max((len(curve["x"]) for curve in initial_curves), default=20) if initial_curves else 20
+        row_count.setValue(initial_rows)
+        rebuild_button = QPushButton("Rebuild table")
+        controls.addWidget(QLabel("Curves:"))
+        controls.addWidget(curve_count)
+        controls.addWidget(QLabel("Rows:"))
+        controls.addWidget(row_count)
+        controls.addWidget(rebuild_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        meta_table = QTableWidget(curve_count.value(), 4)
+        meta_table.setHorizontalHeaderLabels(["Legend", "Axis", "X title", "Y title"])
+        meta_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        meta_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        meta_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        meta_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        meta_table.setColumnWidth(1, 90)
+        meta_table.verticalHeader().setVisible(False)
+        layout.addWidget(meta_table)
+
+        data_table = QTableWidget(row_count.value(), curve_count.value() * 2)
+        data_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(data_table, stretch=1)
+
+        axis_widgets = {}
+
+        def rebuild_tables(preserve=True):
+            previous = []
+            if preserve:
+                for curve_index in range(meta_table.rowCount()):
+                    points = []
+                    for row in range(data_table.rowCount()):
+                        x_item = data_table.item(row, curve_index * 2)
+                        y_item = data_table.item(row, curve_index * 2 + 1)
+                        points.append((
+                            x_item.text() if x_item else "",
+                            y_item.text() if y_item else "",
+                        ))
+                    previous.append(
+                        {
+                            "legend": meta_table.item(curve_index, 0).text() if meta_table.item(curve_index, 0) else f"Curve {curve_index + 1}",
+                            "axis": axis_widgets.get(curve_index).currentText() if curve_index in axis_widgets else "left",
+                            "x_label": meta_table.item(curve_index, 2).text() if meta_table.item(curve_index, 2) else "x",
+                            "y_label": meta_table.item(curve_index, 3).text() if meta_table.item(curve_index, 3) else f"Curve {curve_index + 1}",
+                            "points": points,
+                        }
+                    )
+
+            n_curves = curve_count.value()
+            n_rows = row_count.value()
+            meta_table.setRowCount(n_curves)
+            data_table.setRowCount(n_rows)
+            data_table.setColumnCount(n_curves * 2)
+            headers = []
+            axis_widgets.clear()
+
+            for curve_index in range(n_curves):
+                previous_curve = previous[curve_index] if curve_index < len(previous) else None
+                legend = previous_curve["legend"] if previous_curve else f"Curve {curve_index + 1}"
+                x_label = previous_curve["x_label"] if previous_curve else "x"
+                y_label = previous_curve["y_label"] if previous_curve else legend
+                meta_table.setItem(curve_index, 0, QTableWidgetItem(legend))
+
+                axis_combo = QComboBox()
+                axis_combo.addItems(PLOT_Y_AXES)
+                axis_combo.setCurrentText(normalize_plot_axis(previous_curve["axis"] if previous_curve else "left"))
+                meta_table.setCellWidget(curve_index, 1, axis_combo)
+                axis_widgets[curve_index] = axis_combo
+                meta_table.setItem(curve_index, 2, QTableWidgetItem(x_label))
+                meta_table.setItem(curve_index, 3, QTableWidgetItem(y_label))
+
+                headers.extend([x_label or f"x{curve_index + 1}", y_label or f"y{curve_index + 1}"])
+
+                if previous_curve:
+                    for row, (x_text, y_text) in enumerate(previous_curve["points"][:n_rows]):
+                        data_table.setItem(row, curve_index * 2, QTableWidgetItem(x_text))
+                        data_table.setItem(row, curve_index * 2 + 1, QTableWidgetItem(y_text))
+
+            data_table.setHorizontalHeaderLabels(headers)
+
+        rebuild_button.clicked.connect(lambda: rebuild_tables(True))
+        rebuild_tables(False)
+
+        if initial_curves:
+            for curve_index, curve in enumerate(initial_curves):
+                meta_table.setItem(curve_index, 0, QTableWidgetItem(curve.get("legend", f"Curve {curve_index + 1}")))
+                axis_widgets[curve_index].setCurrentText(normalize_plot_axis(curve.get("axis", "left")))
+                meta_table.setItem(curve_index, 2, QTableWidgetItem(curve.get("x_label") or "x"))
+                meta_table.setItem(curve_index, 3, QTableWidgetItem(curve.get("y_label") or curve.get("legend", f"Curve {curve_index + 1}")))
+                for row, (x, y) in enumerate(zip(curve["x"], curve["y"])):
+                    data_table.setItem(row, curve_index * 2, QTableWidgetItem(f"{x:.12g}"))
+                    data_table.setItem(row, curve_index * 2 + 1, QTableWidgetItem(f"{y:.12g}"))
+            data_table.setHorizontalHeaderLabels([
+                (meta_table.item(index // 2, 2 if index % 2 == 0 else 3).text()
+                 if meta_table.item(index // 2, 2 if index % 2 == 0 else 3)
+                 else f"{'x' if index % 2 == 0 else 'y'}{index // 2 + 1}")
+                for index in range(data_table.columnCount())
+            ])
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save .dat",
+            str(edit_path if edit_path is not None else self.current_folder / "manual_dataset.dat"),
+            "DAT file (*.dat)",
+        )
+        if not out_path:
+            return
+        if Path(out_path).suffix.lower() != ".dat":
+            out_path += ".dat"
+
+        try:
+            self.write_manual_dat(Path(out_path), meta_table, data_table, axis_widgets)
+        except Exception as error:
+            QMessageBox.warning(self, "Create .dat error", f"Could not create the file:\n\n{error}")
+            return
+
+        self.refresh_files()
+
+    def write_manual_dat(self, out_path, meta_table, data_table, axis_widgets):
+        curves = []
+        for curve_index in range(meta_table.rowCount()):
+            points = []
+            x_col = curve_index * 2
+            y_col = x_col + 1
+            for row in range(data_table.rowCount()):
+                x_item = data_table.item(row, x_col)
+                y_item = data_table.item(row, y_col)
+                if x_item is None or y_item is None:
+                    continue
+                try:
+                    x = float(x_item.text().replace(",", "."))
+                    y = float(y_item.text().replace(",", "."))
+                except ValueError:
+                    continue
+                if np.isfinite(x) and np.isfinite(y):
+                    points.append((x, y))
+
+            if not points:
+                continue
+
+            legend_item = meta_table.item(curve_index, 0)
+            legend = legend_item.text().strip() if legend_item and legend_item.text().strip() else f"Curve {curve_index + 1}"
+            x_label_item = meta_table.item(curve_index, 2)
+            y_label_item = meta_table.item(curve_index, 3)
+            x_label = x_label_item.text().strip() if x_label_item and x_label_item.text().strip() else "x"
+            y_label = y_label_item.text().strip() if y_label_item and y_label_item.text().strip() else legend
+            curves.append(
+                {
+                    "legend": legend,
+                    "axis": normalize_plot_axis(axis_widgets[curve_index].currentText()),
+                    "x_label": x_label,
+                    "y_label": y_label,
+                    "points": points,
+                }
+            )
+
+        if not curves:
+            raise ValueError("No valid x/y points were entered.")
+
+        max_len = max(len(curve["points"]) for curve in curves)
+        with open(out_path, "w", encoding="utf-8") as file:
+            file.write("# LRPhoton multi-curve dat\n")
+            file.write("# Created manually in Plot 1D\n")
+            file.write("# Each curve uses two columns: x_i y_i\n")
+            for curve in curves:
+                file.write("# curve " + json.dumps(
+                    {
+                        "label": curve["legend"],
+                        "axis": curve["axis"],
+                        "x_label": curve["x_label"],
+                        "y_label": curve["y_label"],
+                    },
+                    ensure_ascii=False,
+                ) + "\n")
+            headers = []
+            for curve in curves:
+                headers.extend([curve["x_label"], curve["y_label"]])
+            file.write("# " + " ".join(headers) + "\n")
+
+            for row in range(max_len):
+                values = []
+                for curve in curves:
+                    if row < len(curve["points"]):
+                        x, y = curve["points"][row]
+                        values.extend([f"{x:.12g}", f"{y:.12g}"])
+                    else:
+                        values.extend(["nan", "nan"])
+                file.write(" ".join(values) + "\n")
+
+    def write_multi_curve_dat(self, out_path, selected):
+        curves = [self.curves[item["key"]] for item in selected]
+        lengths = [len(curve["x"]) for curve in curves]
+        max_len = max(lengths)
+
+        with open(out_path, "w", encoding="utf-8") as file:
+            file.write("# LRPhoton multi-curve dat\n")
+            file.write("# Each curve uses two columns: x_i y_i\n")
+            for item in selected:
+                file.write("# curve " + json.dumps({"label": item["legend"], "axis": item["axis"]}, ensure_ascii=False) + "\n")
+            headers = []
+            for index, item in enumerate(selected, start=1):
+                headers.extend([f"x{index}", f"y{index}"])
+            file.write("# " + " ".join(headers) + "\n")
+
+            for row in range(max_len):
+                values = []
+                for curve in curves:
+                    if row < len(curve["x"]):
+                        values.extend([f"{curve['x'][row]:.12g}", f"{curve['y'][row]:.12g}"])
+                    else:
+                        values.extend(["nan", "nan"])
+                file.write(" ".join(values) + "\n")
+
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose folder", str(self.current_folder))
         if folder:
@@ -906,25 +1355,33 @@ class DatPlotTab(QWidget):
             return
 
         for file_path in selected:
-            key = file_path.name
-            if key in self.curves:
-                continue
-
             try:
-                x, y = read_dat_curve(file_path)
+                loaded_curves = read_dat_curves(file_path)
             except Exception as error:
                 QMessageBox.warning(self, "File reading error", f"{file_path.name}\n\n{error}")
                 continue
 
-            index = len(self.curves)
-            self.curves[key] = {
-                "path": file_path,
-                "x": x,
-                "y": y,
-                "original_y": y.copy(),
-                "legend": self.saved_legend_for_file(file_path) or file_path.stem,
-                "color": default_color(index),
-            }
+            for curve_index, loaded_curve in enumerate(loaded_curves):
+                base_key = file_path.name if len(loaded_curves) == 1 else f"{file_path.name}:{loaded_curve['legend']}"
+                key = base_key
+                suffix = 2
+                while key in self.curves:
+                    key = f"{base_key} ({suffix})"
+                    suffix += 1
+
+                index = len(self.curves)
+                saved_legend = self.saved_legend_for_file(file_path) if len(loaded_curves) == 1 else None
+                legend = saved_legend or loaded_curve.get("legend") or file_path.stem
+                y = np.asarray(loaded_curve["y"], dtype=float)
+                self.curves[key] = {
+                    "path": file_path,
+                    "x": np.asarray(loaded_curve["x"], dtype=float),
+                    "y": y,
+                    "original_y": y.copy(),
+                    "legend": legend,
+                    "axis": normalize_plot_axis(loaded_curve.get("axis", "left")),
+                    "color": default_color(index),
+                }
 
         self.refresh_curve_table()
         self.apply_default_plot_mode()
@@ -939,7 +1396,7 @@ class DatPlotTab(QWidget):
 
     def update_clear_header_button_position(self):
         header = self.curve_table.horizontalHeader()
-        column = 3
+        column = 4
         x = header.sectionViewportPosition(column)
         width = header.sectionSize(column)
         y = max(0, (header.height() - self.clear_header_button.height()) // 2)
@@ -967,11 +1424,15 @@ class DatPlotTab(QWidget):
             legend_item.setToolTip(str(curve["path"].name))
             self.curve_table.setItem(row, 1, legend_item)
 
+            axis_item = QTableWidgetItem(normalize_plot_axis(curve.get("axis", "left")))
+            axis_item.setToolTip("Use left, left2, right or right2 for the Y axis")
+            self.curve_table.setItem(row, 2, axis_item)
+
             color_item = QTableWidgetItem("")
             color_item.setFlags(color_item.flags() & ~Qt.ItemIsEditable)
             color_item.setBackground(QColor(curve["color"]))
             color_item.setToolTip(curve["color"])
-            self.curve_table.setItem(row, 2, color_item)
+            self.curve_table.setItem(row, 3, color_item)
 
             remove_button = QPushButton("−")
             remove_button.setFixedSize(22, 18)
@@ -997,7 +1458,7 @@ class DatPlotTab(QWidget):
             remove_layout.setContentsMargins(0, 0, 0, 0)
             remove_layout.setSpacing(0)
             remove_layout.addWidget(remove_button, alignment=Qt.AlignCenter)
-            self.curve_table.setCellWidget(row, 3, remove_holder)
+            self.curve_table.setCellWidget(row, 4, remove_holder)
 
         self.curve_table.blockSignals(False)
         self._refreshing_curve_table = False
@@ -1017,9 +1478,16 @@ class DatPlotTab(QWidget):
             item = self.curve_table.item(row, column)
             self.curves[key]["legend"] = item.text() if item else self.curves[key]["legend"]
             self.remember_legend_for_file(self.curves[key]["path"], self.curves[key]["legend"])
-            self.update_plot_legend_only()
+            self.update_plot()
             return
-        elif column == 2:
+        if column == 2:
+            item = self.curve_table.item(row, column)
+            axis = item.text() if item else "left"
+            self.curves[key]["axis"] = normalize_plot_axis(axis)
+            self.refresh_curve_table()
+            self.update_plot()
+            return
+        elif column == 3:
             item = self.curve_table.item(row, column)
             if item:
                 self.curves[key]["color"] = item.text()
@@ -1653,7 +2121,7 @@ class DatPlotTab(QWidget):
         self.update_plot()
 
     def curve_table_double_clicked(self, row, column):
-        if column != 2:
+        if column != 3:
             return
 
         file_item = self.curve_table.item(row, 0)
@@ -1918,6 +2386,8 @@ class DatPlotTab(QWidget):
         ]:
             if widget is not None:
                 widget.setEnabled(enabled)
+        if getattr(self, "create_dat_button", None) is not None:
+            self.create_dat_button.setEnabled(True)
 
     def make_plot_y(self, x, y):
         if self.plot_mode.currentText() == "Kratky":
@@ -2075,6 +2545,9 @@ class DatPlotTab(QWidget):
 
     def update_plot(self):
         ax = self.canvas.ax
+        for extra_ax in getattr(self, "extra_axes", {}).values():
+            extra_ax.remove()
+        self.extra_axes = {}
         ax.clear()
 
         if not self.curves:
@@ -2090,26 +2563,47 @@ class DatPlotTab(QWidget):
         if self.auto_limits.isChecked():
             self.update_limit_fields_from_current_data()
 
+        used_axes = {normalize_plot_axis(curve.get("axis", "left")) for curve in self.curves.values()}
+        axis_map = {"left": ax}
+        if "right" in used_axes:
+            axis_map["right"] = ax.twinx()
+        if "left2" in used_axes:
+            axis_map["left2"] = ax.twinx()
+            axis_map["left2"].spines["left"].set_position(("axes", -0.12))
+            axis_map["left2"].spines["left"].set_visible(True)
+            axis_map["left2"].spines["right"].set_visible(False)
+            axis_map["left2"].yaxis.set_label_position("left")
+            axis_map["left2"].yaxis.tick_left()
+        if "right2" in used_axes:
+            axis_map["right2"] = ax.twinx()
+            axis_map["right2"].spines["right"].set_position(("axes", 1.12))
+        self.extra_axes = {name: axis for name, axis in axis_map.items() if name != "left"}
+
         for key, curve in self.curves.items():
+            target_ax = axis_map.get(normalize_plot_axis(curve.get("axis", "left")), ax)
             x = self.make_plot_x(curve["x"])
             y = self.make_plot_y(curve["x"], curve["y"])
-            self.plot_curve_segments(ax, key, curve, x, y, mode)
+            self.plot_curve_segments(target_ax, key, curve, x, y, mode)
 
         self.draw_guide_bars(ax)
         self.draw_peak_labels(ax)
 
         if mode == "linear linear" or mode == "Kratky":
             ax.set_xscale("linear")
-            ax.set_yscale("linear")
+            for target_ax in axis_map.values():
+                target_ax.set_yscale("linear")
         elif mode == "linear log":
             ax.set_xscale("linear")
-            ax.set_yscale("log")
+            for target_ax in axis_map.values():
+                target_ax.set_yscale("log")
         elif mode == "log linear":
             ax.set_xscale("log")
-            ax.set_yscale("linear")
+            for target_ax in axis_map.values():
+                target_ax.set_yscale("linear")
         elif mode == "log log":
             ax.set_xscale("log")
-            ax.set_yscale("log")
+            for target_ax in axis_map.values():
+                target_ax.set_yscale("log")
 
         has_azim_profile = self.curves_are_really_0_to_360()
 
@@ -2120,16 +2614,42 @@ class DatPlotTab(QWidget):
         else:
             default_x_label = self.q_axis_label()
             ax.set_xlabel(self.x_label.text() or default_x_label)
-        ax.set_ylabel("q²I(q)" if mode == "Kratky" else (self.y_label.text() or "Intensity / a.u."))
+        axis_labels = {
+            "left": "q²I(q)" if mode == "Kratky" else (self.y_label.text() or "Intensity / a.u."),
+            "left2": "Left 2 / a.u.",
+            "right": "Right / a.u.",
+            "right2": "Right 2 / a.u.",
+        }
+        for axis_name, target_ax in axis_map.items():
+            target_ax.set_ylabel(axis_labels[axis_name])
         ax.set_title(self.title_edit.text())
-        apply_plot_display_style(ax)
+        for axis_name, target_ax in axis_map.items():
+            apply_plot_display_style(target_ax)
+            if axis_name != "left":
+                target_ax.grid(False)
         if self.show_legend.isChecked():
-            make_plot_legend(ax)
+            if len(axis_map) == 1:
+                make_plot_legend(ax)
+            else:
+                handles = []
+                labels = []
+                for target_ax in axis_map.values():
+                    axis_handles, axis_labels_for_legend = target_ax.get_legend_handles_labels()
+                    handles.extend(axis_handles)
+                    labels.extend(axis_labels_for_legend)
+                ax.legend(handles, labels, loc="best", frameon=True)
 
         if not self.auto_limits.isChecked():
             if self.x_max.value() > self.x_min.value():
                 ax.set_xlim(self.x_min.value(), self.x_max.value())
             if self.y_max.value() > self.y_min.value():
                 ax.set_ylim(self.y_min.value(), self.y_max.value())
+
+        if "left2" in axis_map:
+            self.canvas.fig.subplots_adjust(left=0.20)
+        if "right2" in axis_map:
+            self.canvas.fig.subplots_adjust(right=0.84)
+        if "left2" not in axis_map and "right2" not in axis_map:
+            self.canvas.fig.subplots_adjust(left=0.12, right=0.98)
 
         finalize_plot_canvas(self.canvas)

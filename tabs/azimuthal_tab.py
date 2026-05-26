@@ -932,8 +932,8 @@ class AzimuthalTab(QWidget):
         self.use_q_range = QCheckBox("Use q range")
         self.use_q_range.setChecked(True)
         self.use_q_range.stateChanged.connect(self.update_q_range_state)
-        self.q_min = self.double_spin(0.01, decimals=8, minimum=0)
-        self.q_max = self.double_spin(0.1, decimals=8, minimum=0)
+        self.q_min = self.double_spin(0.1, decimals=8, minimum=0)
+        self.q_max = self.double_spin(1.0, decimals=8, minimum=0)
         parameter_field_width = 130
         self.n_points = QSpinBox()
         self.n_points.setRange(10, 10000)
@@ -1559,11 +1559,6 @@ class AzimuthalTab(QWidget):
                 _, header = read_image_file(file_path)
             except Exception:
                 header = {}
-            q_range = matching_manufacturer_q_range(file_path)
-            if q_range is not None:
-                self.use_q_range.setChecked(True)
-                self.q_min.setValue(q_range[0])
-                self.q_max.setValue(q_range[1])
 
         if self.instrument_mode == "XENOCS":
             cx = get_header_float(header, *CENTER_X_KEYS)
