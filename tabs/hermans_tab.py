@@ -1042,6 +1042,15 @@ class HermansTab(QWidget):
         self.mode_box = mode_box
         controls_layout.addWidget(mode_box, stretch=0)
 
+        geometry_box = QGroupBox("Geometry")
+        geometry_layout = QVBoxLayout(geometry_box)
+        geometry_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        geometry_layout.setSpacing(4)
+        geometry_box.setFixedHeight(72)
+        self.geometry_box = geometry_box
+        self.geometry_layout = geometry_layout
+        controls_layout.addWidget(geometry_box, stretch=0)
+
         results_box = QGroupBox("Results")
         results_layout = QVBoxLayout(results_box)
         results_layout.setContentsMargins(*GROUP_BOX_MARGINS)
@@ -1580,6 +1589,7 @@ class HermansTab(QWidget):
         ]:
             preset_layout.addWidget(button)
         instrument_layout.addLayout(preset_layout)
+        self.geometry_layout.addLayout(instrument_layout)
 
         self.center_x_spin = QDoubleSpinBox()
         self.center_y_spin = QDoubleSpinBox()
@@ -1591,7 +1601,6 @@ class HermansTab(QWidget):
         self.center_y_spin.setMinimumWidth(90)
         self.center_x_spin.valueChanged.connect(self.calculate_anisotropy)
         self.center_y_spin.valueChanged.connect(self.calculate_anisotropy)
-        params_layout.addLayout(instrument_layout, 7, 0, 1, 5)
         for widget in [
             self.peak_spin,
             self.window_spin,
@@ -1623,6 +1632,7 @@ class HermansTab(QWidget):
             return
 
         anisotropy_mode = self.is_anisotropy_mode()
+        order_mode = self.is_order_mode()
 
         if anisotropy_mode:
             self.side_layout.setCurrentWidget(self.image_column)
@@ -1632,18 +1642,32 @@ class HermansTab(QWidget):
             self.image_column_layout.insertWidget(0, self.mode_box, stretch=0)
             self.mode_box.setVisible(True)
 
+            self.move_widget_to_layout(self.geometry_box, self.image_column_layout, stretch=0)
+            self.image_column_layout.removeWidget(self.geometry_box)
+            self.image_column_layout.insertWidget(1, self.geometry_box, stretch=0)
+            self.geometry_box.setVisible(True)
+
             self.move_widget_to_layout(self.results_box, self.image_column_layout, stretch=1)
             self.image_column_layout.removeWidget(self.results_box)
-            self.image_column_layout.insertWidget(2, self.results_box, stretch=1)
+            self.image_column_layout.insertWidget(3, self.results_box, stretch=1)
 
             self.move_widget_to_layout(self.params_box, self.center_column_layout, stretch=0)
         else:
             self.side_layout.setCurrentWidget(self.right_panel)
 
             self.move_widget_to_layout(self.mode_box, self.right_layout, stretch=0)
+            self.right_layout.removeWidget(self.mode_box)
+            self.right_layout.insertWidget(0, self.mode_box, stretch=0)
             self.mode_box.setVisible(True)
 
+            self.move_widget_to_layout(self.geometry_box, self.right_layout, stretch=0)
+            self.right_layout.removeWidget(self.geometry_box)
+            self.right_layout.insertWidget(1, self.geometry_box, stretch=0)
+            self.geometry_box.setVisible(order_mode)
+
             self.move_widget_to_layout(self.results_box, self.right_layout, stretch=1)
+            self.right_layout.removeWidget(self.results_box)
+            self.right_layout.insertWidget(2, self.results_box, stretch=1)
             self.move_widget_to_layout(self.params_box, self.center_column_layout, stretch=0)
     def is_hermans_mode(self):
         return hasattr(self, "parameter_selector") and self.parameter_selector.currentIndex() == 0

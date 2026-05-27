@@ -144,7 +144,7 @@ class AverageTab(QWidget):
         file_layout.addWidget(browse_button)
 
         filters_layout = QGridLayout()
-        self.name_filter = QLineEdit("*")
+        self.name_filter = QLineEdit("*cave*")
         self.extension_filter = QLineEdit("*.edf *.h5 *.hdf5")
         self.name_filter.textChanged.connect(self.refresh_files)
         self.extension_filter.textChanged.connect(self.refresh_files)

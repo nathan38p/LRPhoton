@@ -96,6 +96,7 @@ from PySide6.QtGui import QColor, QPainter, QPixmap, QIcon
 APP_NAME = "LRPhoton"
 APP_VERSION = "2026.05"
 APP_AUTHOR = "Nathan Piaget - Laboratoire Rhéologie et Procédés"
+APP_AFFILIATION = "CNRS - Université Grenoble Alpes"
 # Constants
 REPORT_EMAIL = "nathan.piaget@univ-grenoble-alpes.fr"
 # update test6
@@ -720,6 +721,7 @@ class MainWindow(QMainWindow):
         info_label = QLabel(
             f"<div style='text-align:center;'>"
             f"<b>{APP_AUTHOR}</b><br><br>"
+            f"{APP_AFFILIATION}<br><br>"
             f"<a href='{GITHUB_URL}'>{GITHUB_URL}</a><br><br>"
             f"{build_info_html}"
             f"</div>"
