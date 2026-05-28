@@ -27,7 +27,7 @@ Important:
 C:\Users\<your-user-name>\AppData\Local\Programs\LRPhoton
 ```
 
-*If the installation does not work, install Python manually and move the extracted LRPhoton folder into the directory shown above. You can create a shortcut on your Desktop.
+* If the installation does not work, install Python manually and move the extracted LRPhoton folder into the directory shown above. You can create a shortcut on your Desktop.
 
 ## MacOS Installation
 
