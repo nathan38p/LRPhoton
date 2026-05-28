@@ -369,6 +369,50 @@ def clear_plot_canvas(canvas):
     canvas.draw_idle()
 
 
+def constrain_image_axes(ax, image_shape=None, x_bounds=None, y_bounds=None):
+    if x_bounds is None or y_bounds is None:
+        if image_shape is None or len(image_shape) < 2:
+            return
+
+        ny, nx = image_shape[:2]
+        if nx <= 0 or ny <= 0:
+            return
+
+        x_bounds = (-0.5, nx - 0.5)
+        y_bounds = (-0.5, ny - 0.5)
+
+    if x_bounds is None or y_bounds is None:
+        return
+
+    x_lower, x_upper = min(x_bounds), max(x_bounds)
+    y_lower, y_upper = min(y_bounds), max(y_bounds)
+    if x_upper <= x_lower or y_upper <= y_lower:
+        return
+
+    def constrained_limits(limits, lower, upper):
+        first, second = limits
+        reversed_axis = first > second
+        low = min(first, second)
+        high = max(first, second)
+        full_span = upper - lower
+        span = high - low
+
+        if span >= full_span:
+            low, high = lower, upper
+        else:
+            if low < lower:
+                high += lower - low
+                low = lower
+            if high > upper:
+                low -= high - upper
+                high = upper
+
+        return (high, low) if reversed_axis else (low, high)
+
+    ax.set_xlim(constrained_limits(ax.get_xlim(), x_lower, x_upper))
+    ax.set_ylim(constrained_limits(ax.get_ylim(), y_lower, y_upper))
+
+
 def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, save_callback=None, save_tooltip="Save", toolbar_width=340):
     toolbar_box = QGroupBox(title)
     toolbar_box.setFixedHeight(78)

@@ -65,6 +65,7 @@ from .ui_style import (
     PAGE_MARGINS,
     PANEL_MARGINS,
     TOOL_GROUP_BOX_STYLE,
+    constrain_image_axes,
     make_matplotlib_toolbar_block,
     style_q_geometry_buttons,
 )
@@ -185,13 +186,151 @@ class PlaneAnnotationCanvas(FigureCanvas):
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
         self.setFocusPolicy(Qt.StrongFocus)
+        self._trackpad_view_pushed = False
         self._drag_label = None
+        self._toolbar_mode_before_label_drag = None
         self.mpl_connect("motion_notify_event", self.on_motion)
         self.mpl_connect("figure_leave_event", self.on_leave)
         self.mpl_connect("button_press_event", self.on_press)
         self.mpl_connect("button_release_event", self.on_release)
+        try:
+            self.grabGesture(Qt.PinchGesture)
+        except Exception:
+            pass
+
+    def event(self, event):
+        try:
+            if event.type() == QEvent.NativeGesture:
+                gesture_type = event.gestureType()
+                value = event.value()
+                if gesture_type == Qt.ZoomNativeGesture and value != 0:
+                    scale = 1.0 / (1.0 + value) if value > -0.95 else 1.25
+                    self.zoom_at_qpoint(self._event_center_point(event), scale)
+                    event.accept()
+                    return True
+
+                if gesture_type == Qt.SmartZoomNativeGesture:
+                    self.reset_view()
+                    event.accept()
+                    return True
+
+            if event.type() == QEvent.Gesture:
+                pinch = event.gesture(Qt.PinchGesture)
+                if pinch is not None:
+                    factor = pinch.scaleFactor()
+                    if factor and factor > 0:
+                        self.zoom_at_qpoint(self._event_center_point(event), 1.0 / factor)
+                        event.accept()
+                        return True
+        except Exception:
+            pass
+
+        return super().event(event)
+
+    def wheelEvent(self, event):
+        delta = event.pixelDelta()
+        if delta.isNull():
+            delta = event.angleDelta()
+            dx = delta.x() / 120.0
+            dy = delta.y() / 120.0
+        else:
+            dx = delta.x() / 80.0
+            dy = delta.y() / 80.0
+
+        if event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+            if dy != 0:
+                scale = 0.88 if dy > 0 else 1.14
+                self.zoom_at_qpoint(event.position(), scale)
+        else:
+            self.pan_by_trackpad(dx, dy)
+
+        event.accept()
+
+    def _event_center_point(self, event):
+        try:
+            position = event.position()
+            if position is not None:
+                return position
+        except Exception:
+            pass
+
+        return self.rect().center()
+
+    def qpoint_to_data_pos(self, qpoint):
+        width = max(1, self.width())
+        height = max(1, self.height())
+        x_fig = float(qpoint.x()) / width
+        y_fig = 1.0 - float(qpoint.y()) / height
+        xdata, ydata = self.ax.transData.inverted().transform(self.fig.transFigure.transform((x_fig, y_fig)))
+        if not np.isfinite(xdata) or not np.isfinite(ydata):
+            xlim = self.ax.get_xlim()
+            ylim = self.ax.get_ylim()
+            xdata = (xlim[0] + xlim[1]) / 2.0
+            ydata = (ylim[0] + ylim[1]) / 2.0
+        return xdata, ydata
+
+    def zoom_at_qpoint(self, qpoint, zoom_factor):
+        if zoom_factor <= 0:
+            return
+        xdata, ydata = self.qpoint_to_data_pos(qpoint)
+        self.zoom_at_data_position(xdata, ydata, zoom_factor)
+
+    def zoom_at_data_position(self, xdata, ydata, zoom_factor):
+        x_min, x_max = self.ax.get_xlim()
+        y_min, y_max = self.ax.get_ylim()
+        if x_max == x_min or y_max == y_min:
+            return
+
+        new_width = (x_max - x_min) * zoom_factor
+        new_height = (y_max - y_min) * zoom_factor
+        rel_x = (xdata - x_min) / (x_max - x_min)
+        rel_y = (ydata - y_min) / (y_max - y_min)
+
+        self.ax.set_xlim(xdata - new_width * rel_x, xdata + new_width * (1.0 - rel_x))
+        self.ax.set_ylim(ydata - new_height * rel_y, ydata + new_height * (1.0 - rel_y))
+        constrain_image_axes(self.ax, self.dialog.raw_image.shape)
+        self.ax.set_autoscale_on(False)
+        self.push_toolbar_view_once()
+        self.draw_idle()
+
+    def pan_by_trackpad(self, dx, dy):
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        xspan = xlim[1] - xlim[0]
+        yspan = ylim[1] - ylim[0]
+        shift_x = -dx * xspan * 0.08
+        shift_y = dy * yspan * 0.08
+
+        self.ax.set_xlim(xlim[0] + shift_x, xlim[1] + shift_x)
+        self.ax.set_ylim(ylim[0] + shift_y, ylim[1] + shift_y)
+        constrain_image_axes(self.ax, self.dialog.raw_image.shape)
+        self.ax.set_autoscale_on(False)
+        self.push_toolbar_view_once()
+        self.draw_idle()
+
+    def reset_view(self):
+        ny, nx = self.dialog.raw_image.shape
+        self.ax.set_xlim(-0.5, nx - 0.5)
+        self.ax.set_ylim(ny - 0.5, -0.5)
+        self.ax.set_autoscale_on(False)
+        self._trackpad_view_pushed = False
+        toolbar = getattr(self.dialog, "toolbar", None)
+        if toolbar is not None:
+            toolbar.set_history_buttons()
+        self.draw_idle()
+
+    def push_toolbar_view_once(self):
+        toolbar = getattr(self.dialog, "toolbar", None)
+        if toolbar is not None and not self._trackpad_view_pushed:
+            toolbar.push_current()
+            self._trackpad_view_pushed = True
+        if toolbar is not None:
+            toolbar.set_history_buttons()
 
     def show_image(self):
+        had_image = bool(self.ax.images)
+        current_xlim = self.ax.get_xlim()
+        current_ylim = self.ax.get_ylim()
         self.ax.clear()
         self.ax.set_axis_off()
         self.ax.imshow(
@@ -204,6 +343,10 @@ class PlaneAnnotationCanvas(FigureCanvas):
         )
         self.draw_annotations()
         self.ax.set_aspect("equal")
+        if had_image:
+            self.ax.set_xlim(current_xlim)
+            self.ax.set_ylim(current_ylim)
+            constrain_image_axes(self.ax, self.dialog.raw_image.shape)
         self.draw_idle()
 
     def draw_annotations(self):
@@ -266,6 +409,7 @@ class PlaneAnnotationCanvas(FigureCanvas):
             return
         hit = self.label_hit(event)
         if hit is not None:
+            self.dialog.disable_toolbar_mode()
             self._drag_label = hit
             return
 
@@ -291,6 +435,7 @@ class PlaneAnnotationCanvas(FigureCanvas):
         if self._drag_label is not None:
             self.dialog.save_annotations()
         self._drag_label = None
+        self._trackpad_view_pushed = False
 
     def on_leave(self, event):
         self.dialog.coordinate_label.setText("x = - | y = - | q = - | I = -")
@@ -300,7 +445,7 @@ class PlaneAnnotationDialog(QDialog):
     def __init__(self, parent, raw_image, display_image, vmin, vmax, q_calculator, title, annotation_key):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(1120, 720)
+        self.resize(1220, 760)
         self.raw_image = np.asarray(raw_image, dtype=float)
         self.display_image = np.asarray(display_image, dtype=float)
         self.vmin = vmin
@@ -320,22 +465,16 @@ class PlaneAnnotationDialog(QDialog):
         image_layout.setContentsMargins(0, 0, 0, 0)
         image_layout.setSpacing(6)
 
-        controls = QHBoxLayout()
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.setSpacing(6)
-        self.undo_button = QPushButton("Undo point")
-        self.clear_button = QPushButton("Clear")
-        self.save_button = QPushButton("Save PNG")
-        controls.addStretch(1)
-        controls.addWidget(self.undo_button)
-        controls.addWidget(self.clear_button)
-        controls.addWidget(self.save_button)
-        image_layout.addLayout(controls)
-
         self.canvas = PlaneAnnotationCanvas(self)
-        toolbar = NavigationToolbar(self.canvas, self)
-        toolbar_box, _, _ = make_matplotlib_toolbar_block(self, "", toolbar, toolbar_width=300)
-        toolbar_box.setFixedHeight(48)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        toolbar_box, _, self.save_button = make_matplotlib_toolbar_block(
+            self,
+            "Annotation tools",
+            self.toolbar,
+            save_callback=self.save_png,
+            save_tooltip="Save annotated PNG",
+            toolbar_width=340,
+        )
         image_layout.addWidget(toolbar_box, 0)
         image_layout.addWidget(self.canvas, 1)
 
@@ -355,7 +494,7 @@ class PlaneAnnotationDialog(QDialog):
 
         side_panel = QGroupBox("Planes")
         side_panel.setStyleSheet(GROUP_BOX_STYLE)
-        side_panel.setFixedWidth(260)
+        side_panel.setFixedWidth(360)
         side_layout = QVBoxLayout(side_panel)
         side_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         side_layout.setSpacing(6)
@@ -367,20 +506,23 @@ class PlaneAnnotationDialog(QDialog):
         side_layout.addWidget(self.add_plane_button)
 
         self.plane_tree = QTreeWidget()
+        self.plane_tree.setColumnCount(2)
         self.plane_tree.setHeaderHidden(True)
         self.plane_tree.setMinimumHeight(240)
         self.plane_tree.setSelectionMode(QTreeWidget.SingleSelection)
+        self.plane_tree.setRootIsDecorated(True)
+        self.plane_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.plane_tree.setColumnWidth(0, 302)
+        self.plane_tree.setColumnWidth(1, 28)
         side_layout.addWidget(self.plane_tree, 1)
 
         layout.addWidget(image_panel, 1)
         layout.addWidget(side_panel, 0)
 
-        self.undo_button.clicked.connect(self.undo_last_point)
-        self.clear_button.clicked.connect(self.clear_annotations)
-        self.save_button.clicked.connect(self.save_png)
         self.add_plane_button.clicked.connect(self.add_plane)
         self.label_edit.editingFinished.connect(self.rename_current_plane)
         self.plane_tree.currentItemChanged.connect(self.tree_selection_changed)
+        self.plane_tree.itemClicked.connect(self.tree_item_clicked)
         self.load_annotations()
         self.ensure_plane(self.current_plane)
         self.refresh_plane_tree()
@@ -389,6 +531,23 @@ class PlaneAnnotationDialog(QDialog):
     def closeEvent(self, event):
         self.save_annotations()
         super().closeEvent(event)
+
+    def disable_toolbar_mode(self):
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None:
+            return
+
+        mode = getattr(toolbar, "mode", "")
+        mode_text = str(mode).lower()
+        try:
+            mode_name = mode.name.lower()
+        except Exception:
+            mode_name = mode_text
+
+        if "pan" in mode_text or "pan" in mode_name:
+            toolbar.pan()
+        elif "zoom" in mode_text or "zoom" in mode_name:
+            toolbar.zoom()
 
     def normalized_annotations(self):
         normalized = {}
@@ -499,22 +658,82 @@ class PlaneAnnotationDialog(QDialog):
         current_item = None
         for label, data in self.annotations.items():
             points = data.get("points", [])
-            plane_item = QTreeWidgetItem([f"{label} ({len(points)} point{'s' if len(points) != 1 else ''})"])
+            plane_item = QTreeWidgetItem([f"{label} ({len(points)} point{'s' if len(points) != 1 else ''})", "−"])
             plane_item.setData(0, Qt.UserRole, ("plane", label, None))
+            plane_item.setTextAlignment(1, Qt.AlignCenter)
+            plane_item.setToolTip(0, plane_item.text(0))
+            plane_item.setToolTip(1, "Remove this plane")
             self.plane_tree.addTopLevelItem(plane_item)
             if label == self.current_plane:
                 current_item = plane_item
 
             for index, point in enumerate(points, start=1):
                 x, y = point
-                point_item = QTreeWidgetItem([f"Point {index}: x={x + 1:.1f}, y={y + 1:.1f}"])
+                point_text = f"Point {index}: x={x + 1:.1f}, y={y + 1:.1f}"
+                point_item = QTreeWidgetItem([point_text, "−"])
                 point_item.setData(0, Qt.UserRole, ("point", label, index - 1))
+                point_item.setTextAlignment(1, Qt.AlignCenter)
+                point_item.setToolTip(0, point_text)
+                point_item.setToolTip(1, "Remove this point")
                 plane_item.addChild(point_item)
             plane_item.setExpanded(True)
 
         if current_item is not None:
             self.plane_tree.setCurrentItem(current_item)
         self._syncing_tree = False
+
+        self.plane_tree.setStyleSheet("""
+            QTreeWidget::item {
+                min-height: 22px;
+            }
+            QTreeWidget::item:selected {
+                background-color: #0a64d8;
+                color: white;
+            }
+        """)
+
+    def tree_item_clicked(self, item, column):
+        if item is None or column != 1:
+            return
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+        kind, label, index = data
+        if kind == "plane":
+            self.remove_plane(label)
+        elif kind == "point":
+            self.remove_point(label, index)
+
+    def remove_plane(self, label):
+        if label not in self.annotations:
+            return
+
+        del self.annotations[label]
+        if self.current_plane == label:
+            self.current_plane = next(iter(self.annotations), "plane 1")
+            self.ensure_plane(self.current_plane)
+            self.label_edit.setText(self.current_plane)
+        self.refresh_plane_tree()
+        self.save_annotations()
+        self.canvas.show_image()
+
+    def remove_point(self, label, index):
+        data = self.annotations.get(label)
+        if data is None:
+            return
+
+        points = data.get("points", [])
+        if not (0 <= index < len(points)):
+            return
+
+        points.pop(index)
+        if not points:
+            data["label_pos"] = None
+        self.current_plane = label
+        self.label_edit.setText(label)
+        self.refresh_plane_tree()
+        self.save_annotations()
+        self.canvas.show_image()
 
     def tree_selection_changed(self, current, previous):
         if self._syncing_tree or current is None:
@@ -660,6 +879,7 @@ class ViewTab(QWidget):
         self.current_file_type = None
         self.current_dataset_name = None
         self.annotation_dialog = None
+        self.image_axis_bounds = None
 
         self._build_ui()
 
@@ -2042,6 +2262,7 @@ class ViewTab(QWidget):
 
         self.raw_current_img = np.array(img, dtype=float).copy()
         self.display_img = self.prepare_display_image(img)
+        self.image_axis_bounds = None
 
         aspect = "equal" if self.keep_ratio_checkbox.isChecked() else "auto"
 
@@ -2084,6 +2305,7 @@ class ViewTab(QWidget):
         if self.keep_zoom_checkbox.isChecked() and self._saved_xlim is not None and self._saved_ylim is not None:
             self.ax.set_xlim(self._saved_xlim)
             self.ax.set_ylim(self._saved_ylim)
+            self.constrain_current_image_axes()
 
         self.ax.set_title("")
 
@@ -2561,6 +2783,7 @@ class ViewTab(QWidget):
             ydata - new_height * rel_y,
             ydata + new_height * (1.0 - rel_y),
         )
+        self.constrain_current_image_axes()
 
         if self.keep_zoom_checkbox.isChecked():
             self._saved_xlim = self.ax.get_xlim()
@@ -2590,6 +2813,18 @@ class ViewTab(QWidget):
             self.toolbar.set_history_buttons()
         self.canvas.draw_idle()
 
+    def constrain_current_image_axes(self):
+        if self.raw_current_img is None:
+            return
+
+        bounds = getattr(self, "image_axis_bounds", None)
+        if bounds is not None:
+            x_bounds, y_bounds = bounds
+            constrain_image_axes(self.ax, x_bounds=x_bounds, y_bounds=y_bounds)
+            return
+
+        constrain_image_axes(self.ax, self.raw_current_img.shape)
+
     def pan_by_trackpad(self, dx, dy):
         if self.image_artist is None:
             return
@@ -2604,6 +2839,7 @@ class ViewTab(QWidget):
 
         self.ax.set_xlim(xlim[0] + shift_x, xlim[1] + shift_x)
         self.ax.set_ylim(ylim[0] + shift_y, ylim[1] + shift_y)
+        self.constrain_current_image_axes()
 
         if self.keep_zoom_checkbox.isChecked():
             self._saved_xlim = self.ax.get_xlim()
@@ -2683,6 +2919,7 @@ class ViewTab(QWidget):
 
         self.ax.set_xlim(x0 + dx, x1 + dx)
         self.ax.set_ylim(y0 + dy, y1 + dy)
+        self.constrain_current_image_axes()
 
         if self.keep_zoom_checkbox.isChecked():
             self._saved_xlim = self.ax.get_xlim()

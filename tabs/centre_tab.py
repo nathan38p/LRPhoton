@@ -34,6 +34,7 @@ from .ui_style import (
     PAGE_MARGINS,
     PANEL_MARGINS,
     clear_plot_canvas,
+    constrain_image_axes,
     install_selectable_legend,
     normalize_decimal_text,
     style_q_geometry_buttons,
@@ -432,6 +433,7 @@ class ImageCanvas(FigureCanvas):
 
         self.ax.set_xlim(new_xlim)
         self.ax.set_ylim(new_ylim)
+        constrain_image_axes(self.ax, self.raw_image.shape)
         self.draw_idle()
 
     def _reset_zoom(self):
@@ -453,6 +455,7 @@ class ImageCanvas(FigureCanvas):
 
         self.ax.set_xlim(xlim[0] + shift_x, xlim[1] + shift_x)
         self.ax.set_ylim(ylim[0] + shift_y, ylim[1] + shift_y)
+        constrain_image_axes(self.ax, self.raw_image.shape)
         self.draw_idle()
 
     def _on_press(self, event):
@@ -512,6 +515,7 @@ class ImageCanvas(FigureCanvas):
 
         self.ax.set_xlim(self._xlim_start[0] - dx, self._xlim_start[1] - dx)
         self.ax.set_ylim(self._ylim_start[0] - dy, self._ylim_start[1] - dy)
+        constrain_image_axes(self.ax, self.raw_image.shape)
         self.draw_idle()
 
     def show_image(self, img, xc, yc, title, clim_min=None, clim_max=None):
@@ -556,6 +560,7 @@ class ImageCanvas(FigureCanvas):
         if old_xlim is not None and old_ylim is not None:
             self.ax.set_xlim(old_xlim)
             self.ax.set_ylim(old_ylim)
+            constrain_image_axes(self.ax, self.raw_image.shape)
 
         self.reset_view_on_next_show = False
         self.draw_idle()

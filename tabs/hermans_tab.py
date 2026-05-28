@@ -57,6 +57,7 @@ from .ui_style import (
     GROUP_BOX_MARGINS,
     GROUP_BOX_STYLE,
     clear_plot_canvas,
+    constrain_image_axes,
     install_selectable_legend,
     make_matplotlib_toolbar_block,
     normalize_decimal_text,
@@ -676,6 +677,7 @@ class ImageCanvas(FigureCanvas):
             y - (y - ylim[0]) * scale,
             y + (ylim[1] - y) * scale,
         )
+        constrain_image_axes(self.ax, self.raw_image.shape)
         self.draw_idle()
 
     def _on_press(self, event):
@@ -744,6 +746,7 @@ class ImageCanvas(FigureCanvas):
         dy = event.ydata - self._drag_start[1]
         self.ax.set_xlim(self._xlim_start[0] - dx, self._xlim_start[1] - dx)
         self.ax.set_ylim(self._ylim_start[0] - dy, self._ylim_start[1] - dy)
+        constrain_image_axes(self.ax, self.raw_image.shape)
         self.draw_idle()
 
     def show_image(self, image, xc=None, yc=None, mask=None, h_mask=None, v_mask=None, reference_angle=0.0):
@@ -855,6 +858,7 @@ class ImageCanvas(FigureCanvas):
         if preserve_view and previous_xlim is not None and previous_ylim is not None:
             self.ax.set_xlim(previous_xlim)
             self.ax.set_ylim(previous_ylim)
+            constrain_image_axes(self.ax, self.raw_image.shape)
 
         self.draw_idle()
 

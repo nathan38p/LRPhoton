@@ -42,7 +42,7 @@ class UnfoldTab(ViewTab):
             self.save_colorbar_checkbox.setStyleSheet("")
         self.unfold_save_button = getattr(self, "save_image_button", None)
         if self.unfold_save_button is not None:
-            self.unfold_save_button.setToolTip("Save unfolded image")
+            self.unfold_save_button.setToolTip("Save azim image")
 
     def _configure_unfold_right_panel(self):
         self.info_box.setTitle("Parameters")
@@ -203,6 +203,7 @@ class UnfoldTab(ViewTab):
         q_factor = self.q_display_factor()
         q_display_min = q_min * q_factor
         q_display_max = q_max * q_factor
+        self.image_axis_bounds = ((q_display_min, q_display_max), (0.0, 360.0))
         aspect = "auto"
         extent = [q_display_min, q_display_max, 0.0, 360.0]
 
@@ -248,12 +249,13 @@ class UnfoldTab(ViewTab):
         self.frame_label.setText(f"{self.current_index + 1} / {total}")
 
         self.ax.set_autoscale_on(False)
+        self.draw_center_cross()
         self.canvas.draw_idle()
         self.update_pattern_preview()
 
     def current_raw_image_for_save(self):
         if self.raw_current_img is None:
-            raise ValueError("No unfolded image data is available.")
+            raise ValueError("No azim image data is available.")
         return np.asarray(self.raw_current_img, dtype=float)
 
     def automatic_unfold_save_path(self):
@@ -263,11 +265,11 @@ class UnfoldTab(ViewTab):
             frame_suffix = f"_frame{self.current_index + 1:04d}"
 
         suffix = ".edf" if self.current_file.suffix.lower() == ".edf" else ".h5"
-        return self.current_file.parent / f"{self.current_file.stem}{frame_suffix}_unfold{suffix}"
+        return self.current_file.parent / f"{self.current_file.stem}{frame_suffix}_azim{suffix}"
 
     def save_png_image_only(self):
         if self.raw_current_img is None or self.current_file is None:
-            QMessageBox.information(self, "No image", "No unfolded image is currently loaded.")
+            QMessageBox.information(self, "No image", "No azim image is currently loaded.")
             return
 
         output_path = self.automatic_unfold_save_path()
@@ -277,14 +279,28 @@ class UnfoldTab(ViewTab):
             else:
                 self.save_current_frame_as_h5(output_path)
         except Exception as error:
-            QMessageBox.critical(self, "Save error", f"Unable to save unfolded image:\n{error}")
+            QMessageBox.critical(self, "Save error", f"Unable to save azim image:\n{error}")
 
     def _apply_unfold_figure_margins(self):
         self.fig.subplots_adjust(left=0.13, right=0.90, top=0.98, bottom=0.14)
 
     def draw_center_cross(self):
-        super().draw_center_cross()
+        for artist in self.center_artists:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self.center_artists = []
         self.draw_unfold_axes()
+
+    def metadata_for_saved_image(self):
+        metadata = super().metadata_for_saved_image()
+        metadata.update({
+            "Processing": "azim",
+            "Center_1": "0",
+            "Center_2": "180",
+        })
+        return metadata
 
     def make_unfolded_images(self, image):
         geometry = self.get_q_geometry_from_header()
@@ -361,37 +377,26 @@ class UnfoldTab(ViewTab):
         return super().q_geometry_values_for_mode()
 
     def draw_unfold_axes(self):
-        values = self.q_geometry_values_for_mode()
-        if not values:
-            return
-
-        xc = values.get("xc")
-        yc = values.get("yc")
-        if xc is None or yc is None:
-            return
-
+        xc = 0.0
+        yc = 180.0
         xlim = self.ax.get_xlim()
         ylim = self.ax.get_ylim()
-        radius = 0.48 * min(abs(xlim[1] - xlim[0]), abs(ylim[1] - ylim[0]))
-        if not np.isfinite(radius) or radius <= 0:
-            return
+        if min(ylim) <= yc <= max(ylim):
+            hline = self.ax.axhline(yc, color="red", linewidth=1.0, alpha=0.9)
+            self.center_artists.append(hline)
 
-        for angle in range(0, 360, 45):
-            theta = np.deg2rad(angle)
-            x2 = xc + radius * np.cos(theta)
-            y2 = yc + radius * np.sin(theta)
-            line = self.ax.plot([xc, x2], [yc, y2], color="white", linewidth=0.8, alpha=0.75)[0]
-            label = self.ax.text(
-                x2,
-                y2,
-                f"{angle}°",
-                color="white",
-                fontsize=8,
-                ha="center",
-                va="center",
-                bbox={"facecolor": "black", "alpha": 0.45, "edgecolor": "none", "pad": 1.5},
-            )
-            self.center_artists.extend([line, label])
+        if min(xlim) <= xc <= max(xlim):
+            vline = self.ax.axvline(xc, color="red", linewidth=1.0, alpha=0.9)
+            point = self.ax.plot(
+                xc,
+                yc,
+                marker="o",
+                markersize=5,
+                markerfacecolor="white",
+                markeredgecolor="red",
+                markeredgewidth=1,
+            )[0]
+            self.center_artists.extend([vline, point])
 
     def update_pattern_preview(self):
         if not hasattr(self, "pattern_ax"):

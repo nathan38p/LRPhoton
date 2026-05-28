@@ -63,6 +63,7 @@ from .ui_style import (
     GROUP_BOX_MARGINS,
     PAGE_MARGINS,
     PANEL_MARGINS,
+    constrain_image_axes,
     make_matplotlib_toolbar_block,
     normalize_decimal_text,
     style_q_geometry_buttons,
@@ -658,6 +659,7 @@ class ImageCanvas(FigureCanvas):
                 y0, y1 = self._pan_start_ylim
                 self.ax.set_xlim(x0 + dx, x1 + dx)
                 self.ax.set_ylim(y0 + dy, y1 + dy)
+                constrain_image_axes(self.ax, self.raw_image.shape)
                 self.draw_idle()
                 self.sync_partner_view()
 
@@ -711,6 +713,7 @@ class ImageCanvas(FigureCanvas):
 
         self.ax.set_xlim(xdata - new_width * rel_x, xdata + new_width * (1 - rel_x))
         self.ax.set_ylim(ydata - new_height * rel_y, ydata + new_height * (1 - rel_y))
+        constrain_image_axes(self.ax, self.raw_image.shape)
         self.draw_idle()
         self.sync_partner_view()
 
@@ -734,6 +737,7 @@ class ImageCanvas(FigureCanvas):
         shift_y = dy * yspan * 0.08
         self.ax.set_xlim(x0 + shift_x, x1 + shift_x)
         self.ax.set_ylim(y0 + shift_y, y1 + shift_y)
+        constrain_image_axes(self.ax, self.raw_image.shape)
         self.draw_idle()
         self.sync_partner_view()
 
@@ -810,6 +814,7 @@ class ImageCanvas(FigureCanvas):
         if previous_xlim is not None and previous_ylim is not None:
             self.ax.set_xlim(previous_xlim)
             self.ax.set_ylim(previous_ylim)
+            constrain_image_axes(self.ax, self.raw_image.shape)
 
         if white_mask is not None:
             self.image_artist.cmap.set_bad(color="white")
@@ -1747,6 +1752,10 @@ class ManualCaveDialog(QDialog):
         for canvas in (self.before_canvas, self.after_canvas):
             canvas.ax.set_xlim(self.synced_xlim)
             canvas.ax.set_ylim(self.synced_ylim)
+            if canvas.raw_image is not None:
+                constrain_image_axes(canvas.ax, canvas.raw_image.shape)
+                self.synced_xlim = tuple(canvas.ax.get_xlim())
+                self.synced_ylim = tuple(canvas.ax.get_ylim())
             canvas.draw_idle()
 
     def reset_synced_view(self):
@@ -1766,6 +1775,8 @@ class ManualCaveDialog(QDialog):
                 continue
             canvas.ax.set_xlim(self.synced_xlim)
             canvas.ax.set_ylim(self.synced_ylim)
+            if canvas.raw_image is not None:
+                constrain_image_axes(canvas.ax, canvas.raw_image.shape)
 
     def shape_mask(self, mode="include"):
         mask = np.zeros(self.source_image.shape, dtype=bool)

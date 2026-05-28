@@ -53,6 +53,7 @@ from .ui_style import (
     GROUP_BOX_STYLE,
     apply_plot_display_style,
     clear_plot_canvas,
+    constrain_image_axes,
     finalize_plot_canvas,
     make_plot_legend,
     make_matplotlib_toolbar_block,
@@ -573,6 +574,7 @@ class ImageCanvas(FigureCanvas):
 
         self.ax.set_xlim([xdata - new_width * (1 - relx), xdata + new_width * relx])
         self.ax.set_ylim([ydata - new_height * (1 - rely), ydata + new_height * rely])
+        constrain_image_axes(self.ax, self.raw_image.shape)
         self.draw_idle()
 
     def _on_press(self, event):
@@ -642,6 +644,7 @@ class ImageCanvas(FigureCanvas):
         dy = event.ydata - self._drag_start[1]
         self.ax.set_xlim(self._xlim_start[0] - dx, self._xlim_start[1] - dx)
         self.ax.set_ylim(self._ylim_start[0] - dy, self._ylim_start[1] - dy)
+        constrain_image_axes(self.ax, self.raw_image.shape)
         self.draw_idle()
 
     def show_image(self, image, xc=None, yc=None, mask=None):
@@ -724,6 +727,7 @@ class ImageCanvas(FigureCanvas):
         if had_image:
             self.ax.set_xlim(current_xlim)
             self.ax.set_ylim(current_ylim)
+            constrain_image_axes(self.ax, self.raw_image.shape)
 
         self.draw_idle()
 
