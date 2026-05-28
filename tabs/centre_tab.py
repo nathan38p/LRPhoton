@@ -1155,11 +1155,22 @@ class CentreTab(QWidget):
         return spin
 
     def _add_control(self, layout, text, widget):
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
         if isinstance(text, QLabel):
-            layout.addWidget(text)
+            label = text
         else:
-            layout.addWidget(QLabel(text))
-        layout.addWidget(widget)
+            label = QLabel(text)
+
+        label.setMinimumWidth(142)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        widget.setMinimumWidth(0)
+        row_layout.addWidget(label, stretch=0)
+        row_layout.addWidget(widget, stretch=1)
+        layout.addWidget(row)
 
     def set_controls_enabled(self, enabled):
         for widget in [
