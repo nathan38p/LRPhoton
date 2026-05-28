@@ -21,7 +21,8 @@ The installer will:
 Important:
 
 * If Python has just been installed, relaunch `Install on Windows.bat` once after the Python installation finishes.
-*The installed application folder is usually:
+
+The installed application folder is usually:
 
 ```text
 C:\Users\<your-user-name>\AppData\Local\Programs\LRPhoton
@@ -56,3 +57,19 @@ The LRPhoton files stay in `/Applications/LRPhoton`.
 ## Update System
 
 At startup, LRPhoton automatically checks for updates from the GitHub repository and downloads modified internal files when a newer version is available.
+
+## Troubleshooting
+
+If the application does not open or asks for missing Python dependencies, open a terminal and install all required dependencies manually.
+
+On Windows:
+
+```text
+python -m pip install PySide6 numpy matplotlib h5py fabio requests hdf5plugin scipy pyFAI
+```
+
+On macOS:
+
+```text
+python3 -m pip install PySide6 numpy matplotlib h5py fabio requests hdf5plugin scipy pyFAI
+```
