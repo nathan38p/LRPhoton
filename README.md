@@ -20,16 +20,14 @@ The installer will:
 
 Important:
 
-* Administrator rights are not required.
 * If Python has just been installed, relaunch `Install on Windows.bat` once after the Python installation finishes.
-
-The installed application folder is usually:
+*The installed application folder is usually:
 
 ```text
 C:\Users\<your-user-name>\AppData\Local\Programs\LRPhoton
 ```
 
-If the installation does not work, install Python manually and move the extracted LRPhoton folder into the directory shown above. You can create a shortcut on your Desktop.
+*If the installation does not work, install Python manually and move the extracted LRPhoton folder into the directory shown above. You can create a shortcut on your Desktop.
 
 ## MacOS Installation
 
@@ -47,15 +45,13 @@ The macOS installer will:
 * create `/Applications/LRPhoton.app`
 * apply the LRPhoton icon to the application launcher
 
-On Apple Silicon Macs, install the macOS universal2/arm64 Python build. If an Intel-only Python is used, macOS may show a Rosetta compatibility warning.
-
 `LRPhoton.app` is only a small launcher that opens:
 
 ```text
 /Applications/LRPhoton/main.py
 ```
 
-The real LRPhoton files stay in `/Applications/LRPhoton`, so the automatic update system can still replace the Python files in that folder.
+The LRPhoton files stay in `/Applications/LRPhoton`.
 
 ## Update System
 
