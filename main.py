@@ -313,7 +313,7 @@ class MainWindow(QMainWindow):
         header_layout.addLayout(title_box)
 
         self.header_balance_spacer = QWidget()
-        self.header_balance_spacer.setFixedWidth(260)
+        self.header_balance_spacer.setFixedWidth(120)
 
         # ============================================================
         # TAB BAR IN HEADER
