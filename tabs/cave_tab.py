@@ -2462,14 +2462,9 @@ class CaveTab(QWidget):
         if not hasattr(self, "manual_mask_button"):
             return
 
-        if self.is_development_copy():
-            self.manual_mask_button.setText("Manual cave mask / MultiCave")
-            self.manual_mask_button.setEnabled(self.image is not None)
-            self.manual_mask_button.setToolTip("")
-        else:
-            self.manual_mask_button.setText("🔒 Manual cave mask")
-            self.manual_mask_button.setEnabled(False)
-            self.manual_mask_button.setToolTip("Available in development mode only.")
+        self.manual_mask_button.setText("Manual cave mask / MultiCave")
+        self.manual_mask_button.setEnabled(self.image is not None)
+        self.manual_mask_button.setToolTip("Open the manual cave mask editor and MultiCave tools.")
 
     def update_extra_nan_condition(self, refresh=True):
         self.commit_nan_threshold_edits()
@@ -3080,29 +3075,69 @@ class CaveTab(QWidget):
         extension_patterns = self.extension_filter.text().split()
         name_pattern = self.name_filter.text().strip() or "*"
         iterator = folder.rglob("*") if self.show_subfolders_checkbox.isChecked() else folder.glob("*")
+
         files = []
+        cave_outputs_by_base = set()
 
         for path in iterator:
             if not path.is_file():
                 continue
 
             lower_name = path.name.lower()
+            lower_stem = path.stem.lower()
+
             match_extension = any(
                 fnmatch.fnmatch(lower_name, pattern.lower())
                 for pattern in extension_patterns
             )
             match_name = fnmatch.fnmatch(path.name, name_pattern)
 
-            if match_extension and match_name:
-                if self.only_thumbs_up_checkbox.isChecked() and not is_file_rated_up(path):
-                    continue
-                files.append(path)
+            if not (match_extension and match_name):
+                continue
+
+            if "_cave" in lower_stem:
+                base_stem = re.sub(r"_cave.*$", "", path.stem, flags=re.IGNORECASE)
+                cave_outputs_by_base.add((path.parent.resolve(), base_stem))
+                continue
+
+            if path.suffix.lower() in [".h5", ".hdf5"] and "_ave" in lower_stem:
+                continue
+
+            if self.only_thumbs_up_checkbox.isChecked() and not is_file_rated_up(path):
+                continue
+
+            files.append(path)
 
         for path in sorted(files):
-            item_text = str(path.relative_to(folder))
-            self.file_list.addItem(item_text)
-            item = self.file_list.item(self.file_list.count() - 1)
+            display_name = str(path.relative_to(folder))
+            has_matching_cave = (path.parent.resolve(), path.stem) in cave_outputs_by_base
+
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 24))
             set_item_file_path(item, path)
+            if has_matching_cave:
+                item.setToolTip("A matching cave output already exists for this file.")
+            self.file_list.addItem(item)
+
+            row_widget = QWidget()
+            row_widget.setFixedHeight(24)
+            row_widget.setStyleSheet("background: transparent;")
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(2, 0, 2, 0)
+            row_layout.setSpacing(4)
+
+            status_label = QLabel("✅" if has_matching_cave else "")
+            status_label.setFixedWidth(18)
+            status_label.setAlignment(Qt.AlignCenter)
+            status_label.setStyleSheet("background: transparent;")
+            row_layout.addWidget(status_label, 0)
+
+            name_label = QLabel(display_name)
+            name_label.setMinimumWidth(0)
+            name_label.setStyleSheet("background: transparent;")
+            row_layout.addWidget(name_label, 1)
+
+            self.file_list.setItemWidget(item, row_widget)
 
     def open_selected_file(self, item=None):
         if item is None:
