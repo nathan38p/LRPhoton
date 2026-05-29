@@ -844,6 +844,45 @@ class ManualCaveCanvas(FigureCanvas):
         self._last_pan_point = None
         self._edit_state = None
         self._preview_patch = None
+        self.coordinate_label = None
+        self.image_name = ""
+        self.mpl_connect("motion_notify_event", self.update_coordinate_label)
+        self.mpl_connect("figure_leave_event", lambda event: self.update_coordinate_label(None))
+        
+    def set_coordinate_label(self, label, image_name=""):
+        self.coordinate_label = label
+        self.image_name = image_name
+        self.update_coordinate_label(None)
+
+    def update_coordinate_label(self, event):
+        if self.coordinate_label is None:
+            return
+
+        if event is None or event.inaxes != self.ax or event.xdata is None or event.ydata is None or self.image is None:
+            self.coordinate_label.setText("x = - | y = - | q = - | I = -")
+            return
+
+        x = int(round(event.xdata + 1))
+        y = int(round(event.ydata + 1))
+        intensity_text = "I = -"
+        q_text = "q = -"
+
+        ny, nx = self.image.shape
+        if 1 <= x <= nx and 1 <= y <= ny:
+            value = self.image[y - 1, x - 1]
+            if np.isfinite(value):
+                intensity_text = f"I = {value:.6g}"
+            else:
+                intensity_text = "I = NaN"
+
+            parent = self.dialog.parent()
+            if parent is not None and hasattr(parent, "calculate_q_at_pixel"):
+                q_value = parent.calculate_q_at_pixel(x, y)
+                if q_value is not None:
+                    q_text = f"q = {q_value:.6g} nm⁻¹"
+
+        prefix = f"{self.image_name} | " if self.image_name else ""
+        self.coordinate_label.setText(f"{prefix}x = {x} | y = {y} | {q_text} | {intensity_text}")
         self.mpl_connect("button_press_event", self.on_press)
         self.mpl_connect("button_release_event", self.on_release)
         self.mpl_connect("motion_notify_event", self.on_motion)
@@ -923,6 +962,7 @@ class ManualCaveCanvas(FigureCanvas):
             self.dialog.refresh_preview()
 
     def on_motion(self, event):
+        self.update_coordinate_label(event)
         if self._edit_state is not None:
             if event.inaxes == self.ax and event.xdata is not None and event.ydata is not None:
                 last_x, last_y = self._edit_state["last"]
@@ -957,9 +997,9 @@ class ManualCaveCanvas(FigureCanvas):
             x0, y0 = self._drag_start
             if self.dialog.current_tool == "Rectangle" and abs(event.xdata - x0) >= 2 and abs(event.ydata - y0) >= 2:
                 self.dialog.add_shape("rect", (x0, y0, event.xdata, event.ydata))
-            elif self.dialog.current_tool == "Vertical band" and abs(event.ydata - y0) >= 2:
+            elif self.dialog.current_tool == "Vertical band" and abs(event.xdata - x0) >= 2:
                 self.dialog.add_shape("vband", (x0, y0, event.xdata, event.ydata))
-            elif self.dialog.current_tool == "Horizontal band" and abs(event.xdata - x0) >= 2:
+            elif self.dialog.current_tool == "Horizontal band" and abs(event.ydata - y0) >= 2:
                 self.dialog.add_shape("hband", (x0, y0, event.xdata, event.ydata))
         self._drag_start = None
         self._last_pan_point = None
@@ -1187,15 +1227,9 @@ class ManualCaveDialog(QDialog):
             self.finish_poly_button,
         ]:
             widget.setFixedSize(36, 30)
-            top.addWidget(widget)
         self.include_mode_button.setFixedSize(64, 30)
         self.exclude_mode_button.setFixedSize(76, 30)
         self.pre_nan_mode_button.setFixedSize(54, 30)
-        top.addWidget(self.include_mode_button)
-        top.addWidget(self.exclude_mode_button)
-        top.addWidget(self.pre_nan_mode_button)
-        top.addStretch(1)
-        layout.addLayout(top)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -1205,11 +1239,92 @@ class ManualCaveDialog(QDialog):
         left_panel.setSpacing(2)
         self.before_canvas = ManualCaveCanvas(self, "")
         self.after_canvas = ManualCaveCanvas(self, "")
+        self.before_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.after_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         toolbar = NavigationToolbar(self.before_canvas, self)
-        toolbar_box, _, _ = make_matplotlib_toolbar_block(self, "", toolbar, toolbar_width=270)
+        toolbar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        for action in list(toolbar.actions()):
+            text = action.text().lower()
+            if "save" in text or "subplots" in text or "customize" in text:
+                toolbar.removeAction(action)
+
+        if hasattr(toolbar, "locLabel"):
+            toolbar.locLabel.hide()
+        if hasattr(toolbar, "_message_label"):
+            toolbar._message_label.hide()
+
+        for label in toolbar.findChildren(QLabel):
+            label.hide()
+
+        toolbar.set_message = lambda message: None
+
+        toolbar_box = QWidget()
         toolbar_box.setFixedHeight(48)
-        left_panel.addWidget(toolbar_box, 0)
+        toolbar_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        toolbar_box.setStyleSheet("""
+            QWidget {
+                background-color: #eeeeee;
+                border: none;
+                border-radius: 8px;
+            }
+            QToolButton {
+                background-color: transparent;
+                border: none;
+                padding: 2px;
+            }
+            QToolButton:hover {
+                background-color: #dddddd;
+                border-radius: 4px;
+            }
+            QToolButton:pressed {
+                background-color: #d0d0d0;
+                border-radius: 4px;
+            }
+            QPushButton {
+                background-color: #dddddd;
+                border: none;
+                border-radius: 4px;
+                padding: 2px 8px;
+            }
+            QPushButton:hover {
+                background-color: #d4d4d4;
+            }
+            QPushButton:pressed, QPushButton:checked {
+                background-color: #cfcfcf;
+            }
+        """)
+        toolbar_row = QHBoxLayout(toolbar_box)
+        toolbar_row.setContentsMargins(8, 4, 8, 4)
+        toolbar_row.setSpacing(6)
+        toolbar_row.addWidget(toolbar, 0)
+        toolbar_row.addStretch(1)
+        toolbar_row.addWidget(self.select_button)
+        toolbar_row.addWidget(self.rect_button)
+        toolbar_row.addWidget(self.vband_button)
+        toolbar_row.addWidget(self.hband_button)
+        toolbar_row.addWidget(self.poly_button)
+        toolbar_row.addWidget(self.finish_poly_button)
+        toolbar_row.addWidget(self.include_mode_button)
+        toolbar_row.addWidget(self.exclude_mode_button)
+        toolbar_row.addWidget(self.pre_nan_mode_button)
+
+        layout.addWidget(toolbar_box, 0)
+
+        self.before_coordinate_label = QLabel("x = - | y = - | q = - | I = -")
+        self.before_coordinate_label.setMinimumHeight(28)
+        self.before_coordinate_label.setAlignment(Qt.AlignCenter)
+        self.before_coordinate_label.setStyleSheet("""
+            QLabel {
+                background-color: #f4f4f4;
+                border-radius: 8px;
+                padding: 6px;
+                font-family: Menlo, Monaco, monospace;
+                font-size: 11px;
+            }
+        """)
+        self.before_canvas.set_coordinate_label(self.before_coordinate_label, "")
         left_panel.addWidget(self.before_canvas, 1)
+        left_panel.addWidget(self.before_coordinate_label, 0)
         body.addLayout(left_panel, 1)
         arrow_label = QLabel("→")
         arrow_label.setAlignment(Qt.AlignCenter)
@@ -1222,21 +1337,47 @@ class ManualCaveDialog(QDialog):
             }
         """)
         body.addWidget(arrow_label, 0)
-        body.addWidget(self.after_canvas, 1)
+
+        right_panel = QVBoxLayout()
+        right_panel.setContentsMargins(0, 0, 0, 0)
+        right_panel.setSpacing(2)
+        self.after_coordinate_label = QLabel("x = - | y = - | q = - | I = -")
+        self.after_coordinate_label.setMinimumHeight(28)
+        self.after_coordinate_label.setAlignment(Qt.AlignCenter)
+        self.after_coordinate_label.setStyleSheet("""
+            QLabel {
+                background-color: #f4f4f4;
+                border-radius: 8px;
+                padding: 6px;
+                font-family: Menlo, Monaco, monospace;
+                font-size: 11px;
+            }
+        """)
+        self.after_canvas.set_coordinate_label(self.after_coordinate_label, "")
+        right_panel.addWidget(self.after_canvas, 1)
+        right_panel.addWidget(self.after_coordinate_label, 0)
+        body.addLayout(right_panel, 1)
 
         side = QVBoxLayout()
         side.setContentsMargins(0, 0, 0, 0)
-        side.setSpacing(4)
+        side.setSpacing(8)
         side.addWidget(QLabel("Shapes"))
         self.shape_list = QListWidget()
         self.shape_list.currentRowChanged.connect(self.shape_list_row_changed)
         side.addWidget(self.shape_list, 1)
+        for action_button in [
+            self.clear_button,
+            self.load_mask_button,
+            self.save_mask_button,
+            self.apply_button,
+            self.close_button,
+        ]:
+            action_button.setMinimumHeight(28)
+            action_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         side.addWidget(self.clear_button)
         side.addWidget(self.load_mask_button)
         side.addWidget(self.save_mask_button)
         side.addWidget(self.apply_button)
-        side.addWidget(self.multicave_button)
-        side.addWidget(self.multicave_progress)
         side.addWidget(self.close_button)
         body.addLayout(side)
         layout.addLayout(body, 1)
@@ -1553,10 +1694,10 @@ class ManualCaveDialog(QDialog):
     def add_shape(self, shape_type, points):
         if shape_type == "vband" and len(points) == 4:
             x0, y0, x1, y1 = points
-            points = (x0, y0, x1, y1, 10.0)
+            points = (x0, 0.0, x1, float(self.source_image.shape[0]))
         elif shape_type == "hband" and len(points) == 4:
             x0, y0, x1, y1 = points
-            points = (x0, y0, x1, y1, 10.0)
+            points = (0.0, y0, float(self.source_image.shape[1]), y1)
 
         self.shapes.append({"type": shape_type, "points": points, "mode": self.current_mask_mode})
         self.selected_shape_index = len(self.shapes) - 1
@@ -1707,14 +1848,24 @@ class ManualCaveDialog(QDialog):
                 shape["points"] = (x0, y0, x, y)
             else:
                 shape["points"] = (x, y0, x1, y)
-        elif shape["type"] in ("vband", "hband"):
-            x0, y0, x1, y1, width = shape["points"]
+        elif shape["type"] == "vband":
+            x0, _y0, x1, _y1 = shape["points"][:4]
+            ny = float(self.source_image.shape[0])
             if handle is None:
-                shape["points"] = (x0 + dx, y0 + dy, x1 + dx, y1 + dy, width)
+                shape["points"] = (x0 + dx, 0.0, x1 + dx, ny)
             elif handle in (0, 3):
-                shape["points"] = (x, y, x1, y1, width)
+                shape["points"] = (x, 0.0, x1, ny)
             else:
-                shape["points"] = (x0, y0, x, y, width)
+                shape["points"] = (x0, 0.0, x, ny)
+        elif shape["type"] == "hband":
+            _x0, y0, _x1, y1 = shape["points"][:4]
+            nx = float(self.source_image.shape[1])
+            if handle is None:
+                shape["points"] = (0.0, y0 + dy, nx, y1 + dy)
+            elif handle in (0, 1):
+                shape["points"] = (0.0, y, nx, y1)
+            else:
+                shape["points"] = (0.0, y0, nx, y)
         else:
             points = list(shape["points"])
             if handle is None:
@@ -1729,23 +1880,31 @@ class ManualCaveDialog(QDialog):
         self.refresh_preview()
 
     def band_polygon(self, shape):
-        x0, y0, x1, y1, width = shape["points"]
-        half_width = max(float(width), 1.0) / 2.0
+        ny, nx = self.source_image.shape
 
         if shape["type"] == "vband":
+            x0, _y0, x1, _y1 = shape["points"][:4]
+            xmin = max(0.0, min(float(x0), float(x1)))
+            xmax = min(float(nx), max(float(x0), float(x1)))
             return [
-                (x0 - half_width, y0),
-                (x0 + half_width, y0),
-                (x1 + half_width, y1),
-                (x1 - half_width, y1),
+                (xmin, 0.0),
+                (xmax, 0.0),
+                (xmax, float(ny)),
+                (xmin, float(ny)),
             ]
 
-        return [
-            (x0, y0 - half_width),
-            (x1, y1 - half_width),
-            (x1, y1 + half_width),
-            (x0, y0 + half_width),
-        ]
+        if shape["type"] == "hband":
+            _x0, y0, _x1, y1 = shape["points"][:4]
+            ymin = max(0.0, min(float(y0), float(y1)))
+            ymax = min(float(ny), max(float(y0), float(y1)))
+            return [
+                (0.0, ymin),
+                (float(nx), ymin),
+                (float(nx), ymax),
+                (0.0, ymax),
+            ]
+
+        return shape["points"]
 
     def set_synced_limits(self, xlim, ylim):
         self.synced_xlim = tuple(xlim)
@@ -1861,6 +2020,10 @@ class ManualCaveDialog(QDialog):
             yc=yc,
             reference_angle_deg=self.parent().cave_angle_spin.value(),
         )
+
+        self.after_canvas.ax.set_xlim(self.before_canvas.ax.get_xlim())
+        self.after_canvas.ax.set_ylim(self.before_canvas.ax.get_ylim())
+        self.after_canvas.draw_idle()
 
     def apply_to_parent(self):
 
@@ -2641,21 +2804,34 @@ class CaveTab(QWidget):
         return {"type": shape["type"], "points": points}
 
     def manual_band_polygon(self, shape):
-        x0, y0, x1, y1, width = shape["points"]
-        half_width = max(float(width), 1.0) / 2.0
+        if self.image is None:
+            return shape["points"]
+
+        ny, nx = self.image.shape
+
         if shape["type"] == "vband":
+            x0, _y0, x1, _y1 = shape["points"][:4]
+            xmin = max(0.0, min(float(x0), float(x1)))
+            xmax = min(float(nx), max(float(x0), float(x1)))
             return [
-                (x0 - half_width, y0),
-                (x0 + half_width, y0),
-                (x1 + half_width, y1),
-                (x1 - half_width, y1),
+                (xmin, 0.0),
+                (xmax, 0.0),
+                (xmax, float(ny)),
+                (xmin, float(ny)),
             ]
-        return [
-            (x0, y0 - half_width),
-            (x1, y1 - half_width),
-            (x1, y1 + half_width),
-            (x0, y0 + half_width),
-        ]
+
+        if shape["type"] == "hband":
+            _x0, y0, _x1, y1 = shape["points"][:4]
+            ymin = max(0.0, min(float(y0), float(y1)))
+            ymax = min(float(ny), max(float(y0), float(y1)))
+            return [
+                (0.0, ymin),
+                (float(nx), ymin),
+                (float(nx), ymax),
+                (0.0, ymax),
+            ]
+
+        return shape["points"]
 
     def shape_to_mask(self, mask, shape):
         ny, nx = mask.shape

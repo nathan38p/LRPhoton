@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
         self.tab_bar.addTab("🧬 Anisotropy")
 
         if self.is_development_copy():
-            self.tab_bar.setTabText(self.background_tab_index, "Background")
+            self.tab_bar.setTabText(self.background_tab_index, "🧹 Background")
             self.tab_bar.setTabEnabled(self.background_tab_index, True)
         else:
             self.tab_bar.setTabText(self.background_tab_index, "🔒 Background")
