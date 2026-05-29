@@ -466,6 +466,10 @@ class AverageTab(QWidget):
             if not path.is_file():
                 continue
             lower_name = path.name.lower()
+            if "azim" in lower_name:
+                continue
+            if lower_name.endswith("_ave.h5"):
+                continue
             if not any(fnmatch.fnmatch(lower_name, pattern.lower()) for pattern in extension_patterns):
                 continue
             if not fnmatch.fnmatch(path.name, name_pattern):

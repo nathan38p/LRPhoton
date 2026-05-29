@@ -185,6 +185,7 @@ class ColoredTabBar(QTabBar):
         7: ("#dcfce7", "#16a34a"),  # Radial
         8: ("#dcfce7", "#16a34a"),  # Azimuthal
         9: ("#f3e8ff", "#9333ea"),  # Anisotropy
+        10: ("#fde68a", "#d97706"),  # Sandbox
     }
 
     def tabSizeHint(self, index):
@@ -334,6 +335,7 @@ class MainWindow(QMainWindow):
         self.radial_tab_index = self.tab_bar.addTab("⭕ Radial")
         self.tab_bar.addTab("〰️ Azimuthal")
         self.tab_bar.addTab("🧬 Anisotropy")
+        self.sandbox_tab_index = self.tab_bar.addTab("🧪 Sandbox")
 
         if self.is_development_copy():
             self.tab_bar.setTabText(self.background_tab_index, "🧹 Background")
@@ -513,6 +515,7 @@ class MainWindow(QMainWindow):
         from tabs.unfold_tab import UnfoldTab
         from tabs.hermans_tab import HermansTab
         from tabs.datplot_tab import DatPlotTab
+        from tabs.sandbox_tab import SandboxTab
 
         BackgroundTab = self.resolve_background_tab_class()
 
@@ -526,6 +529,7 @@ class MainWindow(QMainWindow):
         self.azimuthal_tab = AzimuthalTab()
         self.unfold_tab = UnfoldTab()
         self.hermans_tab = HermansTab()
+        self.sandbox_tab = SandboxTab()
         self.view_tab.set_q_geometry_source_tab(self.azimuthal_tab)
         self.unfold_tab.set_q_geometry_source_tab(self.azimuthal_tab)
 
@@ -544,6 +548,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.radial_tab)
         self.pages.addWidget(self.azimuthal_tab)
         self.pages.addWidget(self.hermans_tab)
+        self.pages.addWidget(self.sandbox_tab)
 
         # Folder synchronisation between tabs using a folder browser.
         # When one tab changes folder, all the others are updated too.
@@ -558,6 +563,7 @@ class MainWindow(QMainWindow):
             self.azimuthal_tab,
             self.unfold_tab,
             self.hermans_tab,
+            self.sandbox_tab,
         ]
 
         default_folder = str(self.load_last_folder())
