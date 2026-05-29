@@ -312,6 +312,9 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(logo)
         header_layout.addLayout(title_box)
 
+        self.header_balance_spacer = QWidget()
+        self.header_balance_spacer.setFixedWidth(260)
+
         # ============================================================
         # TAB BAR IN HEADER
         # ============================================================
@@ -344,6 +347,7 @@ class MainWindow(QMainWindow):
         header_layout.addStretch()
         header_layout.addWidget(self.tab_bar)
         header_layout.addStretch()
+        header_layout.addWidget(self.header_balance_spacer)
 
         self.report_button = QPushButton("💬 Feedback")
         self.report_button.setFixedHeight(28)
