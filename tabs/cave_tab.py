@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, QEvent, QPoint, QSize, QCoreApplication, Signal, 
 from PySide6.QtWidgets import (
     QWidget,
     QDialog,
+    QAbstractItemView,
     QAbstractSpinBox,
     QVBoxLayout,
     QHBoxLayout,
@@ -1752,8 +1753,8 @@ class ManualCaveDialog(QDialog):
         for canvas in (self.before_canvas, self.after_canvas):
             canvas.ax.set_xlim(self.synced_xlim)
             canvas.ax.set_ylim(self.synced_ylim)
-            if canvas.raw_image is not None:
-                constrain_image_axes(canvas.ax, canvas.raw_image.shape)
+            if canvas.image is not None:
+                constrain_image_axes(canvas.ax, canvas.image.shape)
                 self.synced_xlim = tuple(canvas.ax.get_xlim())
                 self.synced_ylim = tuple(canvas.ax.get_ylim())
             canvas.draw_idle()
@@ -1775,8 +1776,8 @@ class ManualCaveDialog(QDialog):
                 continue
             canvas.ax.set_xlim(self.synced_xlim)
             canvas.ax.set_ylim(self.synced_ylim)
-            if canvas.raw_image is not None:
-                constrain_image_axes(canvas.ax, canvas.raw_image.shape)
+            if canvas.image is not None:
+                constrain_image_axes(canvas.ax, canvas.image.shape)
 
     def shape_mask(self, mode="include"):
         mask = np.zeros(self.source_image.shape, dtype=bool)
@@ -1979,6 +1980,7 @@ class CaveTab(QWidget):
         file_box.setStyleSheet(GROUP_BOX_STYLE)
         file_box.setMinimumHeight(0)
         file_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        file_box.setMinimumHeight(120)
         file_layout = QVBoxLayout(file_box)
         file_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         file_layout.setSpacing(6)
@@ -2025,7 +2027,9 @@ class CaveTab(QWidget):
                 border: none;
             }
         """
+        refresh_button.setStyleSheet(cave_action_button_style)
         cave_action_button_height = refresh_button.sizeHint().height()
+        refresh_button.setFixedHeight(cave_action_button_height)
         refresh_button.clicked.connect(self.refresh_files)
 
         filters_layout.addWidget(QLabel("Name:"), 0, 0)
@@ -2044,6 +2048,7 @@ class CaveTab(QWidget):
 
         self.file_list = QListWidget()
         install_file_rating_menu(self.file_list)
+        self.file_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.file_list.itemClicked.connect(self.open_selected_file)
         self.file_list.setMinimumHeight(0)
         file_layout.addWidget(self.file_list, stretch=1)
@@ -2052,7 +2057,8 @@ class CaveTab(QWidget):
         controls_box.setStyleSheet(GROUP_BOX_STYLE)
         controls_box.setMinimumHeight(0)
         controls_box.setMinimumWidth(0)
-        controls_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        controls_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        controls_box.setMinimumHeight(120)
         controls_box_layout = QVBoxLayout(controls_box)
         controls_box_layout.setContentsMargins(6, 18, 6, 6)
         controls_box_layout.setSpacing(0)
@@ -2115,9 +2121,8 @@ class CaveTab(QWidget):
         center_splitter.addWidget(controls_box)
         center_splitter.setStretchFactor(0, 1)
         center_splitter.setStretchFactor(1, 1)
-        self.set_initial_center_splitter_sizes()
+        center_splitter.setSizes([1, 1])
         QTimer.singleShot(0, self.set_initial_center_splitter_sizes)
-        QTimer.singleShot(100, self.set_initial_center_splitter_sizes)
 
         top_layout.addWidget(center_panel, stretch=0)
         top_layout.addWidget(cave_box, stretch=1)
@@ -2263,7 +2268,13 @@ class CaveTab(QWidget):
         self.expand_nan_neighbors_checkbox.setToolTip(
             "Expands the NaN mask by 2 pixels before central symmetry filling."
         )
-        self.manual_mask_button = QPushButton()
+
+        self.manual_mask_button = QPushButton("Manual cave mask")
+        self.manual_mask_button.setStyleSheet(cave_action_button_style)
+        self.manual_mask_button.setFixedHeight(cave_action_button_height)
+        self.manual_mask_button.setCursor(Qt.PointingHandCursor)
+        self.manual_mask_button.setVisible(True)
+        self.manual_mask_button.setEnabled(True)
         self.manual_mask_button.clicked.connect(self.open_manual_cave_dialog)
         self.update_manual_mask_button_state()
 
@@ -2330,7 +2341,7 @@ class CaveTab(QWidget):
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(4)
 
-        self.run_button = QPushButton("Run Cave")
+        self.run_button = QPushButton("▶️ Run Cave")
         self.run_button.setFixedHeight(cave_action_button_height)
         self.run_button.setStyleSheet(cave_action_button_style)
         self.run_button.clicked.connect(self.run_cave)
@@ -2425,7 +2436,6 @@ class CaveTab(QWidget):
             self.nan_extra_checkbox,
             self.id13_beamstop_checkbox,
             self.expand_nan_neighbors_checkbox,
-            self.manual_mask_button,
             self.lock_intensity_checkbox,
             self.auto_intensity_button,
             self.vmin_slider,
@@ -2448,12 +2458,14 @@ class CaveTab(QWidget):
             self.q_manual_button,
         ]:
             button.setEnabled(True)
+        self.update_manual_mask_button_state()
 
     def set_initial_center_splitter_sizes(self):
         if not hasattr(self, "center_splitter"):
             return
         height = max(2, self.center_splitter.height())
-        self.center_splitter.setSizes([height // 2, height - height // 2])
+        half_height = height // 2
+        self.center_splitter.setSizes([half_height, height - half_height])
 
     def is_development_copy(self):
         return (Path(__file__).resolve().parents[1] / ".git").exists()
@@ -2462,10 +2474,11 @@ class CaveTab(QWidget):
         if not hasattr(self, "manual_mask_button"):
             return
 
-        self.manual_mask_button.setText("Manual cave mask / MultiCave")
-        self.manual_mask_button.setEnabled(self.image is not None)
-        self.manual_mask_button.setToolTip("Open the manual cave mask editor and MultiCave tools.")
-
+        self.manual_mask_button.setText("Manual cave mask")
+        self.manual_mask_button.setVisible(True)
+        self.manual_mask_button.setEnabled(True)
+        self.manual_mask_button.setToolTip("Open the manual cave mask.")
+        
     def update_extra_nan_condition(self, refresh=True):
         self.commit_nan_threshold_edits()
         enabled = self.nan_extra_checkbox.isEnabled() and self.nan_extra_checkbox.isChecked()
@@ -2673,36 +2686,33 @@ class CaveTab(QWidget):
         mask[ymin:ymax, xmin:xmax] |= path.contains_points(points).reshape((ymax - ymin, xmax - xmin))
 
     def open_manual_cave_dialog(self):
-        if self.image is None:
-            return
+        try:
+            image = self.image_clean if self.image_clean is not None else self.image
 
-        self.commit_nan_threshold_edits()
-        use_id13_beamstop = self.instrument_mode == "ID13" and self.id13_beamstop_checkbox.isChecked()
-        extra_operator, extra_threshold = self.extra_nan_condition()
-        _, automatic_filled, _ = apply_central_symmetry_cave(
-            self.image,
-            self.xc_spin.value(),
-            self.yc_spin.value(),
-            nan_operator=self.nan_operator_combo.currentText(),
-            nan_threshold=self.nan_threshold_spin.value(),
-            nan_operator_2=extra_operator,
-            nan_threshold_2=extra_threshold,
-            use_id13_beamstop=use_id13_beamstop,
-            beamstop_y=self.beamstop_y_spin.value(),
-            reference_angle_deg=self.cave_angle_spin.value(),
-            expand_nan_neighbors=self.expand_nan_neighbors_checkbox.isChecked(),
-        )
+            if image is None:
+                QMessageBox.information(
+                    self,
+                    "Manual cave mask",
+                    "Load an EDF or H5 image before opening the manual cave mask editor."
+                )
+                return
 
-        dialog = ManualCaveDialog(
-            self,
-            self.image,
-            automatic_filled,
-            self.manual_cave_shapes,
-            self.manual_cave_exclusion_shapes,
-            self.manual_cave_pre_nan_shapes,
-            self.current_display_limits(),
-        )
-        dialog.exec()
+            filled_image = self.image_filled if self.image_filled is not None else image
+
+            dialog = ManualCaveDialog(
+                self,
+                image,
+                filled_image,
+                self.manual_cave_shapes,
+                self.manual_cave_exclusion_shapes,
+                self.manual_cave_pre_nan_shapes,
+                self.current_display_limits(),
+            )
+            dialog.exec()
+            self.refresh_preview()
+
+        except Exception as error:
+            QMessageBox.critical(self, "Manual cave mask error", str(error))
 
     def auto_set_display_limits(self):
         if self.image is None:
@@ -3112,32 +3122,14 @@ class CaveTab(QWidget):
             display_name = str(path.relative_to(folder))
             has_matching_cave = (path.parent.resolve(), path.stem) in cave_outputs_by_base
 
-            item = QListWidgetItem()
-            item.setSizeHint(QSize(0, 24))
+            if has_matching_cave:
+                display_name = f"✅ {display_name}"
+
+            item = QListWidgetItem(display_name)
             set_item_file_path(item, path)
             if has_matching_cave:
                 item.setToolTip("A matching cave output already exists for this file.")
             self.file_list.addItem(item)
-
-            row_widget = QWidget()
-            row_widget.setFixedHeight(24)
-            row_widget.setStyleSheet("background: transparent;")
-            row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(2, 0, 2, 0)
-            row_layout.setSpacing(4)
-
-            status_label = QLabel("✅" if has_matching_cave else "")
-            status_label.setFixedWidth(18)
-            status_label.setAlignment(Qt.AlignCenter)
-            status_label.setStyleSheet("background: transparent;")
-            row_layout.addWidget(status_label, 0)
-
-            name_label = QLabel(display_name)
-            name_label.setMinimumWidth(0)
-            name_label.setStyleSheet("background: transparent;")
-            row_layout.addWidget(name_label, 1)
-
-            self.file_list.setItemWidget(item, row_widget)
 
     def open_selected_file(self, item=None):
         if item is None:

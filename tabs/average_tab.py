@@ -343,7 +343,7 @@ class AverageTab(QWidget):
             }
         """
 
-        self.run_button = QPushButton("Run Average")
+        self.run_button = QPushButton("▶️ Run Average")
         self.run_button.setStyleSheet(average_button_style)
         self.run_button.clicked.connect(self.run_average)
 
