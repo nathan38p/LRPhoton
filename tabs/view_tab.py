@@ -652,30 +652,78 @@ class PlaneAnnotationDialog(QDialog):
         self.save_annotations()
         self.canvas.show_image()
 
+    def make_remove_button(self, tooltip, callback):
+        remove_button = QPushButton("−")
+        remove_button.setFixedSize(22, 18)
+        remove_button.setToolTip(tooltip)
+        remove_button.setStyleSheet("""
+            QPushButton {
+                background: #ffecec;
+                color: #b00020;
+                border: 1px solid #ffb3b3;
+                border-radius: 8px;
+                font-weight: bold;
+                font-size: 11px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background: #ffd6d6;
+            }
+        """)
+        remove_button.clicked.connect(callback)
+
+        remove_holder = QWidget()
+        remove_layout = QHBoxLayout(remove_holder)
+        remove_layout.setContentsMargins(0, 0, 0, 0)
+        remove_layout.setSpacing(0)
+        remove_layout.addWidget(remove_button, alignment=Qt.AlignCenter)
+        return remove_holder
+
     def refresh_plane_tree(self):
         self._syncing_tree = True
         self.plane_tree.clear()
         current_item = None
         for label, data in self.annotations.items():
             points = data.get("points", [])
-            plane_item = QTreeWidgetItem([f"{label} ({len(points)} point{'s' if len(points) != 1 else ''})", "−"])
+            plane_item = QTreeWidgetItem([f"{label} ({len(points)} point{'s' if len(points) != 1 else ''})", ""])
             plane_item.setData(0, Qt.UserRole, ("plane", label, None))
+            plane_item.setSizeHint(0, QSize(302, 24))
+            plane_item.setSizeHint(1, QSize(28, 24))
             plane_item.setTextAlignment(1, Qt.AlignCenter)
             plane_item.setToolTip(0, plane_item.text(0))
-            plane_item.setToolTip(1, "Remove this plane")
             self.plane_tree.addTopLevelItem(plane_item)
+            self.plane_tree.setItemWidget(
+                plane_item,
+                1,
+                self.make_remove_button(
+                    "Remove this plane",
+                    lambda checked=False, plane_label=label: self.remove_plane(plane_label),
+                ),
+            )
             if label == self.current_plane:
                 current_item = plane_item
 
             for index, point in enumerate(points, start=1):
                 x, y = point
                 point_text = f"Point {index}: x={x + 1:.1f}, y={y + 1:.1f}"
-                point_item = QTreeWidgetItem([point_text, "−"])
+                point_item = QTreeWidgetItem([point_text, ""])
                 point_item.setData(0, Qt.UserRole, ("point", label, index - 1))
+                point_item.setSizeHint(0, QSize(302, 24))
+                point_item.setSizeHint(1, QSize(28, 24))
                 point_item.setTextAlignment(1, Qt.AlignCenter)
                 point_item.setToolTip(0, point_text)
-                point_item.setToolTip(1, "Remove this point")
                 plane_item.addChild(point_item)
+                self.plane_tree.setItemWidget(
+                    point_item,
+                    1,
+                    self.make_remove_button(
+                        "Remove this point",
+                        lambda checked=False, point_label=label, point_index=index - 1: self.remove_point(
+                            point_label,
+                            point_index,
+                        ),
+                    ),
+                )
             plane_item.setExpanded(True)
 
         if current_item is not None:
@@ -880,6 +928,7 @@ class ViewTab(QWidget):
         self.current_dataset_name = None
         self.annotation_dialog = None
         self.image_axis_bounds = None
+        self.is_azimuthal_image = False
 
         self._build_ui()
 
@@ -1439,6 +1488,17 @@ class ViewTab(QWidget):
             self.folder_path.setText(str(self.current_folder))
             self.refresh_files()
 
+    def should_show_file_in_browser(self, path):
+        lower_name = path.name.lower()
+
+        if lower_name.endswith(".dat"):
+            return False
+
+        if lower_name.endswith("_ave.h5"):
+            return False
+
+        return True
+
     def refresh_files(self):
         folder = Path(self.folder_path.text()).expanduser()
 
@@ -1473,10 +1533,7 @@ class ViewTab(QWidget):
 
             lower_name = path.name.lower()
 
-            if lower_name.endswith(".dat"):
-                continue
-
-            if lower_name.endswith("_ave.h5"):
+            if not self.should_show_file_in_browser(path):
                 continue
 
             match_extension = any(
@@ -1542,6 +1599,7 @@ class ViewTab(QWidget):
         self.h5_datasets = []
         self.is_lazy_h5 = False
         self.h5_dataset = None
+        self.is_azimuthal_image = False
 
         if self.h5_file is not None:
             try:
@@ -1653,6 +1711,8 @@ class ViewTab(QWidget):
         print("EDF loaded shape:", self.images.shape)
         print("EDF intensity min/max:", np.nanmin(self.images), np.nanmax(self.images))
 
+        self.configure_azimuthal_display_defaults()
+
         self.update_file_information(
             "EDF",
             "-",
@@ -1754,6 +1814,7 @@ class ViewTab(QWidget):
             raise ValueError("Dataset must be 2D or 3D.")
 
         self.current_index = 0
+        self.configure_azimuthal_display_defaults()
 
         self.update_file_information(
             "HDF5",
@@ -1865,6 +1926,31 @@ class ViewTab(QWidget):
 
         if copied:
             self.headers["Center source"] = edf_path.name
+
+    def is_azimuthal_processed_file(self):
+        if self.current_file is not None:
+            stem = self.current_file.stem.lower()
+            if "_azim" in stem or stem.endswith("azim"):
+                return True
+
+        for key, value in self.headers.items():
+            key_text = str(key).lower()
+            value_text = str(value).lower()
+            if key_text == "processing" and "azim" in value_text:
+                return True
+            if "azim" in key_text and value_text not in ("", "none"):
+                return True
+
+        return False
+
+    def configure_azimuthal_display_defaults(self):
+        self.is_azimuthal_image = self.is_azimuthal_processed_file()
+        if not self.is_azimuthal_image:
+            return
+
+        self.keep_ratio_checkbox.blockSignals(True)
+        self.keep_ratio_checkbox.setChecked(False)
+        self.keep_ratio_checkbox.blockSignals(False)
 
     # ============================================================
     # IMAGE DISPLAY
@@ -2094,6 +2180,9 @@ class ViewTab(QWidget):
         return wavelength
 
     def get_header_q_geometry(self):
+        if self.is_azimuthal_image:
+            return None
+
         center = self.get_center_from_header()
         if center is None:
             return None
@@ -2151,6 +2240,9 @@ class ViewTab(QWidget):
         return xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_nm
 
     def get_preset_q_geometry(self):
+        if self.is_azimuthal_image:
+            return None
+
         geometry = self.q_geometry_values_for_mode()
         if not geometry:
             return None
@@ -2168,6 +2260,9 @@ class ViewTab(QWidget):
         return xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_nm
 
     def q_geometry_values_for_mode(self):
+        if self.is_azimuthal_image:
+            return None
+
         geometry = self.preset_q_geometry(self.q_geometry_mode)
         if geometry is None:
             return None
@@ -2191,6 +2286,9 @@ class ViewTab(QWidget):
         return self.get_preset_q_geometry()
 
     def calculate_q_at_pixel(self, x_index, y_index):
+        if self.is_azimuthal_image:
+            return self.calculate_azimuthal_q_at_pixel(x_index)
+
         geometry = self.get_q_geometry_from_header()
         if geometry is None:
             return None
@@ -2209,6 +2307,35 @@ class ViewTab(QWidget):
 
         return q_nm
 
+    def calculate_azimuthal_angle_at_pixel(self, y_index):
+        if self.raw_current_img is None:
+            return None
+
+        ny, _nx = self.raw_current_img.shape
+        if ny <= 0:
+            return None
+
+        return ((float(y_index) + 0.5) / float(ny)) * 360.0
+
+    def calculate_azimuthal_q_at_pixel(self, x_index):
+        values = self.get_header_q_values()
+        required_keys = ("xc", "distance_m", "pixel_x_mm", "wavelength_a")
+        if not all(key in values for key in required_keys):
+            return None
+
+        xc = values["xc"]
+        distance_m = values["distance_m"]
+        pixel_x_mm = values["pixel_x_mm"]
+        wavelength_nm = self.wavelength_to_nm(values["wavelength_a"])
+
+        if distance_m <= 0 or pixel_x_mm <= 0 or wavelength_nm <= 0:
+            return None
+
+        dx_px = float(x_index) - float(xc)
+        dx_m = abs(dx_px) * pixel_x_mm * 1e-3
+        two_theta = np.arctan2(dx_m, distance_m)
+        return (4.0 * np.pi / wavelength_nm) * np.sin(two_theta / 2.0)
+
     def draw_center_cross(self):
         for artist in self.center_artists:
             try:
@@ -2217,6 +2344,9 @@ class ViewTab(QWidget):
                 pass
 
         self.center_artists = []
+
+        if self.is_azimuthal_image:
+            return
 
         values = self.q_geometry_values_for_mode()
         center = None
@@ -2321,19 +2451,18 @@ class ViewTab(QWidget):
         self.canvas.draw_idle()
 
     def auto_intensity(self):
-        img = self.get_current_image()
-
-        if img is None:
+        display_img = self.display_image_for_auto_intensity()
+        if display_img is None:
             return
 
-        display_img = self.prepare_display_image(img)
         finite = display_img[np.isfinite(display_img)]
 
         if finite.size == 0:
             return
 
-        vmin = float(np.nanpercentile(finite, 1))
-        vmax = float(np.nanpercentile(finite, 99))
+        lower_percentile, upper_percentile = self.auto_intensity_percentiles()
+        vmin = float(np.nanpercentile(finite, lower_percentile))
+        vmax = float(np.nanpercentile(finite, upper_percentile))
 
         self.intensity_min = float(np.nanmin(finite))
         self.intensity_max = float(np.nanmax(finite))
@@ -2358,6 +2487,15 @@ class ViewTab(QWidget):
             self.settings.setValue("view/vmin", vmin)
             self.settings.setValue("view/vmax", vmax)
         self.update_image()
+
+    def display_image_for_auto_intensity(self):
+        img = self.get_current_image()
+        if img is None:
+            return None
+        return self.prepare_display_image(img)
+
+    def auto_intensity_percentiles(self):
+        return 1.0, 99.0
 
     def value_to_slider(self, value):
         if self.intensity_max == self.intensity_min:
@@ -2486,9 +2624,16 @@ class ViewTab(QWidget):
         q_value = self.calculate_q_at_pixel(x_index, y_index)
         q_text = "-" if q_value is None else f"{q_value:.6g} nm⁻¹"
 
-        self.cursor_label.setText(
-            f"x = {x_index + 1} | y = {y_index + 1} | q = {q_text} | I = {value_text}"
-        )
+        if self.is_azimuthal_image:
+            angle_value = self.calculate_azimuthal_angle_at_pixel(y_index)
+            angle_text = "-" if angle_value is None else f"{angle_value:.3f}°"
+            self.cursor_label.setText(
+                f"x = {x_index + 1} | y = {y_index + 1} | angle = {angle_text} | q = {q_text} | I = {value_text}"
+            )
+        else:
+            self.cursor_label.setText(
+                f"x = {x_index + 1} | y = {y_index + 1} | q = {q_text} | I = {value_text}"
+            )
 
     def on_mouse_leave(self, event):
         self.cursor_label.setText("x = - | y = - | q = - | I = -")

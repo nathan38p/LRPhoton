@@ -327,7 +327,7 @@ class MainWindow(QMainWindow):
         self.background_tab_index = self.tab_bar.addTab("🔒 Background")
         self.tab_bar.addTab("Average")
         self.tab_bar.addTab("Cave")
-        self.tab_bar.addTab("Unfold")
+        self.unfold_tab_index = self.tab_bar.addTab("Unfold")
         self.radial_tab_index = self.tab_bar.addTab("Radial")
         self.tab_bar.addTab("Azimuthal")
         self.tab_bar.addTab("Anisotropy")
@@ -338,6 +338,8 @@ class MainWindow(QMainWindow):
         else:
             self.tab_bar.setTabText(self.background_tab_index, "🔒 Background")
             self.tab_bar.setTabEnabled(self.background_tab_index, False)
+
+        self.tab_bar.setTabVisible(self.unfold_tab_index, False)
 
         header_layout.addStretch()
         header_layout.addWidget(self.tab_bar)

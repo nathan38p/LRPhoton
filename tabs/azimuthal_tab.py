@@ -290,6 +290,67 @@ def matching_manufacturer_q_range(file_path: Path):
     return q_min, q_max
 
 
+def is_azimuthal_processed_image(file_path: Path, header: dict):
+    stem = Path(file_path).stem.lower()
+    if "_azim" in stem or stem.endswith("azim"):
+        return True
+
+    for key, value in header.items():
+        key_text = str(key).lower()
+        value_text = str(value).lower()
+        if key_text == "processing" and "azim" in value_text:
+            return True
+        if "azim" in key_text and value_text not in ("", "none"):
+            return True
+
+    return False
+
+
+# ============================================================
+# AZIMUTHAL PROCESSED IMAGE PROFILE
+# ============================================================
+def azimuthal_processed_psi_profile(image, q_values, q_min=0.0, q_max=np.inf):
+    """Return I(ψ) from an already azimuthal image.
+
+    For *_azim images:
+    - x/columns are q positions,
+    - y/rows are azimuthal angles ψ,
+    - pixel values are intensities.
+
+    The azimuthal profile is therefore the horizontal mean intensity
+    of each ψ row over the selected q columns.
+    """
+    img = image.astype(np.float64)
+    ny, nx = img.shape
+
+    q_values = np.asarray(q_values, dtype=float)
+    if q_values.ndim != 1 or q_values.size != nx:
+        raise ValueError("The q axis must contain one value per image column.")
+
+    q_mask = (q_values >= float(q_min)) & (q_values <= float(q_max))
+    if not np.any(q_mask):
+        raise ValueError("No q column found in the selected q range.")
+
+    selected = img[:, q_mask]
+    valid = np.isfinite(selected) & (selected < 4e9)
+    counts = np.sum(valid, axis=1)
+
+    with np.errstate(invalid="ignore"):
+        intensity = np.nanmean(np.where(valid, selected, np.nan), axis=1)
+
+    psi_values = np.linspace(0.0, 360.0, ny, endpoint=False)
+
+    keep = np.isfinite(psi_values) & np.isfinite(intensity) & (counts > 0)
+    return psi_values[keep], intensity[keep], counts[keep]
+def azimuthal_processed_q_mask(shape, q_values, q_min=0.0, q_max=np.inf):
+    ny, nx = shape
+    q_values = np.asarray(q_values, dtype=float)
+    if q_values.ndim != 1 or q_values.size != nx:
+        return np.ones((ny, nx), dtype=bool)
+    q_mask = (q_values >= float(q_min)) & (q_values <= float(q_max))
+    return np.tile(q_mask, (ny, 1))
+
+
 def azimuthal_normalization_factor(header: dict, mode: str):
     if mode == "raw":
         return 1.0, "raw"
@@ -526,6 +587,7 @@ class ImageCanvas(FigureCanvas):
         self.last_yc = None
         self.last_mask = None
         self.q_map = None
+        self.coordinate_mode = "detector"
 
         self.mpl_connect("scroll_event", self._on_scroll)
         self.mpl_connect("button_press_event", self._on_press)
@@ -537,6 +599,9 @@ class ImageCanvas(FigureCanvas):
 
     def set_q_map(self, q_map):
         self.q_map = q_map
+
+    def set_coordinate_mode(self, mode):
+        self.coordinate_mode = mode
 
     def reset_display_limits(self):
         self.display_vmin = None
@@ -623,7 +688,12 @@ class ImageCanvas(FigureCanvas):
                         if np.isfinite(q_value):
                             q_text = f"{q_value:.6g} nm⁻¹"
 
-                if self.last_xc is not None and self.last_yc is not None:
+                if self.coordinate_mode == "azimuthal_image" and self.raw_image is not None:
+                    ny, _nx = self.raw_image.shape
+                    if ny > 0:
+                        psi = (y_index / max(1, ny - 1)) * 360.0
+                        psi_text = f"{psi:.3f}°"
+                elif self.last_xc is not None and self.last_yc is not None:
                     dx = (x_index + 1) - self.last_xc
                     dy = (y_index + 1) - self.last_yc
                     psi = np.degrees(np.arctan2(dy, dx)) % 360.0
@@ -694,35 +764,64 @@ class ImageCanvas(FigureCanvas):
 
         if mask is not None:
             overlay = np.zeros((*mask.shape, 4), dtype=float)
-            overlay[~mask, :] = [0.55, 0.55, 0.55, 0.65]
+            overlay[~mask, :] = [0.55, 0.55, 0.55, 0.72]
             self.ax.imshow(overlay, origin="upper", interpolation="nearest")
 
-        if xc is not None and yc is not None:
-            self.ax.axvline(xc - 1, color="red", linewidth=1.0)
-            self.ax.axhline(yc - 1, color="red", linewidth=1.0)
-            self.ax.plot(xc - 1, yc - 1, "wo", markersize=4)
+            if self.coordinate_mode == "azimuthal_image" and np.any(mask):
+                selected_columns = np.where(np.any(mask, axis=0))[0]
+                if selected_columns.size > 0:
+                    self.ax.axvline(selected_columns[0] - 0.5, color="white", linewidth=1.1)
+                    self.ax.axvline(selected_columns[-1] + 0.5, color="white", linewidth=1.1)
 
+        if xc is not None and yc is not None:
             ny, nx = image.shape
-            radius = min(nx, ny) * 0.35
-            for angle in [0, 90, 180, 270]:
-                rad = np.deg2rad(angle)
-                x_text = (xc - 1) + radius * np.cos(rad)
-                y_text = (yc - 1) + radius * np.sin(rad)
-                self.ax.text(
-                    x_text,
-                    y_text,
-                    f"{angle}°",
-                    color="white",
-                    fontsize=10,
-                    fontweight="bold",
-                    ha="center",
-                    va="center",
-                    bbox=dict(facecolor="black", alpha=0.55, edgecolor="none", pad=2),
-                )
+
+            if self.coordinate_mode == "azimuthal_image":
+                self.ax.axvline(0, color="red", linewidth=1.0)
+                self.ax.axhline(0, color="red", linewidth=1.0)
+                self.ax.plot(0, 0, "wo", markersize=4)
+
+                for angle in [0, 90, 180, 270, 360]:
+                    y_text = (angle / 360.0) * (ny - 1)
+                    self.ax.text(
+                        0,
+                        y_text,
+                        f"{angle}°",
+                        color="white",
+                        fontsize=10,
+                        fontweight="bold",
+                        ha="left",
+                        va="center",
+                        bbox=dict(facecolor="black", alpha=0.55, edgecolor="none", pad=2),
+                    )
+            else:
+                center_x = float(xc) - 1.0
+                center_y = float(yc) - 1.0
+
+                self.ax.axvline(center_x, color="red", linewidth=1.0)
+                self.ax.axhline(center_y, color="red", linewidth=1.0)
+                self.ax.plot(center_x, center_y, "wo", markersize=4)
+
+                radius = min(nx, ny) * 0.35
+                for angle in [0, 90, 180, 270]:
+                    rad = np.deg2rad(angle)
+                    x_text = center_x + radius * np.cos(rad)
+                    y_text = center_y + radius * np.sin(rad)
+                    self.ax.text(
+                        x_text,
+                        y_text,
+                        f"{angle}°",
+                        color="white",
+                        fontsize=10,
+                        fontweight="bold",
+                        ha="center",
+                        va="center",
+                        bbox=dict(facecolor="black", alpha=0.55, edgecolor="none", pad=2),
+                    )
 
         self.ax.set_axis_off()
         self.ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
-        self.ax.set_aspect("equal")
+        self.ax.set_aspect("auto" if self.coordinate_mode == "azimuthal_image" else "equal")
 
         if had_image:
             self.ax.set_xlim(current_xlim)
@@ -1273,6 +1372,17 @@ class AzimuthalTab(QWidget):
         from fnmatch import fnmatch
         files = sorted(set(files))
         files = [file for file in files if fnmatch(file.name, name_filter)]
+
+        # In the Azimuthal tab, hide already-unfolded azimuthal images and
+        # averaged H5 files from the browser. This tab should integrate detector
+        # images, not the intermediate *_azim.h5 or *_ave.h5 outputs.
+        files = [
+            file for file in files
+            if "_azim" not in file.stem.lower()
+            and not file.stem.lower().endswith("_ave")
+            and "_ave_" not in file.stem.lower()
+        ]
+
         if self.only_thumbs_up_checkbox.isChecked():
             files = [file for file in files if is_file_rated_up(file)]
 
@@ -1579,6 +1689,108 @@ class AzimuthalTab(QWidget):
             self.wavelength.setValue(ID13_DEFAULT_WAVELENGTH_A)
             return
 
+    def azimuthal_image_q_axis(self, shape, header):
+        _ny, nx = shape
+
+        selected = self.selected_files() if hasattr(self, "file_list") else []
+        file_path = Path(selected[0]) if selected else None
+
+        def scaled_axis(q_values):
+            q_values = np.asarray(q_values, dtype=float)
+            if q_values.size != nx:
+                return None
+            finite = q_values[np.isfinite(q_values)]
+            if finite.size == 0:
+                return None
+
+            # LRPhoton *_azim files store the radial axis 10 times lower than the
+            # nm⁻¹ values used in the Azimuthal tab q-range boxes.
+            return q_values * 10.0
+
+        def h5_scalar(value):
+            try:
+                return float(np.asarray(value).ravel()[0])
+            except Exception:
+                return None
+
+        q_min = get_header_float(
+            header,
+            "QMin", "Q Min", "q_min", "qmin", "q min",
+            "RadialMin", "radial_min", "radial min",
+            "q_min_nm-1", "q_min_nm^-1",
+        )
+        q_max = get_header_float(
+            header,
+            "QMax", "Q Max", "q_max", "qmax", "q max",
+            "RadialMax", "radial_max", "radial max",
+            "q_max_nm-1", "q_max_nm^-1",
+        )
+        if q_min is not None and q_max is not None and q_max > q_min:
+            axis = scaled_axis(np.linspace(float(q_min), float(q_max), nx))
+            if axis is not None:
+                return axis
+
+        if file_path is not None and file_path.suffix.lower() in [".h5", ".hdf5"] and file_path.exists():
+            try:
+                with h5py.File(file_path, "r") as h5:
+                    attrs_list = [h5.attrs]
+
+                    def collect_attrs(_name, obj):
+                        if hasattr(obj, "attrs"):
+                            attrs_list.append(obj.attrs)
+
+                    h5.visititems(collect_attrs)
+                    found_min = None
+                    found_max = None
+                    for attrs in attrs_list:
+                        for key, value in attrs.items():
+                            key_text = str(key).lower().replace("_", " ").replace("-", " ")
+                            scalar = h5_scalar(value)
+                            if scalar is None:
+                                continue
+                            if ("q" in key_text or "radial" in key_text) and any(token in key_text for token in ["min", "start", "first"]):
+                                found_min = scalar
+                            if ("q" in key_text or "radial" in key_text) and any(token in key_text for token in ["max", "end", "last"]):
+                                found_max = scalar
+
+                    if found_min is not None and found_max is not None and found_max > found_min:
+                        axis = scaled_axis(np.linspace(float(found_min), float(found_max), nx))
+                        if axis is not None:
+                            return axis
+            except Exception:
+                pass
+
+        if file_path is not None and file_path.suffix.lower() in [".h5", ".hdf5"] and file_path.exists():
+            try:
+                with h5py.File(file_path, "r") as h5:
+                    q_candidates = []
+
+                    def collect_q_axis(name, obj):
+                        if not isinstance(obj, h5py.Dataset) or obj.ndim != 1 or obj.size != nx:
+                            return
+                        lower = name.lower()
+                        if "q" in lower:
+                            axis = scaled_axis(obj[...])
+                            if axis is not None:
+                                q_candidates.append(axis)
+
+                    h5.visititems(collect_q_axis)
+                    if q_candidates:
+                        return q_candidates[0]
+            except Exception:
+                pass
+
+        if file_path is not None:
+            q_range = matching_manufacturer_q_range(file_path)
+            if q_range is not None:
+                q_min, q_max = q_range
+                axis = scaled_axis(np.linspace(float(q_min), float(q_max), nx))
+                if axis is not None:
+                    return axis
+
+        fallback_max = self.q_max.value() if hasattr(self, "q_max") and self.q_max.value() > 0 else float(nx - 1)
+        return np.linspace(0.0, float(fallback_max), nx)
+
     def integrate_selected_files(self):
         files = self.selected_files()
         if not files:
@@ -1606,6 +1818,66 @@ class AzimuthalTab(QWidget):
         for file_path in files:
             try:
                 image, header = read_image_file(file_path, frame_index=self.current_frame - 1)
+                if is_azimuthal_processed_image(file_path, header):
+                    q_values_full = self.azimuthal_image_q_axis(image.shape, header)
+                    q_step = float(np.nanmedian(np.diff(q_values_full))) if q_values_full.size > 1 else np.nan
+                    q_map = np.tile(q_values_full, (image.shape[0], 1))
+
+                    if self.use_q_range.isChecked():
+                        q_min = self.q_min.value()
+                        q_max = self.q_max.value()
+                    else:
+                        q_min = 0
+                        q_max = np.inf
+
+                    if np.isfinite(q_step) and q_step > 0 and np.isfinite(q_max):
+                        q_min_for_mask = q_min - q_step / 2.0
+                        q_max_for_mask = q_max + q_step / 2.0
+                    else:
+                        q_min_for_mask = q_min
+                        q_max_for_mask = q_max
+
+                    psi_values, intensity, counts = azimuthal_processed_psi_profile(
+                        image,
+                        q_values_full,
+                        q_min=q_min_for_mask,
+                        q_max=q_max_for_mask,
+                    )
+
+                    if psi_values.size == 0:
+                        raise ValueError("No valid ψ row found in the selected azimuthal image range.")
+
+                    normalization_factor, normalization_label = azimuthal_normalization_factor(
+                        header,
+                        self.normalization_mode.currentData(),
+                    )
+                    intensity = intensity * normalization_factor * self.intensity_scale.value()
+
+                    ax.plot(psi_values, intensity, linewidth=1.2, label=file_path.stem)
+                    self.last_results[file_path.stem] = (psi_values, intensity, counts)
+                    self.last_result_paths[file_path.stem] = file_path
+                    self.last_result_frame_counts[file_path.stem] = int(header.get("Number of frames", 1) or 1)
+
+                    if file_path == files[0]:
+                        self.image_canvas.set_coordinate_mode("azimuthal_image")
+                        self.image_canvas.set_q_map(q_map)
+                        selected_q_mask = azimuthal_processed_q_mask(
+                            image.shape,
+                            q_values_full,
+                            q_min=q_min_for_mask,
+                            q_max=q_max_for_mask,
+                        )
+                        self.image_canvas.show_image(image, 0.0, 0.0, mask=selected_q_mask)
+                        self.sync_image_intensity_sliders()
+
+                    messages.append(
+                        f"Integrated azimuthal image as I(ψ): {file_path.name} ({psi_values.size} ψ rows)"
+                        f" | q range = {q_min:.8g} -> {q_max:.8g} nm⁻¹"
+                        f" | I(ψ) = average intensity of each ψ row over selected q columns, not a sum"
+                        f" | intensity = {normalization_label} ; scale = {self.intensity_scale.value():.8g}"
+                    )
+                    continue
+
                 if self.use_q_range.isChecked():
                     q_min = self.q_min.value()
                     q_max = self.q_max.value()
@@ -1688,9 +1960,21 @@ class AzimuthalTab(QWidget):
             except Exception as error:
                 messages.append(f"Error: {file_path.name}: {error}")
 
-        self.apply_plot_axes()
+        first_result_path = next(iter(self.last_result_paths.values()), None)
+        if first_result_path is not None:
+            try:
+                first_image, first_header = read_image_file(first_result_path, frame_index=self.current_frame - 1)
+                if is_azimuthal_processed_image(first_result_path, first_header):
+                    self.apply_plot_axes()
+                else:
+                    self.apply_plot_axes()
+            except Exception:
+                self.apply_plot_axes()
+        else:
+            self.apply_plot_axes()
         apply_plot_display_style(ax)
-        ax.set_xlim(0, 360)
+        if ax.get_xlabel().startswith("ψ"):
+            ax.set_xlim(0, 360)
         if self.last_results and self.show_legend.isChecked():
             self.legend = make_plot_legend(ax)
         finalize_plot_canvas(self.canvas)
@@ -1701,6 +1985,13 @@ class AzimuthalTab(QWidget):
     def apply_plot_axes(self):
         ax = self.canvas.ax
         ax.set_xlabel("ψ / °")
+        ax.set_ylabel("Intensity / a.u.")
+        ax.set_xscale("linear")
+        ax.set_yscale("linear")
+
+    def apply_iq_plot_axes(self):
+        ax = self.canvas.ax
+        ax.set_xlabel("q / nm⁻¹")
         ax.set_ylabel("Intensity / a.u.")
         ax.set_xscale("linear")
         ax.set_yscale("linear")
@@ -1789,30 +2080,14 @@ class AzimuthalTab(QWidget):
                 file.write("# nonpositive_pixels masked\n")
                 file.write(f"# intensity_correction {self.normalization_mode.currentText()}\n")
                 file.write(f"# intensity_scale {self.intensity_scale.value():.8g}\n")
-                file.write("# psi_deg I_psi pixel_count\n")
+                source_path = self.last_result_paths.get(source_stem)
+                try:
+                    _image, source_header = read_image_file(source_path, frame_index=self.current_frame - 1) if source_path is not None else (None, {})
+                    if source_path is not None and is_azimuthal_processed_image(source_path, source_header):
+                        file.write("# For *_azim input images, saved I_psi is the average intensity of each ψ row over selected q columns, not a sum.\n")
+                        file.write("# psi_deg I_psi pixel_count\n")
+                    else:
+                        file.write("# psi_deg I_psi pixel_count\n")
+                except Exception:
+                    file.write("# psi_deg I_psi pixel_count\n")
                 np.savetxt(file, data, fmt="%.8e %.8e %d")
-
-    def display_selected_file_preview(self, file_path):
-        try:
-            image, _ = read_image_file(file_path, frame_index=self.current_frame - 1)
-
-            y, x = np.indices(image.shape)
-            dx_px = x + 1 - self.center_x.value()
-            dy_px = y + 1 - self.center_y.value()
-            dx_m = dx_px * self.pixel_x.value() * 1e-3
-            dy_m = dy_px * self.pixel_y.value() * 1e-3
-            r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
-            two_theta = np.arctan2(r_m, self.distance.value())
-            theta = two_theta / 2
-            wavelength_nm = self.wavelength.value() * 0.1
-            q_map = (4 * np.pi / wavelength_nm) * np.sin(theta)
-
-            self.image_canvas.set_q_map(q_map)
-            self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=None)
-            self.sync_image_intensity_sliders()
-            self.image_coordinate_label.setText("ψ = - | q = - | I = -")
-        except Exception as error:
-            self.image_canvas.raw_image = None
-            self.image_canvas.set_q_map(None)
-            self.image_coordinate_label.setText("ψ = - | q = - | I = -")
-            QMessageBox.warning(self, "Preview error", str(error))

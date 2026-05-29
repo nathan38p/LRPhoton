@@ -180,6 +180,16 @@ class UnfoldTab(ViewTab):
         self.sync_geometry_fields()
         self.update_pattern_preview()
 
+    def should_show_file_in_browser(self, path):
+        if not super().should_show_file_in_browser(path):
+            return False
+
+        lower_name = path.name.lower()
+        if "_azim" in lower_name and lower_name.endswith((".edf", ".h5", ".hdf5")):
+            return False
+
+        return True
+
     def update_file_information(self, file_type, dataset_name, n_frames, image_shape):
         super().update_file_information(file_type, dataset_name, n_frames, image_shape)
         self.sync_geometry_fields()
@@ -252,6 +262,20 @@ class UnfoldTab(ViewTab):
         self.draw_center_cross()
         self.canvas.draw_idle()
         self.update_pattern_preview()
+
+    def display_image_for_auto_intensity(self):
+        image = self.get_current_image()
+        if image is None:
+            return None
+
+        _unfolded_raw, unfolded_display, _q_min, _q_max = self.make_unfolded_images(image)
+        if unfolded_display is None:
+            return super().display_image_for_auto_intensity()
+
+        return unfolded_display
+
+    def auto_intensity_percentiles(self):
+        return 5.0, 99.5
 
     def current_raw_image_for_save(self):
         if self.raw_current_img is None:
