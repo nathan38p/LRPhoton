@@ -667,7 +667,14 @@ class DatPlotTab(QWidget):
 
         # Plot settings widgets (previously in settings_box, now just created here)
         self.plot_mode = QComboBox()
-        self.plot_mode.addItems(["linear linear", "linear log", "log linear", "log log", "Kratky"])
+        self.plot_mode.addItems([
+            "linear linear",
+            "linear log",
+            "log linear",
+            "log log",
+            "Kratky (q²I(q))",
+            "qI(q)",
+        ])
         self.plot_mode.setCurrentText("log log")
         self.plot_mode.currentTextChanged.connect(self.update_plot)
 
@@ -1723,8 +1730,12 @@ class DatPlotTab(QWidget):
         if self.curves_are_really_0_to_360():
             QMessageBox.warning(self, "Not an I(q) plot", "Power-law fitting is only available for I(q) curves.")
             return
-        if self.plot_mode.currentText() == "Kratky":
-            QMessageBox.warning(self, "Kratky plot", "Switch to an I(q) mode before fitting I(q) = A q^-n.")
+        if self.plot_mode.currentText() in ("Kratky (q²I(q))", "qI(q)"):
+            QMessageBox.warning(
+                self,
+                "Transformed plot",
+                "Switch to an I(q) mode before fitting I(q) = A q^-n."
+            )
             return
 
         dialog = QDialog(self)
@@ -2622,8 +2633,14 @@ class DatPlotTab(QWidget):
             self.create_dat_button.setEnabled(True)
 
     def make_plot_y(self, x, y):
-        if self.plot_mode.currentText() == "Kratky":
+        mode = self.plot_mode.currentText()
+
+        if mode == "Kratky (q²I(q))":
             return self.make_plot_x(x) ** 2 * y
+
+        if mode == "qI(q)":
+            return self.make_plot_x(x) * y
+
         return y
 
     def q_display_factor(self):
@@ -2640,7 +2657,7 @@ class DatPlotTab(QWidget):
     def graph_coordinate_labels(self):
         if self.curves_are_really_0_to_360():
             return "ψ", "I"
-        if self.plot_mode.currentText() == "Kratky":
+        if self.plot_mode.currentText() in ("Kratky (q²I(q))", "qI(q)"):
             return "q", "q²I(q)"
         return "q", "I"
 
