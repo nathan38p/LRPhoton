@@ -177,15 +177,16 @@ class ColoredTabBar(QTabBar):
     TAB_COLORS = {
         0: ("#dbeafe", "#2563eb"),  # View 2D
         1: ("#dbeafe", "#2563eb"),  # Plot 1D
-        2: ("#ffedd5", "#f97316"),  # Center
-        3: ("#ffedd5", "#f97316"),  # Background
-        4: ("#ffedd5", "#f97316"),  # Average
-        5: ("#ffedd5", "#f97316"),  # Cave
-        6: ("#ffedd5", "#f97316"),  # Unfold
-        7: ("#dcfce7", "#16a34a"),  # Radial
-        8: ("#dcfce7", "#16a34a"),  # Azimuthal
-        9: ("#f3e8ff", "#9333ea"),  # Anisotropy
-        10: ("#fde68a", "#d97706"),  # Sandbox
+        2: ("#e5e7eb", "#6b7280"),  # Tools
+        3: ("#ffedd5", "#f97316"),  # Center
+        4: ("#ffedd5", "#f97316"),  # Background
+        5: ("#ffedd5", "#f97316"),  # Average
+        6: ("#ffedd5", "#f97316"),  # Cave
+        7: ("#ffedd5", "#f97316"),  # Unfold
+        8: ("#dcfce7", "#16a34a"),  # Radial
+        9: ("#dcfce7", "#16a34a"),  # Azimuthal
+        10: ("#f3e8ff", "#9333ea"),  # Anisotropy
+        11: ("#fde68a", "#d97706"),  # Sandbox
     }
 
     def tabSizeHint(self, index):
@@ -327,6 +328,7 @@ class MainWindow(QMainWindow):
 
         self.tab_bar.addTab("🖼️ View 2D")
         self.tab_bar.addTab("📈 Plot 1D")
+        self.tools_tab_index = self.tab_bar.addTab("🛠️ Tools")
         self.tab_bar.addTab("🎯 Center")
         self.background_tab_index = self.tab_bar.addTab("🧹 Background")
         self.tab_bar.addTab("🧮 Average")
@@ -344,6 +346,8 @@ class MainWindow(QMainWindow):
             self.tab_bar.setTabText(self.background_tab_index, "🔒 Background")
             self.tab_bar.setTabEnabled(self.background_tab_index, False)
 
+        self.tab_bar.setTabText(self.tools_tab_index, "🛠️ Tools")
+        self.tab_bar.setTabEnabled(self.tools_tab_index, True)
         self.tab_bar.setTabVisible(self.unfold_tab_index, False)
 
         header_layout.addStretch()
@@ -515,12 +519,15 @@ class MainWindow(QMainWindow):
         from tabs.unfold_tab import UnfoldTab
         from tabs.hermans_tab import HermansTab
         from tabs.datplot_tab import DatPlotTab
+        from tabs.tools_tab import ToolsTab
         from tabs.sandbox_tab import SandboxTab
 
         BackgroundTab = self.resolve_background_tab_class()
 
         self.view_tab = ViewTab()
         self.datplot_tab = DatPlotTab()
+        self.tools_tab = ToolsTab()
+
         self.centre_tab = CentreTab()
         self.background_tab = BackgroundTab()
         self.cave_tab = CaveTab()
@@ -540,6 +547,7 @@ class MainWindow(QMainWindow):
 
         self.pages.addWidget(self.view_tab)
         self.pages.addWidget(self.datplot_tab)
+        self.pages.addWidget(self.tools_tab)
         self.pages.addWidget(self.centre_tab)
         self.pages.addWidget(self.background_tab)
         self.pages.addWidget(self.average_tab)
@@ -555,6 +563,7 @@ class MainWindow(QMainWindow):
         self.folder_synced_tabs = [
             self.view_tab,
             self.datplot_tab,
+            self.tools_tab,
             self.centre_tab,
             self.background_tab,
             self.average_tab,
