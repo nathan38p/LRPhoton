@@ -5,7 +5,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtCore import Qt, Signal, QEvent, QCoreApplication
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QProgressBar,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -1453,6 +1454,7 @@ class RadialTab(QWidget):
         self._syncing_folder = False
         self._changing_h5_frame = False
         self._syncing_frame_controls = False
+        self._radial_integration_running = False
         self.q_axis_unit = "nm"
 
         self.build_ui()
@@ -1773,6 +1775,12 @@ class RadialTab(QWidget):
         self.integrate_button.clicked.connect(self.integrate_selected_files)
         params_layout.addWidget(self.integrate_button)
 
+        self.integration_progress = QProgressBar()
+        self.integration_progress.setRange(0, 1)
+        self.integration_progress.setValue(0)
+        self.integration_progress.setVisible(False)
+        params_layout.addWidget(self.integration_progress)
+
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setVisible(False)
@@ -1952,6 +1960,7 @@ class RadialTab(QWidget):
             self.n_bins, self.integration_engine, self.normalization_mode, self.min_pixels_per_bin, self.intensity_scale, self.plot_mode, self.fit_button, self.show_legend, self.integrate_button,
             self.image_vmin_label, self.image_vmax_label,
             self.image_vmin_slider, self.image_vmax_slider, self.image_lock_contrast_checkbox, self.image_auto_contrast_button,
+            self.integration_progress,
         ]:
             widget.setEnabled(enabled)
 
@@ -2406,6 +2415,9 @@ class RadialTab(QWidget):
             self.image_coordinate_label.setText("ψ = - | q = - | I = -")
 
     def integrate_selected_files(self):
+        if self._radial_integration_running:
+            return
+
         files = self.selected_files()
         if not files:
             self.last_results = {}
@@ -2431,62 +2443,92 @@ class RadialTab(QWidget):
         ax.clear()
 
         messages = []
-        for file_path in files:
-            try:
-                h5_frame_index = self.frame_spin.value() - 1 if file_path.suffix.lower() in [".h5", ".hdf5"] else 0
-                image, header = read_image_file(file_path, None, h5_frame_index)
-                q_min = 0
-                q_max = 0
-                sector_min = self.sector_min.value() if self.use_sector.isChecked() else 0
-                sector_max = self.sector_max.value() if self.use_sector.isChecked() else 360
-                use_log_bins = self.plot_mode.currentText() in ["log log", "log linear", "Kratky log", "Kratky log linear"]
-                wavelength_nm = wavelength_to_nm(self.wavelength.value())
+        user_requested_integrate = self.sender() is self.integrate_button
+        autosave_dat = len(files) > 1 and user_requested_integrate
+        saved_dat_paths = []
 
-                diagnostics = q_geometry_diagnostics(
-                    image,
-                    self.center_x.value(),
-                    self.center_y.value(),
-                    self.distance.value(),
-                    self.pixel_x.value(),
-                    self.pixel_y.value(),
-                    self.wavelength.value(),
-                )
+        self._radial_integration_running = True
+        self.integrate_button.setEnabled(False)
+        if user_requested_integrate and len(files) > 1:
+            self.integration_progress.setVisible(True)
+            self.integration_progress.setRange(0, len(files))
+            self.integration_progress.setValue(0)
+            self.integration_progress.setFormat(f"0 / {len(files)}")
+            QCoreApplication.processEvents()
 
-                # --- q_map calculation ---
-                ny, nx = image.shape
-                yy, xx = np.indices(image.shape)
+        try:
+            for index, file_path in enumerate(files, 1):
+                try:
+                    h5_frame_index = self.frame_spin.value() - 1 if file_path.suffix.lower() in [".h5", ".hdf5"] else 0
+                    image, header = read_image_file(file_path, None, h5_frame_index)
+                    q_min = 0
+                    q_max = 0
+                    sector_min = self.sector_min.value() if self.use_sector.isChecked() else 0
+                    sector_max = self.sector_max.value() if self.use_sector.isChecked() else 360
+                    use_log_bins = self.plot_mode.currentText() in ["log log", "log linear", "Kratky log", "Kratky log linear"]
 
-                dx_px = xx - float(self.center_x.value())
-                dy_px = yy - float(self.center_y.value())
+                    diagnostics = q_geometry_diagnostics(
+                        image,
+                        self.center_x.value(),
+                        self.center_y.value(),
+                        self.distance.value(),
+                        self.pixel_x.value(),
+                        self.pixel_y.value(),
+                        self.wavelength.value(),
+                    )
 
-                dx_m = dx_px * float(self.pixel_x.value()) * 1e-3
-                dy_m = dy_px * float(self.pixel_y.value()) * 1e-3
+                    # --- q_map calculation ---
+                    yy, xx = np.indices(image.shape)
 
-                r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
-                two_theta_map = np.arctan2(r_m, float(self.distance.value()))
-                wavelength_nm_map = wavelength_to_nm(float(self.wavelength.value()))
-                q_map = (4.0 * np.pi / wavelength_nm_map) * np.sin(two_theta_map / 2.0)
-                # --- end q_map calculation ---
+                    dx_px = xx - float(self.center_x.value())
+                    dy_px = yy - float(self.center_y.value())
 
-                engine = self.integration_engine.currentText()
-                if engine == "pyFAI":
-                    try:
-                        q, intensity, counts, mask = pyfai_radial_average(
-                            image,
-                            self.center_x.value(),
-                            self.center_y.value(),
-                            self.distance.value(),
-                            self.pixel_x.value(),
-                            self.pixel_y.value(),
-                            self.wavelength.value(),
-                            q_min,
-                            q_max,
-                            self.n_bins.value(),
-                            sector_min,
-                            sector_max,
-                            self.min_pixels_per_bin.value(),
-                        )
-                    except Exception as pyfai_error:
+                    dx_m = dx_px * float(self.pixel_x.value()) * 1e-3
+                    dy_m = dy_px * float(self.pixel_y.value()) * 1e-3
+
+                    r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+                    two_theta_map = np.arctan2(r_m, float(self.distance.value()))
+                    wavelength_nm_map = wavelength_to_nm(float(self.wavelength.value()))
+                    q_map = (4.0 * np.pi / wavelength_nm_map) * np.sin(two_theta_map / 2.0)
+                    # --- end q_map calculation ---
+
+                    engine = self.integration_engine.currentText()
+                    if engine == "pyFAI":
+                        try:
+                            q, intensity, counts, mask = pyfai_radial_average(
+                                image,
+                                self.center_x.value(),
+                                self.center_y.value(),
+                                self.distance.value(),
+                                self.pixel_x.value(),
+                                self.pixel_y.value(),
+                                self.wavelength.value(),
+                                q_min,
+                                q_max,
+                                self.n_bins.value(),
+                                sector_min,
+                                sector_max,
+                                self.min_pixels_per_bin.value(),
+                            )
+                        except Exception as pyfai_error:
+                            q, intensity, counts, mask = radial_average(
+                                image,
+                                self.center_x.value(),
+                                self.center_y.value(),
+                                self.distance.value(),
+                                self.pixel_x.value(),
+                                self.pixel_y.value(),
+                                self.wavelength.value(),
+                                q_min,
+                                q_max,
+                                self.n_bins.value(),
+                                use_log_bins,
+                                sector_min,
+                                sector_max,
+                                self.min_pixels_per_bin.value(),
+                            )
+                            engine = f"LRPhoton mean fallback, pyFAI error: {pyfai_error}"
+                    else:
                         q, intensity, counts, mask = radial_average(
                             image,
                             self.center_x.value(),
@@ -2503,92 +2545,93 @@ class RadialTab(QWidget):
                             sector_max,
                             self.min_pixels_per_bin.value(),
                         )
-                        engine = f"LRPhoton mean fallback, pyFAI error: {pyfai_error}"
-                else:
-                    q, intensity, counts, mask = radial_average(
-                        image,
-                        self.center_x.value(),
-                        self.center_y.value(),
-                        self.distance.value(),
-                        self.pixel_x.value(),
-                        self.pixel_y.value(),
-                        self.wavelength.value(),
-                        q_min,
-                        q_max,
-                        self.n_bins.value(),
-                        use_log_bins,
-                        sector_min,
-                        sector_max,
-                        self.min_pixels_per_bin.value(),
+
+                    normalization_factor, normalization_label = radial_normalization_factor(
+                        header,
+                        self.normalization_mode.currentData(),
                     )
+                    intensity = intensity * normalization_factor
 
-                normalization_factor, normalization_label = radial_normalization_factor(
-                    header,
-                    self.normalization_mode.currentData(),
-                )
-                intensity = intensity * normalization_factor
+                    x, y = self.make_plot_arrays(q, intensity)
+                    line, = ax.plot(x, y, linewidth=1.2, label=file_path.stem)
+                    self.last_results[file_path.stem] = (q, intensity, counts)
+                    self.last_result_paths[file_path.stem] = file_path
+                    frame_count = int(header.get("Number of frames", 1) or 1)
+                    self.last_result_frame_counts[file_path.stem] = frame_count
 
-                x, y = self.make_plot_arrays(q, intensity)
-                line, = ax.plot(x, y, linewidth=1.2, label=file_path.stem)
-                self.last_results[file_path.stem] = (q, intensity, counts)
-                self.last_result_paths[file_path.stem] = file_path
-                self.last_result_frame_counts[file_path.stem] = int(header.get("Number of frames", 1) or 1)
+                    if autosave_dat:
+                        out_file = self.write_radial_result(file_path.stem, q, intensity, counts, file_path, frame_count)
+                        saved_dat_paths.append(out_file)
 
-                comparison_message = None
-                if False:
-                    try:
-                        q_id13, intensity_id13, counts_id13, id13_config = id13_pyfai_like_average(
-                            image,
-                            q_min,
-                            q_max,
-                            sector_min,
-                            sector_max,
-                        )
-                        id13_label = f"{file_path.stem} ID13 pyFAI"
-                        id13_wavelength = id13_config["poni"]["wavelength"]
-                        ax.plot(
-                            self.make_plot_x(q_id13, id13_wavelength),
-                            self.make_plot_y(q_id13, intensity_id13),
-                            linewidth=1.1,
-                            linestyle="--",
-                            color=line.get_color(),
-                            label=id13_label,
-                        )
-                        self.last_comparison_results[id13_label] = (
-                            q_id13,
-                            intensity_id13,
-                            counts_id13,
-                            id13_wavelength,
-                        )
-                        comparison_source = "pyFAI integrate1d" if id13_config.get("used_pyfai") else "local pyFAI-compatible"
-                        comparison_message = (
-                            f"  ID13 pyFAI comparison = {q_id13.size} bins from embedded config"
-                            f" ; q range = {np.nanmin(q_id13):.10g} -> {np.nanmax(q_id13):.10g} nm⁻¹"
-                            f" ; {comparison_source} ; solid angle/polarization corrected"
-                        )
-                    except Exception as comparison_error:
-                        comparison_message = f"  ID13 pyFAI comparison error: {comparison_error}"
+                    comparison_message = None
+                    if False:
+                        try:
+                            q_id13, intensity_id13, counts_id13, id13_config = id13_pyfai_like_average(
+                                image,
+                                q_min,
+                                q_max,
+                                sector_min,
+                                sector_max,
+                            )
+                            id13_label = f"{file_path.stem} ID13 pyFAI"
+                            id13_wavelength = id13_config["poni"]["wavelength"]
+                            ax.plot(
+                                self.make_plot_x(q_id13, id13_wavelength),
+                                self.make_plot_y(q_id13, intensity_id13),
+                                linewidth=1.1,
+                                linestyle="--",
+                                color=line.get_color(),
+                                label=id13_label,
+                            )
+                            self.last_comparison_results[id13_label] = (
+                                q_id13,
+                                intensity_id13,
+                                counts_id13,
+                                id13_wavelength,
+                            )
+                            comparison_source = "pyFAI integrate1d" if id13_config.get("used_pyfai") else "local pyFAI-compatible"
+                            comparison_message = (
+                                f"  ID13 pyFAI comparison = {q_id13.size} bins from embedded config"
+                                f" ; q range = {np.nanmin(q_id13):.10g} -> {np.nanmax(q_id13):.10g} nm⁻¹"
+                                f" ; {comparison_source} ; solid angle/polarization corrected"
+                            )
+                        except Exception as comparison_error:
+                            comparison_message = f"  ID13 pyFAI comparison error: {comparison_error}"
 
-                if file_path == files[0]:
-                    self.image_canvas.set_q_map(q_map)
-                    self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
-                    self.sync_image_intensity_sliders()
-                frame_text = f" | H5 frame {self.frame_spin.value()} / {self.h5_n_frames}" if file_path.suffix.lower() in [".h5", ".hdf5"] and self.h5_n_frames > 1 else ""
-                messages.append(
-                    f"Integrated: {file_path.name}{frame_text} ({q.size} bins)\n"
-                    f"  λ input/display = {diagnostics['wavelength_input']:.8g} Å ; λ used = {diagnostics['wavelength_nm']:.8g} nm\n"
-                    f"  distance = {diagnostics['distance_m']:.8g} m ; pixel = {diagnostics['pixel_x_mm']:.8g} x {diagnostics['pixel_y_mm']:.8g} mm\n"
-                    f"  centre = {diagnostics['center']} ; image = {diagnostics['image_shape']} px\n"
-                    f"  q per pixel ≈ {diagnostics['q_per_pixel_x']:.8g} nm⁻¹/px ; q corner max ≈ {diagnostics['q_corner_max']:.8g} nm⁻¹\n"
-                    f"  exported q range = {np.nanmin(q):.10g} -> {np.nanmax(q):.10g} nm⁻¹"
-                    f" ; engine = {engine} ; normalization = {normalization_label}"
-                    f" ; invalid pixels excluded ; min {self.min_pixels_per_bin.value()} pixels/bin ; no smoothing"
-                )
-                if comparison_message is not None:
-                    messages.append(comparison_message)
+                    if file_path == files[0]:
+                        self.image_canvas.set_q_map(q_map)
+                        self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
+                        self.sync_image_intensity_sliders()
+                    frame_text = f" | H5 frame {self.frame_spin.value()} / {self.h5_n_frames}" if file_path.suffix.lower() in [".h5", ".hdf5"] and self.h5_n_frames > 1 else ""
+                    save_text = f"\n  saved: {out_file.name}" if autosave_dat else ""
+                    messages.append(
+                        f"Integrated: {file_path.name}{frame_text} ({q.size} bins){save_text}\n"
+                        f"  λ input/display = {diagnostics['wavelength_input']:.8g} Å ; λ used = {diagnostics['wavelength_nm']:.8g} nm\n"
+                        f"  distance = {diagnostics['distance_m']:.8g} m ; pixel = {diagnostics['pixel_x_mm']:.8g} x {diagnostics['pixel_y_mm']:.8g} mm\n"
+                        f"  centre = {diagnostics['center']} ; image = {diagnostics['image_shape']} px\n"
+                        f"  q per pixel ≈ {diagnostics['q_per_pixel_x']:.8g} nm⁻¹/px ; q corner max ≈ {diagnostics['q_corner_max']:.8g} nm⁻¹\n"
+                        f"  exported q range = {np.nanmin(q):.10g} -> {np.nanmax(q):.10g} nm⁻¹"
+                        f" ; engine = {engine} ; normalization = {normalization_label}"
+                        f" ; invalid pixels excluded ; min {self.min_pixels_per_bin.value()} pixels/bin ; no smoothing"
+                    )
+                    if comparison_message is not None:
+                        messages.append(comparison_message)
 
-            except Exception as error:
-                messages.append(f"Error: {file_path.name}: {error}")
+                except Exception as error:
+                    messages.append(f"Error: {file_path.name}: {error}")
+
+                if user_requested_integrate and len(files) > 1:
+                    self.integration_progress.setValue(index)
+                    self.integration_progress.setFormat(f"{index} / {len(files)}")
+                    self.log_box.setPlainText("\n".join(messages))
+                    QCoreApplication.processEvents()
+        finally:
+            self._radial_integration_running = False
+            self.integration_progress.setVisible(False)
+            self.integrate_button.setEnabled(bool(files))
+
+        if autosave_dat and saved_dat_paths:
+            messages.append(f"Saved {len(saved_dat_paths)} radial .dat file(s) in {self.current_folder}.")
 
         self.apply_plot_axes()
 
@@ -2606,6 +2649,18 @@ class RadialTab(QWidget):
             self.legend = make_plot_legend(ax)
         finalize_plot_canvas(self.canvas)
         self.log_box.setPlainText("\n".join(messages))
+
+        if autosave_dat:
+            errors = [message for message in messages if message.startswith("Error:")]
+            summary = f"Radial integration finished: {len(saved_dat_paths)} / {len(files)} files saved."
+            if errors:
+                QMessageBox.warning(
+                    self,
+                    "Radial integration",
+                    summary + "\n\nSome files failed:\n" + "\n".join(errors[:8]),
+                )
+            else:
+                QMessageBox.information(self, "Radial integration", summary)
 
 
     def make_plot_x(self, q, wavelength_value=None):
@@ -3027,11 +3082,7 @@ class RadialTab(QWidget):
         from PySide6.QtWidgets import QInputDialog
         return QInputDialog.getText(self, title, label, text=text)
 
-    def save_results(self):
-        if not self.last_results:
-            QMessageBox.warning(self, "No results", "No radial integration result to save.")
-            return
-
+    def radial_range_suffix(self):
         range_parts = ["qfull"]
 
         if self.use_sector.isChecked():
@@ -3039,24 +3090,36 @@ class RadialTab(QWidget):
         else:
             range_parts.append("psi360")
 
-        range_suffix = "_" + "_".join(range_parts)
+        return "_" + "_".join(range_parts)
+
+    def radial_result_path(self, source_stem, source_path, frame_count):
+        is_h5 = source_path is not None and source_path.suffix.lower() in [".h5", ".hdf5"]
+        frame_suffix = f"_frame{self.frame_spin.value():04d}" if is_h5 and frame_count > 1 else ""
+        return self.current_folder / f"{source_stem}{frame_suffix}{self.radial_range_suffix()}_azimAvg.dat"
+
+    def write_radial_result(self, source_stem, q, intensity, counts, source_path=None, frame_count=1):
+        out_file = self.radial_result_path(source_stem, source_path, frame_count)
+        scaled_intensity = intensity * self.intensity_scale.value()
+        data = np.column_stack([q, scaled_intensity, counts])
+        with open(out_file, "w", encoding="utf-8") as file:
+            file.write("# q_nm-1 I_q pixel_count\n")
+            file.write(f"# integration_engine {self.integration_engine.currentText()}\n")
+            file.write(f"# normalization {self.normalization_mode.currentText()}\n")
+            file.write(f"# intensity_scale {self.intensity_scale.value():.8g}\n")
+            file.write("# invalid_pixel_handling excluded\n")
+            file.write(f"# min_pixels_per_bin {self.min_pixels_per_bin.value()}\n")
+            file.write("# smoothing none\n")
+            np.savetxt(file, data, fmt="%.8e %.8e %d")
+        return out_file
+
+    def save_results(self):
+        if not self.last_results:
+            QMessageBox.warning(self, "No results", "No radial integration result to save.")
+            return
 
         for source_stem, (q, intensity, counts) in self.last_results.items():
             source_path = self.last_result_paths.get(source_stem)
             frame_count = self.last_result_frame_counts.get(source_stem, 1)
-            is_h5 = source_path is not None and source_path.suffix.lower() in [".h5", ".hdf5"]
-            frame_suffix = f"_frame{self.frame_spin.value():04d}" if is_h5 and frame_count > 1 else ""
-            out_file = self.current_folder / f"{source_stem}{frame_suffix}{range_suffix}_azimAvg.dat"
-            scaled_intensity = intensity * self.intensity_scale.value()
-            data = np.column_stack([q, scaled_intensity, counts])
-            with open(out_file, "w", encoding="utf-8") as file:
-                file.write("# q_nm-1 I_q pixel_count\n")
-                file.write(f"# integration_engine {self.integration_engine.currentText()}\n")
-                file.write(f"# normalization {self.normalization_mode.currentText()}\n")
-                file.write(f"# intensity_scale {self.intensity_scale.value():.8g}\n")
-                file.write("# invalid_pixel_handling excluded\n")
-                file.write(f"# min_pixels_per_bin {self.min_pixels_per_bin.value()}\n")
-                file.write("# smoothing none\n")
-                np.savetxt(file, data, fmt="%.8e %.8e %d")
+            self.write_radial_result(source_stem, q, intensity, counts, source_path, frame_count)
 
         QMessageBox.information(self, "Saved", "Radial profiles saved in the current folder.")

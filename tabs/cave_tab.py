@@ -2044,6 +2044,7 @@ class ManualCaveDialog(QDialog):
         ]
 
         self.parent().image_filled = self.filled_image()
+        self.parent().update_manual_mask_status_label()
 
         self.parent().refresh_preview()
 
@@ -2073,6 +2074,7 @@ class CaveTab(QWidget):
         self.h5_n_frames = 1
         self._syncing_folder = False
         self._syncing_frame_controls = False
+        self._batch_cave_running = False
 
         self.image = None
         self.image_clean = None
@@ -2091,6 +2093,7 @@ class CaveTab(QWidget):
         self.set_controls_enabled(False)
         self.update_centre_warning_labels()
         self.update_beamstop_visibility()
+        self.update_manual_mask_status_label()
 
     def build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -2211,7 +2214,7 @@ class CaveTab(QWidget):
 
         self.file_list = QListWidget()
         install_file_rating_menu(self.file_list)
-        self.file_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.file_list.itemClicked.connect(self.open_selected_file)
         self.file_list.setMinimumHeight(0)
         file_layout.addWidget(self.file_list, stretch=1)
@@ -2433,6 +2436,15 @@ class CaveTab(QWidget):
         )
 
         self.manual_mask_button = QPushButton("Manual cave mask")
+        self.manual_mask_status_label = QLabel("Manual mask: none")
+        self.manual_mask_status_label.setWordWrap(True)
+        self.manual_mask_status_label.setStyleSheet("""
+            QLabel {
+                color: #666666;
+                font-size: 11px;
+                padding-left: 4px;
+            }
+        """)
         self.manual_mask_button.setStyleSheet(cave_action_button_style)
         self.manual_mask_button.setFixedHeight(cave_action_button_height)
         self.manual_mask_button.setCursor(Qt.PointingHandCursor)
@@ -2448,6 +2460,7 @@ class CaveTab(QWidget):
         controls_layout.addWidget(self.id13_beamstop_checkbox)
         controls_layout.addWidget(self.expand_nan_neighbors_checkbox)
         controls_layout.addWidget(self.manual_mask_button)
+        controls_layout.addWidget(self.manual_mask_status_label)
 
         intensity_box = QGroupBox("Contrast")
         intensity_box.setMinimumWidth(0)
@@ -2510,13 +2523,17 @@ class CaveTab(QWidget):
         self.run_button.clicked.connect(self.run_cave)
 
         self.save_button = QPushButton("Save Cave")
+        self.batch_cave_button = QPushButton("Cave selected")
+        self.batch_cave_button.setToolTip("Apply the current cave settings to all selected files")
         self.save_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
         self.save_button.setFixedHeight(cave_action_button_height)
         self.save_button.setStyleSheet(cave_action_button_style)
         self.save_button.clicked.connect(self.save_cave)
+        self.batch_cave_button.clicked.connect(self.cave_selected_files)
 
         button_layout.addWidget(self.run_button)
         button_layout.addWidget(self.save_button)
+        button_layout.addWidget(self.batch_cave_button)
         controls_layout.addLayout(button_layout)
 
         self.status = QTextEdit()
@@ -2586,6 +2603,12 @@ class CaveTab(QWidget):
         self.prev_frame_button.clicked.connect(self.previous_frame)
         self.next_frame_button.clicked.connect(self.next_frame)
 
+        self.batch_progress = QProgressBar()
+        self.batch_progress.setRange(0, 1)
+        self.batch_progress.setValue(0)
+        self.batch_progress.setVisible(False)
+        main_layout.addWidget(self.batch_progress)
+
     def set_controls_enabled(self, enabled):
         for widget in [
             self.xc_spin,
@@ -2605,6 +2628,7 @@ class CaveTab(QWidget):
             self.vmax_slider,
             self.run_button,
             self.save_button,
+            self.batch_cave_button,
         ]:
             widget.setEnabled(enabled)
 
@@ -3027,6 +3051,7 @@ class CaveTab(QWidget):
             spin.blockSignals(False)
         self.frame_slider.blockSignals(False)
         self._syncing_frame_controls = False
+        self._batch_cave_running = False
 
         self.update_frame_counter()
 
@@ -3376,6 +3401,7 @@ class CaveTab(QWidget):
             self.manual_cave_shapes = []
             self.manual_cave_exclusion_shapes = []
             self.manual_cave_pre_nan_shapes = []
+            self.update_manual_mask_status_label()
 
             self.set_controls_enabled(True)
             self.apply_instrument_preset()
@@ -3407,17 +3433,184 @@ class CaveTab(QWidget):
             self.manual_cave_shapes = []
             self.manual_cave_exclusion_shapes = []
             self.manual_cave_pre_nan_shapes = []
+            self.update_manual_mask_status_label()
 
             if not self.lock_intensity_checkbox.isChecked():
                 self.auto_set_display_limits()
+
             self.apply_instrument_preset()
             self.update_beamstop_visibility()
             self.update_frame_selector_visibility()
             self.refresh_preview()
             self.update_manual_mask_button_state()
             self.update_status()
+
         except Exception as error:
-            QMessageBox.critical(self, "H5 frame reading error", str(error))
+            QMessageBox.critical(self, "Frame reading error", str(error))
+
+    def manual_mask_for_shape(self, shape, mode="include"):
+        shapes_by_mode = {
+            "include": self.manual_cave_shapes,
+            "exclude": self.manual_cave_exclusion_shapes,
+            "pre_nan": self.manual_cave_pre_nan_shapes,
+        }
+        shapes = shapes_by_mode.get(mode, [])
+        if not shapes:
+            return None
+
+        mask = np.zeros(shape, dtype=bool)
+        original_image = self.image
+        try:
+            self.image = np.zeros(shape, dtype=np.float64)
+            for manual_shape in shapes:
+                self.shape_to_mask(mask, manual_shape)
+        finally:
+            self.image = original_image
+
+        return mask
+
+    def batch_cave_single_file_fast(self, path):
+        path = Path(path)
+        suffix = path.suffix.lower()
+        self.commit_nan_threshold_edits()
+
+        extra_operator, extra_threshold = self.extra_nan_condition()
+        use_id13_beamstop = self.instrument_mode == "ID13" and self.id13_beamstop_checkbox.isChecked()
+
+        if suffix == ".edf":
+            image, header, raw_header_text, byte_order = read_edf_file(path)
+            image = image.astype(np.float64)
+
+            _clean, filled, _mask = apply_central_symmetry_cave(
+                image,
+                self.xc_spin.value(),
+                self.yc_spin.value(),
+                nan_operator=self.nan_operator_combo.currentText(),
+                nan_threshold=self.nan_threshold_spin.value(),
+                nan_operator_2=extra_operator,
+                nan_threshold_2=extra_threshold,
+                use_id13_beamstop=use_id13_beamstop,
+                beamstop_y=self.beamstop_y_spin.value(),
+                reference_angle_deg=self.cave_angle_spin.value(),
+                expand_nan_neighbors=self.expand_nan_neighbors_checkbox.isChecked(),
+                pre_nan_mask=self.manual_mask_for_shape(image.shape, "pre_nan"),
+                extra_mask=self.manual_mask_for_shape(image.shape, "include"),
+                exclude_mask=self.manual_mask_for_shape(image.shape, "exclude"),
+            )
+
+            output_path = path.parent / f"{path.stem}_cave.edf"
+            write_edf_file(output_path, sanitize_cave_output_image(filled), raw_header_text, byte_order)
+            return output_path
+
+        if suffix in [".h5", ".hdf5"]:
+            dataset_name, _dataset_shape, _frame_axis, n_frames, _header = inspect_h5_image_dataset(path)
+            start_frame = max(1, self.frame_start_spin.value())
+            end_frame = min(int(n_frames), self.frame_end_spin.value())
+            if start_frame > end_frame:
+                start_frame, end_frame = end_frame, start_frame
+
+            saved_paths = []
+            for frame_number in range(start_frame, end_frame + 1):
+                image, _header = read_h5_frame(path, dataset_name, frame_number - 1)
+                image = image.astype(np.float64)
+
+                _clean, filled, _mask = apply_central_symmetry_cave(
+                    image,
+                    self.xc_spin.value(),
+                    self.yc_spin.value(),
+                    nan_operator=self.nan_operator_combo.currentText(),
+                    nan_threshold=self.nan_threshold_spin.value(),
+                    nan_operator_2=extra_operator,
+                    nan_threshold_2=extra_threshold,
+                    use_id13_beamstop=use_id13_beamstop,
+                    beamstop_y=self.beamstop_y_spin.value(),
+                    reference_angle_deg=self.cave_angle_spin.value(),
+                    expand_nan_neighbors=self.expand_nan_neighbors_checkbox.isChecked(),
+                    pre_nan_mask=self.manual_mask_for_shape(image.shape, "pre_nan"),
+                    extra_mask=self.manual_mask_for_shape(image.shape, "include"),
+                    exclude_mask=self.manual_mask_for_shape(image.shape, "exclude"),
+                )
+
+                frame_suffix = f"_frame{frame_number:04d}" if int(n_frames) > 1 else ""
+                output_path = path.parent / f"{path.stem}{frame_suffix}_cave.h5"
+                write_h5_frame_file(output_path, filled, path, dataset_name, frame_number - 1)
+                saved_paths.append(output_path)
+
+            return saved_paths[-1] if saved_paths else None
+
+        raise ValueError(f"Unsupported file format: {path.suffix}")
+
+    def selected_file_paths_for_batch(self):
+        paths = []
+        for item in self.file_list.selectedItems():
+            path = item.data(Qt.UserRole)
+            if path is None:
+                path = self.current_folder / item.text()
+            paths.append(Path(path))
+        return paths
+
+    def cave_selected_files(self):
+        paths = self.selected_file_paths_for_batch()
+        if not paths:
+            QMessageBox.warning(self, "Cave selected", "No file selected.")
+            return
+
+        if self._batch_cave_running:
+            return
+
+        self._batch_cave_running = True
+        self.batch_cave_button.setEnabled(False)
+        self.run_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+
+        self.batch_progress.setVisible(True)
+        self.batch_progress.setRange(0, len(paths))
+        self.batch_progress.setValue(0)
+        self.batch_progress.setFormat(f"0 / {len(paths)}")
+        QCoreApplication.processEvents()
+
+        original_file = self.current_file
+        original_frame = self.frame_spin.value() if hasattr(self, "frame_spin") else 1
+        saved_count = 0
+        errors = []
+
+        try:
+            for i, path in enumerate(paths, 1):
+                try:
+                    self.batch_cave_single_file_fast(path)
+                    saved_count += 1
+                except Exception as error:
+                    errors.append(f"{path.name}: {error}")
+
+                self.batch_progress.setValue(i)
+                self.batch_progress.setFormat(f"{i} / {len(paths)}")
+                QCoreApplication.processEvents()
+
+            if original_file is not None and Path(original_file).exists():
+                try:
+                    self.open_file(original_file)
+                    if hasattr(self, "frame_spin"):
+                        self.frame_spin.setValue(original_frame)
+                except Exception:
+                    pass
+
+            message = f"Batch cave finished: {saved_count} / {len(paths)} files saved."
+            self.status.append("\n" + message)
+            if errors:
+                self.status.append("\nErrors:\n" + "\n".join(errors))
+                QMessageBox.warning(
+                    self,
+                    "Cave selected",
+                    message + "\n\nSome files failed:\n" + "\n".join(errors[:8]),
+                )
+            else:
+                QMessageBox.information(self, "Cave selected", message)
+        finally:
+            self._batch_cave_running = False
+            self.batch_progress.setVisible(False)
+            self.run_button.setEnabled(self.image is not None)
+            self.save_button.setEnabled(self.image is not None)
+            self.batch_cave_button.setEnabled(self.image is not None)
 
     def refresh_preview(self):
         if self.image is None:
@@ -3478,7 +3671,7 @@ class CaveTab(QWidget):
         if self.save_checkbox.isChecked():
             self.save_cave()
 
-    def save_cave(self):
+    def save_cave(self, show_message=True):
         if self.image_filled is None or self.current_file is None:
             return
 
@@ -3526,3 +3719,17 @@ class CaveTab(QWidget):
             lines.append(f"Image size: {self.image.shape[1]} x {self.image.shape[0]}")
 
         self.status.setPlainText("\n".join(lines))
+
+    def update_manual_mask_status_label(self):
+        include_count = len(self.manual_cave_shapes)
+        exclude_count = len(self.manual_cave_exclusion_shapes)
+        pre_nan_count = len(self.manual_cave_pre_nan_shapes)
+
+        if include_count + exclude_count + pre_nan_count == 0:
+            self.manual_mask_status_label.setText("Manual mask: none")
+        else:
+            self.manual_mask_status_label.setText(
+                f"Manual mask: Cave + {include_count} | "
+                f"Exclude - {exclude_count} | "
+                f"NaN {pre_nan_count}"
+            )

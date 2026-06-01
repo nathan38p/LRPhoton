@@ -711,22 +711,20 @@ class DatPlotTab(QWidget):
         gradient_layout.setContentsMargins(0, 0, 0, 0)
         gradient_layout.setSpacing(4)
         gradient_layout.addWidget(QLabel("Gradient:"))
+        self.curve_gradient_layout = gradient_layout
         self.curve_gradient_buttons = []
-        for index, tooltip in enumerate(["Start color", "Middle color", "End color"]):
-            button = QToolButton()
-            button.setFixedSize(24, 20)
-            button.setToolTip(tooltip)
-            button.clicked.connect(lambda checked=False, color_index=index: self.choose_curve_gradient_color(color_index))
-            self.curve_gradient_buttons.append(button)
-            gradient_layout.addWidget(button)
+        self.add_curve_gradient_color_button = QToolButton()
+        self.add_curve_gradient_color_button.setText("+")
+        self.add_curve_gradient_color_button.setFixedSize(24, 20)
+        self.add_curve_gradient_color_button.setToolTip("Add a color point to the gradient")
+        self.add_curve_gradient_color_button.clicked.connect(self.add_curve_gradient_color_point)
         self.apply_curve_gradient_button = QPushButton("Apply")
         self.apply_curve_gradient_button.setToolTip("Apply this color gradient to the curves in the current list order")
         self.apply_curve_gradient_button.clicked.connect(self.apply_curve_color_gradient)
         self.apply_curve_gradient_button.setEnabled(False)
-        gradient_layout.addWidget(self.apply_curve_gradient_button)
-        gradient_layout.addStretch(1)
+        self.curve_gradient_stretch = None
         curve_layout.addLayout(gradient_layout)
-        self.update_curve_gradient_buttons()
+        self.rebuild_curve_gradient_buttons()
 
         self.curve_table = CurveTableWidget(0, 6)
         self.curve_table.setMinimumHeight(140)
@@ -859,6 +857,13 @@ class DatPlotTab(QWidget):
         self.show_legend.setChecked(True)
         self.show_legend.stateChanged.connect(self.update_plot)
 
+        self.curve_display_stride_spin = QSpinBox()
+        self.curve_display_stride_spin.setRange(1, 100000)
+        self.curve_display_stride_spin.setValue(1)
+        self.curve_display_stride_spin.setFixedWidth(64)
+        self.curve_display_stride_spin.setToolTip("Display one curve every N visible curves")
+        self.curve_display_stride_spin.valueChanged.connect(self.update_plot)
+
         self.keep_zoom_checkbox = QCheckBox("Keep zoom")
         self.keep_zoom_checkbox.setChecked(False)
         self.keep_zoom_checkbox.setToolTip("Keep current zoom and pan when the plot is redrawn")
@@ -869,12 +874,14 @@ class DatPlotTab(QWidget):
             option_widgets=[
                 self.fit_button,
                 self.plot_mode,
+                QLabel("Each:"),
+                self.curve_display_stride_spin,
                 self.show_legend,
                 self.keep_zoom_checkbox,
             ],
             save_callback=self.save_plot_high_quality,
             save_tooltip="Save plot",
-            toolbar_width=390,
+            toolbar_width=470,
         )
         right_layout.addWidget(graph_box, stretch=0)
         right_layout.addWidget(self.canvas, stretch=1)
@@ -1654,6 +1661,46 @@ class DatPlotTab(QWidget):
         ax.set_ylim(previous_ylim)
         finalize_plot_canvas(self.canvas)
 
+    def rebuild_curve_gradient_buttons(self):
+        layout = getattr(self, "curve_gradient_layout", None)
+        if layout is None:
+            return
+
+        for button in getattr(self, "curve_gradient_buttons", []):
+            layout.removeWidget(button)
+            button.deleteLater()
+
+        if getattr(self, "add_curve_gradient_color_button", None) is not None:
+            layout.removeWidget(self.add_curve_gradient_color_button)
+        if getattr(self, "apply_curve_gradient_button", None) is not None:
+            layout.removeWidget(self.apply_curve_gradient_button)
+        if getattr(self, "curve_gradient_stretch", None) is not None:
+            layout.removeItem(self.curve_gradient_stretch)
+            self.curve_gradient_stretch = None
+
+        self.curve_gradient_buttons = []
+        last_index = len(self.curve_gradient_colors) - 1
+        for index, _color in enumerate(self.curve_gradient_colors):
+            if index == 0:
+                tooltip = "Start color"
+            elif index == last_index:
+                tooltip = "End color"
+            else:
+                tooltip = f"Color point {index + 1}"
+
+            button = QToolButton()
+            button.setFixedSize(24, 20)
+            button.setToolTip(tooltip)
+            button.clicked.connect(lambda checked=False, color_index=index: self.choose_curve_gradient_color(color_index))
+            self.curve_gradient_buttons.append(button)
+            layout.addWidget(button)
+
+        layout.addWidget(self.add_curve_gradient_color_button)
+        layout.addWidget(self.apply_curve_gradient_button)
+        layout.addStretch(1)
+        self.curve_gradient_stretch = layout.itemAt(layout.count() - 1)
+        self.update_curve_gradient_buttons()
+
     def update_curve_gradient_buttons(self):
         for button, color in zip(getattr(self, "curve_gradient_buttons", []), self.curve_gradient_colors):
             button.setStyleSheet(f"""
@@ -1666,6 +1713,22 @@ class DatPlotTab(QWidget):
                 QToolButton:hover {{
                     border: 1px solid #111827;
                 }}
+            """)
+
+        add_button = getattr(self, "add_curve_gradient_color_button", None)
+        if add_button is not None:
+            add_button.setStyleSheet("""
+                QToolButton {
+                    background: #f4f4f4;
+                    border: 1px solid #9ca3af;
+                    border-radius: 6px;
+                    font-weight: bold;
+                    padding: 0px;
+                }
+                QToolButton:hover {
+                    border: 1px solid #111827;
+                    background: #ffffff;
+                }
             """)
 
     def choose_curve_gradient_color(self, color_index):
@@ -1683,17 +1746,32 @@ class DatPlotTab(QWidget):
         self.curve_gradient_colors[color_index] = color.name()
         self.update_curve_gradient_buttons()
 
-    def curve_gradient_color_at(self, position):
-        start = QColor(self.curve_gradient_colors[0])
-        middle = QColor(self.curve_gradient_colors[1])
-        end = QColor(self.curve_gradient_colors[2])
+    def add_curve_gradient_color_point(self):
+        if len(self.curve_gradient_colors) < 2:
+            self.curve_gradient_colors.append("#000000")
+            self.rebuild_curve_gradient_buttons()
+            return
 
-        if position <= 0.5:
-            left, right = start, middle
-            local_position = position / 0.5 if position > 0 else 0.0
-        else:
-            left, right = middle, end
-            local_position = (position - 0.5) / 0.5
+        insert_index = max(1, len(self.curve_gradient_colors) - 1)
+        new_position = insert_index / len(self.curve_gradient_colors)
+        self.curve_gradient_colors.insert(insert_index, self.curve_gradient_color_at(new_position))
+        self.rebuild_curve_gradient_buttons()
+
+    def curve_gradient_color_at(self, position):
+        colors = [QColor(color) for color in self.curve_gradient_colors if QColor(color).isValid()]
+        if not colors:
+            return "#000000"
+        if len(colors) == 1:
+            return colors[0].name()
+
+        position = max(0.0, min(1.0, float(position)))
+        scaled_position = position * (len(colors) - 1)
+        left_index = int(np.floor(scaled_position))
+        right_index = min(left_index + 1, len(colors) - 1)
+        local_position = scaled_position - left_index
+
+        left = colors[left_index]
+        right = colors[right_index]
 
         red = round(left.red() + (right.red() - left.red()) * local_position)
         green = round(left.green() + (right.green() - left.green()) * local_position)
@@ -1713,11 +1791,19 @@ class DatPlotTab(QWidget):
         self.update_plot()
 
     def visible_curves(self):
-        return {
-            key: curve
-            for key, curve in self.curves.items()
-            if curve.get("visible", True)
-        }
+        stride_widget = getattr(self, "curve_display_stride_spin", None)
+        stride = max(1, stride_widget.value() if stride_widget is not None else 1)
+        curves = {}
+        visible_index = 0
+
+        for key, curve in self.curves.items():
+            if not curve.get("visible", True):
+                continue
+            if visible_index % stride == 0:
+                curves[key] = curve
+            visible_index += 1
+
+        return curves
 
     def open_power_law_fit_dialog(self):
         if not self.curves:
@@ -2618,6 +2704,7 @@ class DatPlotTab(QWidget):
         for widget in [
             getattr(self, "plot_mode", None),
             getattr(self, "fit_button", None),
+            getattr(self, "curve_display_stride_spin", None),
             getattr(self, "show_legend", None),
             getattr(self, "keep_zoom_checkbox", None),
             getattr(self, "save_plot_button", None),
