@@ -674,7 +674,7 @@ class SandboxTab(QWidget):
     def parabolic_peak_q(self, q, y):
         q = np.asarray(q, dtype=float)
         y = np.asarray(y, dtype=float)
-        valid = np.isfinite(q) & np.isfinite(y) & (q > 0)
+        valid = np.isfinite(q) & np.isfinite(y) & (q > 0) & (q <= 1.0)
         if not np.any(valid):
             return None
 
@@ -1170,7 +1170,7 @@ class SandboxTab(QWidget):
             raise ValueError("Wavelength must be > 0 Å.")
 
         image = np.asarray(image, dtype=float)
-        q_min_limit = 0.25
+        q_min_limit = 0.0
         q_max_limit = 2.0
         n_bins = int(self.imogolite_bins_spinbox.value())
         distance_m = distance_mm * 1e-3
@@ -1304,7 +1304,7 @@ class SandboxTab(QWidget):
         ax.set_ylabel("qI(q)")
         ax.set_xscale("log" if plot_mode in {"log log", "log lin"} else "linear")
         ax.set_yscale("log" if plot_mode in {"log log", "lin log"} else "linear")
-        ax.set_xlim(0.25, 2.0)
+        ax.set_xlim(0.0, 2.0)
         ax.set_title("Integrated qI(q)")
         ax.grid(True, alpha=0.25)
         if plotted_count and self.imogolite_legend_checkbox.isChecked():
@@ -1378,7 +1378,7 @@ class SandboxTab(QWidget):
             ax.set_yscale("log")
         else:
             ax.set_yscale("linear")
-        ax.set_xlim(0.25, 2.0)
+        ax.set_xlim(0.0, 2.0)
 
         title = "Integrated qI(q)"
         if self.current_path is not None:
