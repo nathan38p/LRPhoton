@@ -348,6 +348,9 @@ class MainWindow(QMainWindow):
 
         self.tab_bar.setTabText(self.tools_tab_index, "🛠️ Tools")
         self.tab_bar.setTabEnabled(self.tools_tab_index, True)
+        self.tab_bar.setTabText(self.sandbox_tab_index, "🧪 Sandbox")
+        self.tab_bar.setTabVisible(self.sandbox_tab_index, True)
+        self.tab_bar.setTabEnabled(self.sandbox_tab_index, True)
         self.tab_bar.setTabVisible(self.unfold_tab_index, False)
 
         header_layout.addStretch()

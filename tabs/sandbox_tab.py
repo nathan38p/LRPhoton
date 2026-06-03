@@ -1,16 +1,17 @@
 from pathlib import Path
 import fnmatch
-import re
 
 import numpy as np
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -25,7 +26,6 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -33,8 +33,6 @@ from PySide6.QtWidgets import (
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
-from matplotlib import cm, colors
-
 from tabs.file_ratings import install_file_rating_menu, set_item_file_path
 from tabs.instrument_presets import (
     ID13_DEFAULT_CENTER_X,
@@ -43,11 +41,13 @@ from tabs.instrument_presets import (
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
 )
-from tabs.radial_tab import radial_average
-from tabs.ui_style import GROUP_BOX_STYLE, PAGE_MARGINS, PANEL_MARGINS
+from tabs.ui_style import GROUP_BOX_STYLE, PAGE_MARGINS, PANEL_MARGINS, style_q_geometry_buttons
+from tabs.sandbox_3d_view import Saxs3DProjectMixin
+from tabs.sandbox_imogolite import ImogoliteProjectMixin
+from tabs.sandbox_polynomials import PolynomialProjectMixin
 
 
-class SandboxTab(QWidget):
+class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMixin, QWidget):
     folder_changed = Signal(object, object)
 
     def __init__(self):
@@ -80,6 +80,7 @@ class SandboxTab(QWidget):
             "+": {"center_x": None, "center_y": None, "pixel_size": None, "distance": None, "wavelength": None},
         }
         self.current_geometry = self.geometry_presets["ID13"].copy()
+        self.geometry_mode = "ID13"
         self.build_ui()
 
     def build_ui(self):
@@ -119,6 +120,11 @@ class SandboxTab(QWidget):
         self.open_imogolite_project_button.clicked.connect(lambda: self.open_sandbox_project("Imogolite distance"))
         selector_buttons.addWidget(self.open_imogolite_project_button)
 
+        self.open_polynomial_project_button = QPushButton("Beidellite ODF")
+        self.open_polynomial_project_button.setMinimumSize(190, 70)
+        self.open_polynomial_project_button.clicked.connect(lambda: self.open_sandbox_project("Beidellite ODF"))
+        selector_buttons.addWidget(self.open_polynomial_project_button)
+
         selector_buttons.addStretch(1)
         selector_layout.addLayout(selector_buttons)
         selector_layout.addStretch(1)
@@ -128,6 +134,7 @@ class SandboxTab(QWidget):
         self.project_stack.addWidget(splitter)
 
         file_box = QGroupBox("File browser")
+        self.file_box = file_box
         file_box.setStyleSheet(GROUP_BOX_STYLE)
         file_box.setMinimumWidth(280)
         file_box.setMaximumWidth(420)
@@ -215,44 +222,64 @@ class SandboxTab(QWidget):
         self.sandbox_project_combo.addItems([
             "3D SAXS pattern",
             "Imogolite distance",
+            "Beidellite ODF",
         ])
         self.sandbox_project_combo.currentTextChanged.connect(self.apply_sandbox_project)
         side_layout.addLayout(self.form_row("Project", self.sandbox_project_combo))
 
-        self.geometry_combo = QComboBox()
-        self.geometry_combo.addItems(["XENOCS", "ID02", "ID13", "Custom", "+"])
-        self.geometry_combo.setCurrentText("ID13")
-        self.geometry_combo.currentTextChanged.connect(self.apply_geometry_preset)
-        side_layout.addLayout(self.form_row("Geometry", self.geometry_combo))
+        self.geometry_combo_label = QLabel("Geometry")
+        geometry_buttons_layout = QHBoxLayout()
+        geometry_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        geometry_buttons_layout.setSpacing(4)
+        self.btn_xenocs = QPushButton("XENOCS")
+        self.btn_id02 = QPushButton("ID02")
+        self.btn_id13 = QPushButton("ID13")
+        self.q_manual_button = QPushButton("+")
+        self.btn_xenocs.clicked.connect(lambda: self.apply_geometry_preset("XENOCS"))
+        self.btn_id02.clicked.connect(lambda: self.apply_geometry_preset("ID02"))
+        self.btn_id13.clicked.connect(lambda: self.apply_geometry_preset("ID13"))
+        self.q_manual_button.setToolTip("Edit geometry and wavelength parameters")
+        self.q_manual_button.clicked.connect(self.open_sandbox_geometry_dialog)
+        for button in [self.btn_xenocs, self.btn_id02, self.btn_id13, self.q_manual_button]:
+            geometry_buttons_layout.addWidget(button)
+        geometry_row = QHBoxLayout()
+        geometry_row.setContentsMargins(0, 0, 0, 0)
+        geometry_row.setSpacing(8)
+        self.geometry_combo_label.setMinimumWidth(120)
+        geometry_row.addWidget(self.geometry_combo_label, 0)
+        geometry_row.addLayout(geometry_buttons_layout, 1)
+        side_layout.addLayout(geometry_row)
 
         self.center_x_label = QLabel("Center X")
         self.center_x_edit = QLineEdit()
         self.center_x_edit.returnPressed.connect(self.apply_custom_geometry_from_fields)
-        side_layout.addLayout(self.form_row(self.center_x_label, self.center_x_edit))
 
         self.center_y_label = QLabel("Center Y")
         self.center_y_edit = QLineEdit()
         self.center_y_edit.returnPressed.connect(self.apply_custom_geometry_from_fields)
-        side_layout.addLayout(self.form_row(self.center_y_label, self.center_y_edit))
 
         self.pixel_size_label = QLabel("Pixel size (µm)")
         self.pixel_size_edit = QLineEdit()
         self.pixel_size_edit.returnPressed.connect(self.apply_custom_geometry_from_fields)
-        side_layout.addLayout(self.form_row(self.pixel_size_label, self.pixel_size_edit))
 
         self.distance_label = QLabel("Distance (mm)")
         self.distance_edit = QLineEdit()
         self.distance_edit.returnPressed.connect(self.apply_custom_geometry_from_fields)
-        side_layout.addLayout(self.form_row(self.distance_label, self.distance_edit))
 
         self.wavelength_label = QLabel("Wavelength (Å)")
         self.wavelength_edit = QLineEdit()
         self.wavelength_edit.returnPressed.connect(self.apply_custom_geometry_from_fields)
-        side_layout.addLayout(self.form_row(self.wavelength_label, self.wavelength_edit))
 
         self.apply_geometry_button = QPushButton("Apply")
         self.apply_geometry_button.clicked.connect(self.apply_custom_geometry_from_fields)
-        side_layout.addWidget(self.apply_geometry_button)
+        self.geometry_widgets = [
+            self.geometry_combo_label,
+            self.btn_xenocs,
+            self.btn_id02,
+            self.btn_id13,
+            self.q_manual_button,
+        ]
+        self.update_sandbox_geometry_buttons()
 
         self.imogolite_peak_box = QGroupBox("Imogolite peak")
         self.imogolite_peak_box.setStyleSheet(GROUP_BOX_STYLE)
@@ -355,6 +382,8 @@ class SandboxTab(QWidget):
         copy_shortcut = QShortcut(QKeySequence.Copy, self.imogolite_results_table)
         copy_shortcut.activated.connect(self.copy_imogolite_results_table)
         side_layout.addWidget(self.imogolite_peak_box)
+
+        self.build_polynomial_controls(side_layout)
 
         self.wireframe_checkbox = QCheckBox("Wireframe")
         self.wireframe_checkbox.setChecked(False)
@@ -468,6 +497,12 @@ class SandboxTab(QWidget):
             self.contrast_max_label,
             self.contrast_max_slider,
         ]
+        self.frame_bottom_widgets = [
+            self.previous_frame_button,
+            self.frame_slider,
+            self.next_frame_button,
+            self.frame_label,
+        ]
         self.apply_sandbox_project(self.sandbox_project_combo.currentText())
 
         splitter.addWidget(file_box)
@@ -492,6 +527,9 @@ class SandboxTab(QWidget):
     def current_project(self):
         return self.sandbox_project_combo.currentText()
 
+    def is_beidellite_odf_project(self):
+        return self.current_project() in {"Beidellite ODF", "Polynomes"}
+
     def open_sandbox_project(self, name):
         self.sandbox_project_combo.blockSignals(True)
         self.sandbox_project_combo.setCurrentText(name)
@@ -501,29 +539,37 @@ class SandboxTab(QWidget):
 
     def apply_sandbox_project(self, name):
         is_imogolite = name == "Imogolite distance"
+        is_polynomial = name in {"Beidellite ODF", "Polynomes"}
+        is_3d = name == "3D SAXS pattern"
 
         self.file_list.setSelectionMode(
             QAbstractItemView.ExtendedSelection if is_imogolite else QAbstractItemView.SingleSelection
         )
         self.name_filter.blockSignals(True)
-        self.name_filter.setText("*cave*" if is_imogolite else "*")
+        self.name_filter.setText("*cave*" if (is_imogolite or is_polynomial) else "*")
         self.name_filter.blockSignals(False)
         self.extension_filter.blockSignals(True)
         self.extension_filter.setText("*.h5 *.hdf5 *.edf *.dat" if is_imogolite else "*.h5 *.hdf5 *.edf")
         self.extension_filter.blockSignals(False)
         self.subfolders_checkbox.setChecked(is_imogolite)
+        self.file_box.setVisible(True)
         self.refresh_files()
 
         self.imogolite_peak_box.setVisible(is_imogolite)
-        self.wavelength_label.setVisible(is_imogolite)
-        self.wavelength_edit.setVisible(is_imogolite)
+        self.polynomial_box.setVisible(is_polynomial)
+        for widget in self.geometry_widgets:
+            widget.setVisible(True)
 
         for widget in self.saxs_3d_widgets:
-            widget.setVisible(not is_imogolite)
+            widget.setVisible(is_3d)
         for widget in self.saxs_3d_bottom_widgets:
-            widget.setVisible(not is_imogolite)
+            widget.setVisible(is_3d)
+        for widget in self.frame_bottom_widgets:
+            widget.setVisible(True)
 
-        if is_imogolite:
+        if is_polynomial:
+            self.apply_polynomial_project()
+        elif is_imogolite:
             self.plot_box.setTitle("Imogolite distance")
             paths = self.selected_files()
             if paths:
@@ -541,12 +587,25 @@ class SandboxTab(QWidget):
             self.plot_3d(self.current_image)
 
     def apply_geometry_preset(self, name):
+        if name == "+":
+            self.open_sandbox_geometry_dialog()
+            return
         preset = self.geometry_presets.get(name)
         if preset is None:
             return
+        self.geometry_mode = name
         self.current_geometry = preset.copy()
         self.update_geometry_fields()
+        self.update_sandbox_geometry_buttons()
         self.replot_current_image()
+
+    def update_sandbox_geometry_buttons(self):
+        buttons = {
+            "XENOCS": self.btn_xenocs,
+            "ID02": self.btn_id02,
+            "ID13": self.btn_id13,
+        }
+        style_q_geometry_buttons(buttons, self.geometry_mode, self.q_manual_button)
 
     def update_geometry_fields(self):
         geometry = self.current_geometry
@@ -567,11 +626,51 @@ class SandboxTab(QWidget):
 
     def apply_custom_geometry_from_fields(self):
         self.current_geometry = self.read_geometry_from_fields()
-        if self.geometry_combo.currentText() not in {"Custom", "+"}:
-            self.geometry_combo.blockSignals(True)
-            self.geometry_combo.setCurrentText("Custom")
-            self.geometry_combo.blockSignals(False)
+        self.geometry_mode = "Custom"
+        self.update_sandbox_geometry_buttons()
         self.replot_current_image()
+
+    def open_sandbox_geometry_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Geometry")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+
+        fields = [
+            ("Center X", self.center_x_edit.text()),
+            ("Center Y", self.center_y_edit.text()),
+            ("Pixel size (µm)", self.pixel_size_edit.text()),
+            ("Distance (mm)", self.distance_edit.text()),
+            ("Wavelength (Å)", self.wavelength_edit.text()),
+        ]
+        dialog_edits = []
+        for label, value in fields:
+            edit = QLineEdit(value)
+            dialog_edits.append(edit)
+            form.addRow(label, edit)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() == QDialog.Accepted:
+            (
+                center_x_edit,
+                center_y_edit,
+                pixel_size_edit,
+                distance_edit,
+                wavelength_edit,
+            ) = dialog_edits
+            self.center_x_edit.setText(center_x_edit.text())
+            self.center_y_edit.setText(center_y_edit.text())
+            self.pixel_size_edit.setText(pixel_size_edit.text())
+            self.distance_edit.setText(distance_edit.text())
+            self.wavelength_edit.setText(wavelength_edit.text())
+            self.apply_custom_geometry_from_fields()
+        else:
+            self.update_geometry_fields()
 
     def optional_float_from_text(self, text):
         text = text.strip().replace(",", ".")
@@ -584,347 +683,6 @@ class SandboxTab(QWidget):
         if value is None:
             return None
         return float(value)
-
-    def q_from_peak_radius_px(self, radius_px):
-        pixel_size_um = self.geometry_value("pixel_size")
-        distance_mm = self.geometry_value("distance")
-        wavelength_a = self.geometry_value("wavelength")
-
-        if radius_px is None or radius_px <= 0:
-            raise ValueError("Peak radius must be > 0 px.")
-        if pixel_size_um is None or pixel_size_um <= 0:
-            raise ValueError("Pixel size must be > 0 µm.")
-        if distance_mm is None or distance_mm <= 0:
-            raise ValueError("Distance must be > 0 mm.")
-        if wavelength_a is None or wavelength_a <= 0:
-            raise ValueError("Wavelength must be > 0 Å.")
-
-        radius_m = float(radius_px) * pixel_size_um * 1e-6
-        distance_m = distance_mm * 1e-3
-        wavelength_nm = wavelength_a * 0.1
-        two_theta = np.arctan2(radius_m, distance_m)
-        return (4.0 * np.pi / wavelength_nm) * np.sin(two_theta / 2.0)
-
-    def peak_radius_px_from_q(self, q_nm):
-        pixel_size_um = self.geometry_value("pixel_size")
-        distance_mm = self.geometry_value("distance")
-        wavelength_a = self.geometry_value("wavelength")
-
-        if q_nm is None or q_nm <= 0:
-            raise ValueError("Peak q must be > 0 nm⁻¹.")
-        if pixel_size_um is None or pixel_size_um <= 0:
-            raise ValueError("Pixel size must be > 0 µm.")
-        if distance_mm is None or distance_mm <= 0:
-            raise ValueError("Distance must be > 0 mm.")
-        if wavelength_a is None or wavelength_a <= 0:
-            raise ValueError("Wavelength must be > 0 Å.")
-
-        wavelength_nm = wavelength_a * 0.1
-        argument = float(q_nm) * wavelength_nm / (4.0 * np.pi)
-        if abs(argument) > 1:
-            raise ValueError("Peak q is incompatible with the wavelength.")
-        two_theta = 2.0 * np.arcsin(argument)
-        radius_m = distance_mm * 1e-3 * np.tan(two_theta)
-        return radius_m / (pixel_size_um * 1e-6)
-
-    def calculate_imogolite_distance(self):
-        try:
-            self.current_geometry = self.read_geometry_from_fields()
-            q_nm = self.optional_float_from_text(self.imogolite_peak_q_edit.text())
-            radius_px = self.optional_float_from_text(self.imogolite_peak_radius_edit.text())
-            if q_nm is None:
-                q_nm = self.q_from_peak_radius_px(radius_px)
-            elif radius_px is None:
-                radius_px = self.peak_radius_px_from_q(q_nm)
-                self.imogolite_peak_radius_edit.setText(f"{radius_px:.6g}")
-            d_nm = 2.0 * np.pi / q_nm
-            volume_fraction = self.imogolite_volume_fraction_from_q(q_nm)
-        except Exception as exc:
-            self.imogolite_result_label.setText(f"Could not calculate:\n{exc}")
-            return
-
-        self.imogolite_peak_q_edit.setText(f"{q_nm:.6g}")
-        self.imogolite_result_label.setText(
-            f"q = {q_nm:.6g} nm⁻¹\n"
-            f"r = {radius_px:.6g} px\n"
-            f"d = 2π/q = {d_nm:.6g} nm\n"
-            f"φ = {volume_fraction:.6g}"
-        )
-
-    def imogolite_tube_diameter_nm(self):
-        diameter = self.optional_float_from_text(self.imogolite_tube_diameter_edit.text())
-        if diameter is None or diameter <= 0:
-            raise ValueError("Tube diameter must be > 0 nm.")
-        return float(diameter)
-
-    def imogolite_frame_step_um(self):
-        step = self.optional_float_from_text(self.imogolite_frame_step_combo.currentText())
-        if step is None or step <= 0:
-            raise ValueError("Frame step must be > 0 µm.")
-        return float(step)
-
-    def imogolite_volume_fraction_from_q(self, q_nm):
-        if q_nm is None or q_nm <= 0:
-            raise ValueError("Peak q must be > 0 nm⁻¹.")
-        d_nm = 2.0 * np.pi / float(q_nm)
-        tube_diameter_nm = self.imogolite_tube_diameter_nm()
-        swelling_prefactor = np.sqrt(np.pi * np.sqrt(3.0) / 8.0)
-        return float(((swelling_prefactor * tube_diameter_nm) / d_nm) ** 2)
-
-    def parabolic_peak_q(self, q, y):
-        q = np.asarray(q, dtype=float)
-        y = np.asarray(y, dtype=float)
-        valid = np.isfinite(q) & np.isfinite(y) & (q > 0) & (q <= 1.0)
-        if not np.any(valid):
-            return None
-
-        q_valid = q[valid]
-        y_valid = y[valid]
-        peak_index = int(np.nanargmax(y_valid))
-        if peak_index == 0 or peak_index == len(q_valid) - 1:
-            return float(q_valid[peak_index])
-
-        x_fit = q_valid[peak_index - 1:peak_index + 2]
-        y_fit = y_valid[peak_index - 1:peak_index + 2]
-        try:
-            a, b, _c = np.polyfit(x_fit, y_fit, 2)
-        except Exception:
-            return float(q_valid[peak_index])
-
-        if not np.isfinite(a) or not np.isfinite(b) or a >= 0:
-            return float(q_valid[peak_index])
-
-        refined_q = float(-b / (2.0 * a))
-        if refined_q < float(x_fit[0]) or refined_q > float(x_fit[-1]):
-            return float(q_valid[peak_index])
-        return refined_q
-
-    def imogolite_metrics(self, q, intensity):
-        q = np.asarray(q, dtype=float)
-        intensity = np.asarray(intensity, dtype=float)
-        qiq = q * intensity
-        qmax = self.parabolic_peak_q(q, qiq)
-        if qmax is None:
-            return None
-
-        d_nm = float(2.0 * np.pi / qmax)
-
-        try:
-            volume_fraction = self.imogolite_volume_fraction_from_q(qmax)
-        except Exception:
-            volume_fraction = np.nan
-
-        return {
-            "qmax": qmax,
-            "d_nm": d_nm,
-            "volume_fraction": volume_fraction,
-        }
-
-    def imogolite_output_folder(self):
-        base_folder = self.current_folder or self.folder_path
-        if base_folder is None and self.current_path is not None:
-            base_folder = self.current_path.parent
-        if base_folder is None:
-            base_folder = Path.home()
-        output_folder = Path(base_folder) / "imogolite_dat"
-        output_folder.mkdir(exist_ok=True)
-        return output_folder
-
-    def frame_number_from_path(self, path):
-        match = re.search(r"frame[_-]?(\d+)", Path(path).stem, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-        match = re.search(r"(\d+)", Path(path).stem)
-        return int(match.group(1)) if match else None
-
-    def add_imogolite_sample_positions(self, results):
-        results = [dict(result) for result in results]
-        if not results:
-            return results
-
-        try:
-            frame_step_um = self.imogolite_frame_step_um()
-        except Exception:
-            frame_step_um = 5.0
-
-        frames = [result.get("frame") for result in results if result.get("frame") is not None]
-        reverse_origin = self.imogolite_origin_combo.currentText() == "last frame → first"
-
-        if frames:
-            first_frame = min(frames)
-            last_frame = max(frames)
-            for result in results:
-                frame = result.get("frame")
-                if frame is None:
-                    result["sample_distance_um"] = None
-                elif reverse_origin:
-                    result["sample_distance_um"] = float(last_frame - frame) * frame_step_um
-                else:
-                    result["sample_distance_um"] = float(frame - first_frame) * frame_step_um
-            return results
-
-        last_index = len(results) - 1
-        for index, result in enumerate(results):
-            position_index = last_index - index if reverse_origin else index
-            result["sample_distance_um"] = float(position_index) * frame_step_um
-        return results
-
-    def imogolite_curve_color(self, index, total):
-        total = max(1, int(total))
-        t = 0.0 if total == 1 else float(index) / float(total - 1)
-        start = QColor(self.imogolite_gradient_start)
-        end = QColor(self.imogolite_gradient_end)
-        red = round(start.red() + (end.red() - start.red()) * t)
-        green = round(start.green() + (end.green() - start.green()) * t)
-        blue = round(start.blue() + (end.blue() - start.blue()) * t)
-        return QColor(red, green, blue).name()
-
-    def imogolite_dat_path_for_source(self, source_path):
-        source_path = Path(source_path)
-        return self.imogolite_output_folder() / f"{source_path.stem}_imogolite_qI.dat"
-
-    def save_imogolite_dat(self, source_path, q, intensity, counts, metrics):
-        output_path = self.imogolite_dat_path_for_source(source_path)
-        q = np.asarray(q, dtype=float)
-        intensity = np.asarray(intensity, dtype=float)
-        counts = np.asarray(counts, dtype=float)
-        if counts.shape != q.shape:
-            counts = np.ones_like(q)
-
-        data = np.column_stack([q, intensity, q * intensity, counts])
-        with output_path.open("w", encoding="utf-8") as handle:
-            handle.write("# LRPhoton imogolite integrated curve\n")
-            handle.write(f"# source = {Path(source_path)}\n")
-            if metrics is not None:
-                handle.write(f"# qmax_nm-1 = {metrics['qmax']:.10g}\n")
-                handle.write(f"# d_nm = {metrics['d_nm']:.10g}\n")
-                handle.write(f"# volume_fraction = {metrics['volume_fraction']:.10g}\n")
-            handle.write("# columns: q_nm-1 I_q qI_q counts\n")
-            np.savetxt(handle, data, fmt="%.10g")
-        return output_path
-
-    def load_imogolite_dat(self, path):
-        data = np.loadtxt(path, comments="#")
-        data = np.atleast_2d(data)
-        if data.shape[1] < 2:
-            raise ValueError("DAT file must contain at least q and I(q).")
-        q = np.asarray(data[:, 0], dtype=float)
-        intensity = np.asarray(data[:, 1], dtype=float)
-        counts = np.asarray(data[:, 3], dtype=float) if data.shape[1] >= 4 else np.ones_like(q)
-        valid = np.isfinite(q) & np.isfinite(intensity)
-        return q[valid], intensity[valid], counts[valid]
-
-    def update_imogolite_results_table(self, results):
-        self.imogolite_results = self.add_imogolite_sample_positions(results)
-        self.imogolite_results_table.setRowCount(len(self.imogolite_results))
-
-        for row, result in enumerate(self.imogolite_results):
-            frame = result.get("frame")
-            sample_distance_um = result.get("sample_distance_um")
-            qmax = result.get("qmax")
-            d_nm = result.get("d_nm")
-            volume_fraction = result.get("volume_fraction")
-            values = [
-                "-" if frame is None else str(frame),
-                "-" if sample_distance_um is None else f"{sample_distance_um:.6g}",
-                "-" if qmax is None else f"{qmax:.6g}",
-                "-" if d_nm is None else f"{d_nm:.6g}",
-                "-" if volume_fraction is None or not np.isfinite(volume_fraction) else f"{volume_fraction:.6g}",
-            ]
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setTextAlignment(Qt.AlignCenter)
-                self.imogolite_results_table.setItem(row, column, item)
-
-        self.imogolite_results_table.resizeColumnsToContents()
-
-    def copy_imogolite_results_table(self):
-        table = self.imogolite_results_table
-        if table.rowCount() == 0:
-            self.status_label.setText("No imogolite table to copy.")
-            return
-
-        selected_ranges = table.selectedRanges()
-        if selected_ranges:
-            selected_range = selected_ranges[0]
-            row_start = selected_range.topRow()
-            row_end = selected_range.bottomRow()
-            column_start = selected_range.leftColumn()
-            column_end = selected_range.rightColumn()
-        else:
-            row_start = 0
-            row_end = table.rowCount() - 1
-            column_start = 0
-            column_end = table.columnCount() - 1
-
-        lines = []
-        headers = [
-            table.horizontalHeaderItem(column).text()
-            for column in range(column_start, column_end + 1)
-        ]
-        lines.append("\t".join(headers))
-
-        for row in range(row_start, row_end + 1):
-            values = []
-            for column in range(column_start, column_end + 1):
-                item = table.item(row, column)
-                values.append("" if item is None else item.text())
-            lines.append("\t".join(values))
-
-        QApplication.clipboard().setText("\n".join(lines))
-        self.status_label.setText(f"Copied {row_end - row_start + 1} table row(s) to clipboard.")
-
-    def update_imogolite_table_only(self):
-        if not self.imogolite_results:
-            return
-        refreshed = []
-        for result in self.imogolite_results:
-            updated = dict(result)
-            updated.pop("sample_distance_um", None)
-            qmax = updated.get("qmax")
-            if qmax is not None and qmax > 0:
-                metrics = self.imogolite_metrics(np.asarray([qmax]), np.asarray([1.0 / qmax]))
-                if metrics is not None:
-                    updated.update(metrics)
-            refreshed.append(updated)
-        self.update_imogolite_results_table(refreshed)
-
-    def use_current_max_as_imogolite_peak(self):
-        if self.imogolite_q is None or self.imogolite_intensity is None:
-            self.plot_imogolite_iq(self.current_image)
-        if self.imogolite_q is None or self.imogolite_intensity is None:
-            self.imogolite_result_label.setText("Integrate I(q) first.")
-            return
-
-        valid = np.isfinite(self.imogolite_q) & np.isfinite(self.imogolite_intensity)
-        if not np.any(valid):
-            self.imogolite_result_label.setText("I(q) contains no finite points.")
-            return
-
-        q = self.imogolite_q[valid]
-        intensity = self.imogolite_intensity[valid]
-        peak_q = float(q[int(np.nanargmax(q * intensity))])
-        self.set_imogolite_peak_q(peak_q)
-
-    def set_imogolite_peak_q(self, q_nm):
-        self.imogolite_peak_q_edit.setText(f"{float(q_nm):.6g}")
-        self.imogolite_peak_radius_edit.clear()
-        self.calculate_imogolite_distance()
-
-    def imogolite_paths_for_stride(self, paths):
-        stride = max(1, int(self.imogolite_file_stride_spinbox.value()))
-        return list(paths)[::stride]
-
-    def integrate_imogolite_selection(self):
-        paths = self.selected_files() or self.imogolite_current_paths
-        if paths:
-            self.imogolite_current_paths = paths
-            paths_to_integrate = self.imogolite_paths_for_stride(paths)
-            if paths_to_integrate:
-                self.plot_imogolite_files(paths_to_integrate, total_selected=len(paths))
-            return
-
-        self.replot_current_image()
 
     def set_folder(self, folder):
         if folder is None:
@@ -998,6 +756,26 @@ class SandboxTab(QWidget):
         return paths
 
     def open_selected_files(self):
+        if self.is_beidellite_odf_project():
+            path = self.selected_file()
+            if path is None:
+                return
+            try:
+                stack = self.load_stack(path)
+            except Exception as exc:
+                self.status_label.setText(f"Could not open file: {exc}")
+                return
+            self.current_path = path
+            self.current_stack = stack
+            self.current_frame_count = stack.shape[0]
+            self.current_frame_index = 0
+            self.frame_slider.blockSignals(True)
+            self.frame_slider.setRange(0, max(0, self.current_frame_count - 1))
+            self.frame_slider.setValue(0)
+            self.frame_slider.blockSignals(False)
+            self.update_frame_controls()
+            self.set_current_image_from_stack()
+            return
         if self.current_project() == "Imogolite distance":
             paths = self.selected_files()
             if not paths:
@@ -1123,6 +901,9 @@ class SandboxTab(QWidget):
         self.frame_slider.setValue(self.current_frame_index)
 
     def replot_current_image(self):
+        if self.is_beidellite_odf_project():
+            self.update_polynomial_analysis()
+            return
         if self.current_image is not None:
             if self.current_project() == "Imogolite distance":
                 paths = self.selected_files() or self.imogolite_current_paths
@@ -1132,426 +913,3 @@ class SandboxTab(QWidget):
                     self.plot_imogolite_iq(self.current_image)
             else:
                 self.plot_3d(self.current_image)
-
-    def update_display_precision(self, value):
-        self.max_3d_points = int(value)
-        self.replot_current_image()
-
-    def auto_contrast(self):
-        self.contrast_min_slider.blockSignals(True)
-        self.contrast_max_slider.blockSignals(True)
-        self.contrast_min_slider.setValue(10)
-        self.contrast_max_slider.setValue(990)
-        self.contrast_min_slider.blockSignals(False)
-        self.contrast_max_slider.blockSignals(False)
-        self.z_max_edit.clear()
-        self.replot_current_image()
-
-    def reset_intensity_scale(self):
-        self.z_min_edit.clear()
-        self.z_max_edit.clear()
-        self.replot_current_image()
-
-    def imogolite_iq_profile(self, image):
-        self.current_geometry = self.read_geometry_from_fields()
-        center_x = self.geometry_value("center_x")
-        center_y = self.geometry_value("center_y")
-        pixel_size_um = self.geometry_value("pixel_size")
-        distance_mm = self.geometry_value("distance")
-        wavelength_a = self.geometry_value("wavelength")
-
-        if center_x is None or center_y is None:
-            raise ValueError("Set Center X and Center Y first.")
-        if pixel_size_um is None or pixel_size_um <= 0:
-            raise ValueError("Pixel size must be > 0 µm.")
-        if distance_mm is None or distance_mm <= 0:
-            raise ValueError("Distance must be > 0 mm.")
-        if wavelength_a is None or wavelength_a <= 0:
-            raise ValueError("Wavelength must be > 0 Å.")
-
-        image = np.asarray(image, dtype=float)
-        q_min_limit = 0.0
-        q_max_limit = 2.0
-        n_bins = int(self.imogolite_bins_spinbox.value())
-        distance_m = distance_mm * 1e-3
-        pixel_mm = pixel_size_um * 1e-3
-
-        try:
-            try:
-                from pyFAI.integrator.azimuthal import AzimuthalIntegrator
-            except Exception:
-                from pyFAI.azimuthalIntegrator import AzimuthalIntegrator
-
-            invalid_mask = ~np.isfinite(image) | (image <= 0) | (image >= 4e9)
-            integrator = AzimuthalIntegrator(
-                dist=float(distance_m),
-                poni1=float(center_y) * pixel_mm * 1e-3,
-                poni2=float(center_x) * pixel_mm * 1e-3,
-                pixel1=pixel_mm * 1e-3,
-                pixel2=pixel_mm * 1e-3,
-                wavelength=wavelength_a * 1e-10,
-            )
-            result = integrator.integrate1d(
-                image.astype(np.float64),
-                n_bins,
-                unit="q_nm^-1",
-                radial_range=(q_min_limit, q_max_limit),
-                mask=invalid_mask,
-                method=("bbox", "csr", "cython"),
-                correctSolidAngle=True,
-            )
-            q = np.asarray(getattr(result, "radial", result[0]), dtype=float)
-            intensity = np.asarray(getattr(result, "intensity", result[1]), dtype=float)
-
-            valid = np.isfinite(q) & np.isfinite(intensity) & (q >= q_min_limit) & (q <= q_max_limit) & (intensity > 0)
-            if not np.any(valid):
-                raise ValueError("pyFAI returned no finite I(q) points.")
-            return q[valid], intensity[valid], np.ones(np.count_nonzero(valid), dtype=int)
-        except Exception:
-            q, intensity, counts, _mask = radial_average(
-                image,
-                center_x,
-                center_y,
-                distance_m,
-                pixel_mm,
-                pixel_mm,
-                wavelength_a,
-                q_min_limit,
-                q_max_limit,
-                n_bins,
-                False,
-                0,
-                360,
-                1,
-            )
-            return q, intensity, counts
-
-    def first_frame_from_path(self, path):
-        stack = self.load_stack(path)
-        if stack.shape[0] < 1:
-            raise ValueError("No frame found")
-        return stack[0]
-
-    def plot_imogolite_files(self, paths, total_selected=None):
-        paths = list(paths)
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
-        self.ax = ax
-        self.imogolite_q = None
-        self.imogolite_intensity = None
-
-        plot_mode = self.imogolite_plot_mode_combo.currentText()
-        messages = []
-        plotted_count = 0
-        results = []
-        saved_count = 0
-
-        for path_index, path in enumerate(paths):
-            image = None
-            try:
-                if path.suffix.lower() == ".dat":
-                    q, intensity, counts = self.load_imogolite_dat(path)
-                else:
-                    image = self.first_frame_from_path(path)
-                    q, intensity, counts = self.imogolite_iq_profile(image)
-            except Exception as exc:
-                messages.append(f"{path.name}: {exc}")
-                continue
-
-            plotted_intensity = q * intensity
-            valid = np.isfinite(q) & np.isfinite(plotted_intensity)
-            if plot_mode in {"log log", "log lin"}:
-                valid &= q > 0
-            if plot_mode in {"log log", "lin log"}:
-                valid &= plotted_intensity > 0
-            if not np.any(valid):
-                messages.append(f"{path.name}: no finite qI(q) points for this scale")
-                continue
-
-            metrics = self.imogolite_metrics(q, intensity)
-            if metrics is None:
-                messages.append(f"{path.name}: could not determine qmax")
-                continue
-
-            if path.suffix.lower() != ".dat":
-                try:
-                    self.save_imogolite_dat(path, q, intensity, counts, metrics)
-                    saved_count += 1
-                except Exception as exc:
-                    messages.append(f"{path.name}: could not save DAT ({exc})")
-
-            color = self.imogolite_curve_color(path_index, len(paths))
-            ax.plot(q[valid], plotted_intensity[valid], linewidth=1.1, color=color, label=path.stem)
-            ax.axvline(metrics["qmax"], color=color, linestyle=":", linewidth=0.6, alpha=0.5)
-            plotted_count += 1
-
-            if self.imogolite_q is None:
-                self.imogolite_q = q
-                self.imogolite_intensity = intensity
-                self.current_path = path
-                if image is not None:
-                    self.current_image = image
-
-            results.append({
-                "path": path,
-                "frame": self.frame_number_from_path(path),
-                "qmax": metrics["qmax"],
-                "d_nm": metrics["d_nm"],
-                "volume_fraction": metrics["volume_fraction"],
-            })
-
-        ax.set_xlabel("q / nm⁻¹")
-        ax.set_ylabel("qI(q)")
-        ax.set_xscale("log" if plot_mode in {"log log", "log lin"} else "linear")
-        ax.set_yscale("log" if plot_mode in {"log log", "lin log"} else "linear")
-        ax.set_xlim(0.0, 2.0)
-        ax.set_title("Integrated qI(q)")
-        ax.grid(True, alpha=0.25)
-        if plotted_count and self.imogolite_legend_checkbox.isChecked():
-            ax.legend(loc="best", frameon=True)
-
-        peak_q = self.optional_float_from_text(self.imogolite_peak_q_edit.text())
-        if peak_q is not None:
-            ax.axvline(peak_q, color="#d62728", linestyle="--", linewidth=1.1)
-
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
-        self.update_imogolite_results_table(results)
-        selected_count = total_selected if total_selected is not None else len(paths)
-        stride = self.imogolite_file_stride_spinbox.value()
-        if messages:
-            self.status_label.setText(
-                f"Integrated/plotted {plotted_count} / {selected_count} selected file(s), every {stride}. "
-                + " | ".join(messages[:3])
-            )
-        else:
-            self.status_label.setText(
-                f"Integrated/plotted {plotted_count} / {selected_count} selected file(s), every {stride}. "
-                f"Saved {saved_count} DAT curve(s) in imogolite_dat."
-            )
-
-    def plot_imogolite_iq(self, image):
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
-        self.ax = ax
-        self.imogolite_q = None
-        self.imogolite_intensity = None
-
-        if image is None:
-            self.status_label.setText("Open a cave EDF/H5 image first.")
-            self.canvas.draw_idle()
-            return
-
-        try:
-            q, intensity, counts = self.imogolite_iq_profile(image)
-        except Exception as exc:
-            self.status_label.setText(f"Could not integrate I(q): {exc}")
-            self.canvas.draw_idle()
-            return
-
-        self.imogolite_q = q
-        self.imogolite_intensity = intensity
-        plotted_intensity = q * intensity
-        metrics = self.imogolite_metrics(q, intensity)
-        if metrics is not None and self.current_path is not None:
-            try:
-                self.save_imogolite_dat(self.current_path, q, intensity, counts, metrics)
-            except Exception as exc:
-                self.status_label.setText(f"Integrated I(q), but could not save DAT: {exc}")
-        plot_mode = self.imogolite_plot_mode_combo.currentText()
-        valid = np.isfinite(q) & np.isfinite(plotted_intensity)
-        if plot_mode in {"log log", "log lin"}:
-            valid &= q > 0
-        if plot_mode in {"log log", "lin log"}:
-            valid &= plotted_intensity > 0
-
-        ax.plot(q[valid], plotted_intensity[valid], color=self.imogolite_curve_color(0, 1), linewidth=1.2)
-        if metrics is not None:
-            ax.axvline(metrics["qmax"], color=self.imogolite_curve_color(0, 1), linestyle=":", linewidth=0.8, alpha=0.6)
-        ax.set_xlabel("q / nm⁻¹")
-        ax.set_ylabel("qI(q)")
-        if plot_mode in {"log log", "log lin"}:
-            ax.set_xscale("log")
-        else:
-            ax.set_xscale("linear")
-        if plot_mode in {"log log", "lin log"}:
-            ax.set_yscale("log")
-        else:
-            ax.set_yscale("linear")
-        ax.set_xlim(0.0, 2.0)
-
-        title = "Integrated qI(q)"
-        if self.current_path is not None:
-            title += f" - {self.current_path.name}"
-        ax.set_title(title)
-        ax.grid(True, alpha=0.25)
-
-        peak_q = self.optional_float_from_text(self.imogolite_peak_q_edit.text())
-        if peak_q is not None:
-            ax.axvline(peak_q, color="#d62728", linestyle="--", linewidth=1.1)
-
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
-        if metrics is not None:
-            self.update_imogolite_results_table([{
-                "path": self.current_path,
-                "frame": self.frame_number_from_path(self.current_path) if self.current_path is not None else None,
-                "qmax": metrics["qmax"],
-                "d_nm": metrics["d_nm"],
-                "volume_fraction": metrics["volume_fraction"],
-            }])
-        self.status_label.setText("Integrated qI(q), saved DAT when possible, and calculated qmax.")
-
-    def on_canvas_click(self, event):
-        if self.current_project() != "Imogolite distance":
-            return
-        if event.inaxes is not self.ax or event.xdata is None:
-            return
-        if self.imogolite_q is None:
-            return
-
-        q_values = np.asarray(self.imogolite_q, dtype=float)
-        if q_values.size == 0:
-            return
-        index = int(np.nanargmin(np.abs(q_values - float(event.xdata))))
-        self.set_imogolite_peak_q(float(q_values[index]))
-        paths = self.selected_files() or self.imogolite_current_paths
-        if paths:
-            self.plot_imogolite_files(self.imogolite_paths_for_stride(paths), total_selected=len(paths))
-        else:
-            self.plot_imogolite_iq(self.current_image)
-
-    def plot_colored_wireframe(self, ax, xx, yy, z, vmin, vmax):
-        z_data = np.asarray(z.filled(np.nan), dtype=float)
-        norm = colors.Normalize(vmin=vmin, vmax=vmax)
-        cmap = cm.get_cmap("jet")
-
-        for row_index in range(z_data.shape[0]):
-            row_z = z_data[row_index, :]
-            finite = np.isfinite(row_z)
-            if np.count_nonzero(finite) < 2:
-                continue
-            row_color = cmap(norm(np.nanmean(row_z[finite])))
-            ax.plot(
-                xx[row_index, finite],
-                yy[row_index, finite],
-                row_z[finite],
-                color=row_color,
-                linewidth=0.45,
-            )
-
-        for column_index in range(z_data.shape[1]):
-            column_z = z_data[:, column_index]
-            finite = np.isfinite(column_z)
-            if np.count_nonzero(finite) < 2:
-                continue
-            column_color = cmap(norm(np.nanmean(column_z[finite])))
-            ax.plot(
-                xx[finite, column_index],
-                yy[finite, column_index],
-                column_z[finite],
-                color=column_color,
-                linewidth=0.45,
-            )
-
-    def plot_3d(self, image):
-        self.figure.clear()
-        ax = self.figure.add_subplot(111, projection="3d")
-        self.ax = ax
-
-        display = np.array(image, dtype=float)
-        finite = np.isfinite(display)
-        if not np.any(finite):
-            self.status_label.setText("Image contains no finite intensity values.")
-            self.canvas.draw_idle()
-            return
-
-        finite_display = np.isfinite(display)
-        low_percentile = self.contrast_min_slider.value() / 10.0
-        high_percentile = self.contrast_max_slider.value() / 10.0
-        if high_percentile <= low_percentile:
-            high_percentile = min(100.0, low_percentile + 0.1)
-        vmin = np.nanpercentile(display[finite_display], low_percentile)
-        vmax = np.nanpercentile(display[finite_display], high_percentile)
-        if vmax <= vmin:
-            vmax = vmin + 1e-12
-
-        auto_z_min = float(np.nanmin(display[finite_display]))
-        auto_z_max = float(np.nanmax(display[finite_display]))
-        z_min = self.optional_float_from_text(self.z_min_edit.text())
-        z_max = self.optional_float_from_text(self.z_max_edit.text())
-        if z_min is None:
-            z_min = auto_z_min
-        if z_max is None:
-            z_max = auto_z_max
-        if z_max <= z_min:
-            z_max = z_min + 1e-12
-
-        max_points = self.max_3d_points
-        precision_step = self.precision_step_spinbox.value()
-        step_y = max(1, int(np.ceil(display.shape[0] / max_points))) * precision_step
-        step_x = max(1, int(np.ceil(display.shape[1] / max_points))) * precision_step
-
-        z = display[::step_y, ::step_x]
-        y = np.arange(0, display.shape[0], step_y)
-        x = np.arange(0, display.shape[1], step_x)
-        xx, yy = np.meshgrid(x, y)
-
-        z = np.asarray(z, dtype=float)
-        z[(z > z_max) | (z < z_min)] = np.nan
-        z = np.ma.masked_invalid(z)
-        z_plot = z.filled(np.nan)
-        if z.count() == 0:
-            self.status_label.setText("3D downsample contains no finite intensity values.")
-            self.canvas.draw_idle()
-            return
-
-        geometry = self.current_geometry
-        center_x = geometry.get("center_x")
-        center_y = geometry.get("center_y")
-        if center_x is not None and center_y is not None:
-            ax.set_xlabel("x - center (px)")
-            ax.set_ylabel("y - center (px)")
-            ax.set_xlim(float(np.nanmin(xx - center_x)), float(np.nanmax(xx - center_x)))
-            ax.set_ylim(float(np.nanmin(yy - center_y)), float(np.nanmax(yy - center_y)))
-            if self.wireframe_checkbox.isChecked():
-                self.plot_colored_wireframe(ax, xx - center_x, yy - center_y, z, max(vmin, z_min), min(vmax, z_max))
-            else:
-                surface = ax.plot_surface(
-                    xx - center_x,
-                    yy - center_y,
-                    z_plot,
-                    cmap="jet",
-                    vmin=max(vmin, z_min),
-                    vmax=min(vmax, z_max),
-                    linewidth=0,
-                    antialiased=False,
-                    rstride=1,
-                    cstride=1,
-                )
-                surface.set_clim(max(vmin, z_min), min(vmax, z_max))
-        else:
-            ax.set_xlabel("x (px)")
-            ax.set_ylabel("y (px)")
-            if self.wireframe_checkbox.isChecked():
-                self.plot_colored_wireframe(ax, xx, yy, z, max(vmin, z_min), min(vmax, z_max))
-            else:
-                surface = ax.plot_surface(
-                    xx,
-                    yy,
-                    z_plot,
-                    cmap="jet",
-                    vmin=max(vmin, z_min),
-                    vmax=min(vmax, z_max),
-                    linewidth=0,
-                    antialiased=False,
-                    rstride=1,
-                    cstride=1,
-                )
-                surface.set_clim(max(vmin, z_min), min(vmax, z_max))
-        ax.set_zlim(z_min, z_max)
-        ax.set_zlabel("Intensity")
-        ax.view_init(elev=35, azim=-60)
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
-        self.status_label.clear()
