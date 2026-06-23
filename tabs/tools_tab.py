@@ -58,6 +58,8 @@ except Exception:
     FILE_BROWSER_WIDTH = 320
     PAGE_MARGINS = (4, 4, 4, 4)
 
+from tabs.line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
+
 
 class PreviewCanvas(FigureCanvas):
     def __init__(self):
@@ -342,12 +344,18 @@ class ToolsTab(QWidget):
             self.geometry_button_group.addButton(button)
             self.geometry_buttons[name] = button
             geometry_layout.addWidget(button)
+            button.hide()
 
         self.geometry_buttons["XENOCS"].setChecked(True)
 
         self.geometry_plus_button = QPushButton("+")
         self.geometry_plus_button.clicked.connect(self.open_custom_geometry_dialog)
         geometry_layout.addWidget(self.geometry_plus_button)
+        self.geometry_plus_button.hide()
+
+        self.line_geometry_selector = LineGeometrySelector(self, "XENOCS")
+        self.line_geometry_selector.geometry_selected.connect(self.apply_line_geometry_selection)
+        geometry_layout.addWidget(self.line_geometry_selector, 1)
 
         file_layout.addWidget(geometry_group)
 
@@ -510,6 +518,22 @@ class ToolsTab(QWidget):
         self.geometry_mode = mode
         if mode in getattr(self, "geometry_buttons", {}):
             self.geometry_buttons[mode].setChecked(True)
+        if hasattr(self, "line_geometry_selector") and mode in self.line_geometry_selector.geometries:
+            self.line_geometry_selector.set_current_name(mode)
+        self.update_header_preview()
+        self.update_previews()
+
+    def apply_line_geometry_selection(self, name, geometry):
+        values = line_geometry_to_lrphoton(geometry)
+        self.custom_geometry_values = {
+            "SampleDistance": str(values["distance_m"]),
+            "Wavelength": str(values["wavelength_a"] * 1e-10),
+            "PSize_1": str(values["pixel_x_mm"] * 1e-3),
+            "PSize_2": str(values["pixel_y_mm"] * 1e-3),
+            "Center_1": str(values["xc"]),
+            "Center_2": str(values["yc"]),
+        }
+        self.geometry_mode = "Custom" if name not in {"XENOCS", "ID02", "ID13"} else name
         self.update_header_preview()
         self.update_previews()
 

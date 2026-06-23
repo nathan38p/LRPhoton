@@ -40,6 +40,7 @@ from .ui_style import (
     style_q_geometry_buttons,
 )
 from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path
+from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
 
 
 # ============================================================
@@ -985,6 +986,11 @@ class CentreTab(QWidget):
             btn.setCheckable(True)
             preset_layout.addWidget(btn)
         preset_layout.addWidget(self.q_manual_button)
+        for btn in [self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom, self.q_manual_button]:
+            btn.hide()
+        self.line_geometry_selector = LineGeometrySelector(self, "XENOCS")
+        self.line_geometry_selector.geometry_selected.connect(self.apply_line_geometry_selection)
+        preset_layout.addWidget(self.line_geometry_selector, 1)
 
         self.btn_xenocs.setChecked(True)
         style_q_geometry_buttons(
@@ -1216,6 +1222,8 @@ class CentreTab(QWidget):
 
     def set_instrument_mode(self, mode):
         self.instrument_mode = mode
+        if hasattr(self, "line_geometry_selector") and mode in self.line_geometry_selector.geometries:
+            self.line_geometry_selector.set_current_name(mode)
 
         buttons = {
             "XENOCS": self.btn_xenocs,
@@ -1229,6 +1237,25 @@ class CentreTab(QWidget):
         self.update_custom_editing_state()
         self.update_centre_warning_labels()
         self.apply_instrument_preset()
+        self.refresh_after_preset_change()
+
+    def apply_line_geometry_selection(self, name, geometry):
+        values = line_geometry_to_lrphoton(geometry)
+        self.edit_xc.setValue(values["xc"])
+        self.edit_yc.setValue(values["yc"])
+        self.edit_distance.setValue(values["distance_m"])
+        self.edit_px_x.setValue(values["pixel_x_mm"])
+        self.edit_px_y.setValue(values["pixel_y_mm"])
+        if hasattr(self, "edit_lambda"):
+            self.edit_lambda.setValue(values["wavelength_a"])
+        self.instrument_mode = "Custom" if name not in {"XENOCS", "ID02", "ID13"} else name
+        buttons = {
+            "XENOCS": self.btn_xenocs,
+            "ID02": self.btn_id02,
+            "ID13": self.btn_id13,
+            "Custom": self.btn_custom,
+        }
+        style_q_geometry_buttons(buttons, self.instrument_mode, self.q_manual_button)
         self.refresh_after_preset_change()
 
     def update_custom_editing_state(self):

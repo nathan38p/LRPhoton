@@ -1,12 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_submodules
+
+try:
+    vmbpy_hiddenimports = collect_submodules('vmbpy')
+except Exception:
+    vmbpy_hiddenimports = []
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     datas=[('assets', 'assets'), ('tabs', 'tabs')],
-    hiddenimports=[],
+    hiddenimports=vmbpy_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

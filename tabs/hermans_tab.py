@@ -46,6 +46,7 @@ from .instrument_presets import (
     ID13_DEFAULT_WAVELENGTH_A,
 )
 from .file_ratings import file_path_from_item, install_file_rating_menu, is_file_rated_up, set_item_file_path
+from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
 from .ui_style import (
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
@@ -1593,6 +1594,10 @@ class HermansTab(QWidget):
             self.line_params_button,
         ]:
             preset_layout.addWidget(button)
+            button.hide()
+        self.line_geometry_selector = LineGeometrySelector(self, "XENOCS")
+        self.line_geometry_selector.geometry_selected.connect(self.apply_line_geometry_selection)
+        preset_layout.addWidget(self.line_geometry_selector, 1)
         instrument_layout.addLayout(preset_layout)
         self.geometry_layout.addLayout(instrument_layout)
 
@@ -1746,15 +1751,7 @@ class HermansTab(QWidget):
             if widget is not None:
                 widget.setVisible(order_mode)
 
-        for widget in [
-            getattr(self, "btn_xenocs", None),
-            getattr(self, "btn_id02", None),
-            getattr(self, "btn_id13", None),
-            getattr(self, "btn_custom", None),
-            getattr(self, "line_params_button", None),
-        ]:
-            if widget is not None:
-                widget.setVisible(anisotropy_mode or order_mode)
+        self.update_geometry_selector_visibility(anisotropy_mode or order_mode)
 
         if order_mode:
             self.apply_order_wavelength_from_instrument()
@@ -1780,6 +1777,21 @@ class HermansTab(QWidget):
 
         if hasattr(self, "frame_slider"):
             self.update_frame_navigation_state()
+
+    def update_geometry_selector_visibility(self, visible):
+        for widget in [
+            getattr(self, "btn_xenocs", None),
+            getattr(self, "btn_id02", None),
+            getattr(self, "btn_id13", None),
+            getattr(self, "btn_custom", None),
+            getattr(self, "line_params_button", None),
+        ]:
+            if widget is not None:
+                widget.hide()
+
+        selector = getattr(self, "line_geometry_selector", None)
+        if selector is not None:
+            selector.setVisible(visible)
 
     def update_file_filter_for_parameter(self):
         if not hasattr(self, "extensions_filter"):
@@ -2032,6 +2044,8 @@ class HermansTab(QWidget):
 
     def set_instrument_mode(self, mode):
         self.instrument_mode = mode
+        if hasattr(self, "line_geometry_selector") and mode in self.line_geometry_selector.geometries:
+            self.line_geometry_selector.set_current_name(mode)
 
         buttons = {
             "XENOCS": self.btn_xenocs,
@@ -2050,6 +2064,32 @@ class HermansTab(QWidget):
 
         self.apply_instrument_preset()
         self.calculate_anisotropy()
+
+    def apply_line_geometry_selection(self, name, geometry):
+        values = line_geometry_to_lrphoton(geometry)
+        self.custom_anisotropy_geometry = {
+            "center_x": values["xc"],
+            "center_y": values["yc"],
+            "distance": values["distance_m"],
+            "pixel_x": values["pixel_x_mm"],
+            "pixel_y": values["pixel_y_mm"],
+            "wavelength": values["wavelength_a"],
+        }
+        self.set_center_spins(values["xc"], values["yc"])
+        self.instrument_mode = "Custom" if name not in {"XENOCS", "ID02", "ID13"} else name
+        buttons = {
+            "XENOCS": self.btn_xenocs,
+            "ID02": self.btn_id02,
+            "ID13": self.btn_id13,
+            "Custom": self.btn_custom,
+        }
+        style_q_geometry_buttons(buttons, self.instrument_mode, self.line_params_button)
+        if self.is_order_mode():
+            self.apply_order_wavelength_from_instrument()
+            self.update_order_preview()
+            self.schedule_order_fit()
+        else:
+            self.calculate_anisotropy()
 
     def apply_order_wavelength_from_instrument(self):
         if not hasattr(self, "order_wavelength_spin"):

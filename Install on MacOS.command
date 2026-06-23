@@ -50,6 +50,7 @@ if [ -z "${PYTHON_BIN:-}" ]; then
 fi
 
 echo "Installing Python dependencies with $PYTHON_BIN..."
+VMBPY_WHEEL="$APP_DIR/assets/wheels/vmbpy-1.0.4-py3-none-any.whl"
 if /usr/bin/arch -arm64 "$PYTHON_BIN" -c "import platform; raise SystemExit(platform.machine() != 'arm64')" >/dev/null 2>&1; then
     /usr/bin/arch -arm64 "$PYTHON_BIN" -m pip install --upgrade pip
     /usr/bin/arch -arm64 "$PYTHON_BIN" -m pip install --upgrade \
@@ -62,6 +63,9 @@ if /usr/bin/arch -arm64 "$PYTHON_BIN" -c "import platform; raise SystemExit(plat
         fabio \
         scipy \
         pyFAI
+    if [ -f "$VMBPY_WHEEL" ]; then
+        /usr/bin/arch -arm64 "$PYTHON_BIN" -m pip install --upgrade "$VMBPY_WHEEL"
+    fi
 else
     "$PYTHON_BIN" -m pip install --upgrade pip
     "$PYTHON_BIN" -m pip install --upgrade \
@@ -74,6 +78,9 @@ else
         fabio \
         scipy \
         pyFAI
+    if [ -f "$VMBPY_WHEEL" ]; then
+        "$PYTHON_BIN" -m pip install --upgrade "$VMBPY_WHEEL"
+    fi
 fi
 
 echo "Creating LRPhoton.app launcher..."

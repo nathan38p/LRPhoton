@@ -34,6 +34,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 from tabs.file_ratings import install_file_rating_menu, set_item_file_path
+from tabs.line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
 from tabs.instrument_presets import (
     ID13_DEFAULT_CENTER_X,
     ID13_DEFAULT_CENTER_Y,
@@ -45,6 +46,7 @@ from tabs.ui_style import GROUP_BOX_STYLE, PAGE_MARGINS, PANEL_MARGINS, style_q_
 from tabs.sandbox_3d_view import Saxs3DProjectMixin
 from tabs.sandbox_imogolite import ImogoliteProjectMixin
 from tabs.sandbox_polynomials import PolynomialProjectMixin
+from tabs.background_tab import BackgroundTab
 
 
 class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMixin, QWidget):
@@ -124,6 +126,11 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.open_polynomial_project_button.setMinimumSize(190, 70)
         self.open_polynomial_project_button.clicked.connect(lambda: self.open_sandbox_project("Beidellite ODF"))
         selector_buttons.addWidget(self.open_polynomial_project_button)
+
+        self.open_background_project_button = QPushButton("Background")
+        self.open_background_project_button.setMinimumSize(190, 70)
+        self.open_background_project_button.clicked.connect(self.open_background_project)
+        selector_buttons.addWidget(self.open_background_project_button)
 
         selector_buttons.addStretch(1)
         selector_layout.addLayout(selector_buttons)
@@ -242,6 +249,10 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.q_manual_button.clicked.connect(self.open_sandbox_geometry_dialog)
         for button in [self.btn_xenocs, self.btn_id02, self.btn_id13, self.q_manual_button]:
             geometry_buttons_layout.addWidget(button)
+            button.hide()
+        self.line_geometry_selector = LineGeometrySelector(self, "ID13")
+        self.line_geometry_selector.geometry_selected.connect(self.apply_line_geometry_selection)
+        geometry_buttons_layout.addWidget(self.line_geometry_selector, 1)
         geometry_row = QHBoxLayout()
         geometry_row.setContentsMargins(0, 0, 0, 0)
         geometry_row.setSpacing(8)
@@ -510,6 +521,10 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
+        self.background_project = BackgroundTab()
+        self.background_project.folder_changed.connect(lambda folder: self.folder_changed.emit(Path(folder), self))
+        self.project_stack.addWidget(self.background_project)
+
     def form_row(self, label, widget):
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
@@ -536,6 +551,9 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.sandbox_project_combo.blockSignals(False)
         self.apply_sandbox_project(name)
         self.project_stack.setCurrentIndex(1)
+
+    def open_background_project(self):
+        self.project_stack.setCurrentWidget(self.background_project)
 
     def apply_sandbox_project(self, name):
         is_imogolite = name == "Imogolite distance"
@@ -595,6 +613,20 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
             return
         self.geometry_mode = name
         self.current_geometry = preset.copy()
+        self.update_geometry_fields()
+        self.update_sandbox_geometry_buttons()
+        self.replot_current_image()
+
+    def apply_line_geometry_selection(self, name, geometry):
+        values = line_geometry_to_lrphoton(geometry)
+        self.geometry_mode = "Custom" if name not in {"XENOCS", "ID02", "ID13"} else name
+        self.current_geometry = {
+            "center_x": values["xc"],
+            "center_y": values["yc"],
+            "pixel_size": values["pixel_x_mm"] * 1000.0,
+            "distance": values["distance_m"] * 1000.0,
+            "wavelength": values["wavelength_a"],
+        }
         self.update_geometry_fields()
         self.update_sandbox_geometry_buttons()
         self.replot_current_image()
@@ -694,6 +726,8 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.current_folder = folder
         self.folder_edit.setText(str(folder))
         self.refresh_files()
+        if hasattr(self, "background_project"):
+            self.background_project.set_folder_from_external_tab(str(folder))
 
     def set_folder_from_external_tab(self, folder):
         self.set_folder(folder)

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+from .line_geometry import LineGeometrySelector
 from .ui_style import FlexibleDoubleSpinBox as QDoubleSpinBox, style_q_geometry_buttons
 from .view_tab import ViewTab
 
@@ -84,6 +85,17 @@ class UnfoldTab(ViewTab):
         preset_layout.addWidget(self.q_id13_button)
         preset_layout.addWidget(self.q_custom_button)
         preset_layout.addWidget(self.q_manual_button)
+        for button in [
+            self.q_xenocs_button,
+            self.q_id02_button,
+            self.q_id13_button,
+            self.q_custom_button,
+            self.q_manual_button,
+        ]:
+            button.hide()
+        self.line_geometry_selector = LineGeometrySelector(self, "ID13")
+        self.line_geometry_selector.geometry_selected.connect(self.apply_line_geometry_selection)
+        preset_layout.addWidget(self.line_geometry_selector, 1)
         
         # Apply the same styling as radial_tab
         style_q_geometry_buttons(

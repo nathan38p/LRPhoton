@@ -113,6 +113,10 @@ fabio ^
 scipy ^
 pyFAI
 
+if exist "%DEST_FULL%\assets\wheels\vmbpy-1.0.4-py3-none-any.whl" (
+    %PYTHON_EXE% -m pip install --upgrade "%DEST_FULL%\assets\wheels\vmbpy-1.0.4-py3-none-any.whl"
+)
+
 if errorlevel 1 (
     echo.
     echo ERROR: Some dependencies could not be installed.

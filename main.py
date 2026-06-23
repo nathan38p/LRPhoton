@@ -25,6 +25,64 @@ REQUIRED_PYTHON_MODULES = [
     ("pyFAI", "pyFAI"),
 ]
 
+LOCAL_PYTHON_WHEELS = [
+    ("vmbpy", "vmbpy-1.0.4-py3-none-any.whl"),
+]
+
+
+def bundled_file_path(*parts):
+    bases = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bases.append(Path(sys._MEIPASS))
+    bases.append(Path(__file__).resolve().parent)
+
+    for base in bases:
+        path = base.joinpath(*parts)
+        if path.exists():
+            return path
+    return bases[-1].joinpath(*parts)
+
+
+def configure_bundled_vimbax_runtime():
+    if sys.platform != "darwin":
+        return
+
+    frameworks_path = bundled_file_path("assets", "vimbax", "Frameworks")
+    cti_path = bundled_file_path("assets", "vimbax", "cti")
+    if frameworks_path.exists():
+        os.environ["VIMBA_X_HOME"] = str(frameworks_path)
+    if cti_path.exists():
+        os.environ["GENICAM_GENTL64_PATH"] = str(cti_path)
+        os.environ["GENICAM_GENTL32_PATH"] = str(cti_path)
+
+
+def ensure_local_python_wheels():
+    for import_name, wheel_name in LOCAL_PYTHON_WHEELS:
+        if importlib.util.find_spec(import_name) is not None:
+            continue
+        wheel_path = bundled_file_path("assets", "wheels", wheel_name)
+        if not wheel_path.exists():
+            continue
+        wheel_text = str(wheel_path)
+        if wheel_text not in sys.path:
+            sys.path.insert(0, wheel_text)
+            importlib.invalidate_caches()
+        if importlib.util.find_spec(import_name) is not None:
+            continue
+        if getattr(sys, "frozen", False):
+            continue
+        try:
+            subprocess.check_call([
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                str(wheel_path),
+            ])
+        except subprocess.CalledProcessError:
+            pass
+
 
 def ensure_required_python_modules():
     if (
@@ -64,7 +122,9 @@ def ensure_required_python_modules():
             ) from error
 
 
+configure_bundled_vimbax_runtime()
 ensure_required_python_modules()
+ensure_local_python_wheels()
 
 
 import requests
@@ -177,16 +237,17 @@ class ColoredTabBar(QTabBar):
     TAB_COLORS = {
         0: ("#dbeafe", "#2563eb"),  # View 2D
         1: ("#dbeafe", "#2563eb"),  # Plot 1D
-        2: ("#e5e7eb", "#6b7280"),  # Tools
-        3: ("#ffedd5", "#f97316"),  # Center
-        4: ("#ffedd5", "#f97316"),  # Background
-        5: ("#ffedd5", "#f97316"),  # Average
-        6: ("#ffedd5", "#f97316"),  # Cave
-        7: ("#ffedd5", "#f97316"),  # Unfold
-        8: ("#dcfce7", "#16a34a"),  # Radial
-        9: ("#dcfce7", "#16a34a"),  # Azimuthal
-        10: ("#f3e8ff", "#9333ea"),  # Anisotropy
-        11: ("#fde68a", "#d97706"),  # Sandbox
+        2: ("#fef3c7", "#d97706"),  # Capture
+        3: ("#e5e7eb", "#6b7280"),  # Tools
+        4: ("#ffedd5", "#f97316"),  # Center
+        5: ("#ffedd5", "#f97316"),  # Background
+        6: ("#ffedd5", "#f97316"),  # Average
+        7: ("#ffedd5", "#f97316"),  # Cave
+        8: ("#ffedd5", "#f97316"),  # Unfold
+        9: ("#dcfce7", "#16a34a"),  # Radial
+        10: ("#dcfce7", "#16a34a"),  # Azimuthal
+        11: ("#f3e8ff", "#9333ea"),  # Anisotropy
+        12: ("#fde68a", "#d97706"),  # Sandbox
     }
 
     def tabSizeHint(self, index):
@@ -328,6 +389,7 @@ class MainWindow(QMainWindow):
 
         self.tab_bar.addTab("🖼️ View 2D")
         self.tab_bar.addTab("📈 Plot 1D")
+        self.capture_sals_tab_index = self.tab_bar.addTab("📷 Capture")
         self.tools_tab_index = self.tab_bar.addTab("🛠️ Tools")
         self.tab_bar.addTab("🎯 Center")
         self.background_tab_index = self.tab_bar.addTab("🧹 Background")
@@ -341,15 +403,14 @@ class MainWindow(QMainWindow):
 
         is_development_copy = self.is_development_copy()
 
-        if is_development_copy:
-            self.tab_bar.setTabText(self.background_tab_index, "🧹 Background")
-            self.tab_bar.setTabEnabled(self.background_tab_index, True)
-        else:
-            self.tab_bar.setTabText(self.background_tab_index, "🔒 Background")
-            self.tab_bar.setTabEnabled(self.background_tab_index, False)
+        self.tab_bar.setTabText(self.background_tab_index, "🧹 Background")
+        self.tab_bar.setTabVisible(self.background_tab_index, False)
+        self.tab_bar.setTabEnabled(self.background_tab_index, False)
 
         self.tab_bar.setTabText(self.tools_tab_index, "🛠️ Tools")
         self.tab_bar.setTabEnabled(self.tools_tab_index, True)
+        self.tab_bar.setTabText(self.capture_sals_tab_index, "📷 Capture")
+        self.tab_bar.setTabEnabled(self.capture_sals_tab_index, True)
         self.tab_bar.setTabText(self.sandbox_tab_index, "🧪 Sandbox")
         self.tab_bar.setTabVisible(self.sandbox_tab_index, is_development_copy)
         self.tab_bar.setTabEnabled(self.sandbox_tab_index, is_development_copy)
@@ -531,11 +592,13 @@ class MainWindow(QMainWindow):
         from tabs.datplot_tab import DatPlotTab
         from tabs.tools_tab import ToolsTab
         from tabs.sandbox_tab import SandboxTab
+        from tabs.VimbaSALS import VimbaSALSWidget
 
         BackgroundTab = self.resolve_background_tab_class()
 
         self.view_tab = ViewTab()
         self.datplot_tab = DatPlotTab()
+        self.capture_sals_tab = VimbaSALSWidget()
         self.tools_tab = ToolsTab()
 
         self.centre_tab = CentreTab()
@@ -557,6 +620,7 @@ class MainWindow(QMainWindow):
 
         self.pages.addWidget(self.view_tab)
         self.pages.addWidget(self.datplot_tab)
+        self.pages.addWidget(self.capture_sals_tab)
         self.pages.addWidget(self.tools_tab)
         self.pages.addWidget(self.centre_tab)
         self.pages.addWidget(self.background_tab)

@@ -70,6 +70,7 @@ from .ui_style import (
     style_q_geometry_buttons,
 )
 from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path
+from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
 
 
 CAVE_MASK_PRESET_VERSION = 1
@@ -2230,6 +2231,8 @@ class CaveTab(QWidget):
         controls_box_layout.setSpacing(0)
         controls_content = QWidget()
         controls_content.setStyleSheet("background-color: #eeeeee;")
+        controls_content.setMinimumWidth(0)
+        controls_content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         controls_layout = QVBoxLayout(controls_content)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(4)
@@ -2310,6 +2313,17 @@ class CaveTab(QWidget):
             button.setCheckable(True)
             preset_layout.addWidget(button)
         preset_layout.addWidget(self.q_manual_button)
+        for button in [self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom, self.q_manual_button]:
+            button.hide()
+        self.line_geometry_selector = LineGeometrySelector(self, "XENOCS")
+        self.line_geometry_selector.geometry_selected.connect(self.apply_line_geometry_selection)
+        self.line_geometry_selector.setMinimumWidth(0)
+        self.line_geometry_selector.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.line_geometry_selector.combo.setMinimumWidth(0)
+        self.line_geometry_selector.combo.setMinimumContentsLength(7)
+        self.line_geometry_selector.combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.line_geometry_selector.edit_button.setFixedWidth(44)
+        preset_layout.addWidget(self.line_geometry_selector, 1)
 
         self.btn_xenocs.setChecked(True)
         style_q_geometry_buttons(
@@ -2373,6 +2387,7 @@ class CaveTab(QWidget):
         form_layout.addWidget(self.centre_y_label, 1, 0)
         form_layout.addWidget(self.yc_spin, 1, 1)
         self.beamstop_y_label = QLabel("ID13 beamstop Y:")
+        self.beamstop_y_label.setWordWrap(True)
         form_layout.addWidget(self.beamstop_y_label, 2, 0)
         form_layout.addWidget(self.beamstop_y_spin, 2, 1)
         self.cave_angle_label = QLabel("Cave angle:")
@@ -2513,7 +2528,7 @@ class CaveTab(QWidget):
             }
         """
 
-        button_layout = QHBoxLayout()
+        button_layout = QGridLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(4)
 
@@ -2530,10 +2545,15 @@ class CaveTab(QWidget):
         self.save_button.setStyleSheet(cave_action_button_style)
         self.save_button.clicked.connect(self.save_cave)
         self.batch_cave_button.clicked.connect(self.cave_selected_files)
+        for button in [self.run_button, self.save_button, self.batch_cave_button]:
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
 
-        button_layout.addWidget(self.run_button)
-        button_layout.addWidget(self.save_button)
-        button_layout.addWidget(self.batch_cave_button)
+        button_layout.addWidget(self.run_button, 0, 0)
+        button_layout.addWidget(self.save_button, 0, 1)
+        button_layout.addWidget(self.batch_cave_button, 1, 0, 1, 2)
+        button_layout.setColumnStretch(0, 1)
+        button_layout.setColumnStretch(1, 1)
         controls_layout.addLayout(button_layout)
 
         self.status = QTextEdit()
@@ -2991,6 +3011,8 @@ class CaveTab(QWidget):
 
     def set_instrument_mode(self, mode):
         self.instrument_mode = mode
+        if hasattr(self, "line_geometry_selector") and mode in self.line_geometry_selector.geometries:
+            self.line_geometry_selector.set_current_name(mode)
 
         buttons = {
             "XENOCS": self.btn_xenocs,
@@ -3003,6 +3025,24 @@ class CaveTab(QWidget):
         self.compact_preset_buttons()
 
         self.apply_instrument_preset()
+        self.update_centre_warning_labels()
+        self.update_beamstop_visibility()
+        self.refresh_preview()
+
+    def apply_line_geometry_selection(self, name, geometry):
+        values = line_geometry_to_lrphoton(geometry)
+        self.custom_line_geometry_values = values
+        self.xc_spin.setValue(values["xc"])
+        self.yc_spin.setValue(values["yc"])
+        self.instrument_mode = "Custom" if name not in {"XENOCS", "ID02", "ID13"} else name
+        buttons = {
+            "XENOCS": self.btn_xenocs,
+            "ID02": self.btn_id02,
+            "ID13": self.btn_id13,
+            "Custom": self.btn_custom,
+        }
+        style_q_geometry_buttons(buttons, self.instrument_mode, self.q_manual_button)
+        self.compact_preset_buttons()
         self.update_centre_warning_labels()
         self.update_beamstop_visibility()
         self.refresh_preview()
@@ -3133,6 +3173,16 @@ class CaveTab(QWidget):
 
         xc = self.xc_spin.value()
         yc = self.yc_spin.value()
+        if self.instrument_mode == "Custom" and hasattr(self, "custom_line_geometry_values"):
+            geometry = self.custom_line_geometry_values
+            return (
+                xc,
+                yc,
+                geometry["distance_m"],
+                geometry["pixel_x_mm"],
+                geometry["pixel_y_mm"],
+                geometry["wavelength_a"] * 0.1,
+            )
 
         distance_m = get_header_float(
             self.header,

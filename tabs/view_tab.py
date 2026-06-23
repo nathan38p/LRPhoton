@@ -50,6 +50,7 @@ from .instrument_presets import (
     ID13_DEFAULT_WAVELENGTH_A,
 )
 from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path
+from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
 from .ui_style import (
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
@@ -1274,6 +1275,11 @@ class ViewTab(QWidget):
             self.q_manual_button,
         ]:
             q_buttons_layout.addWidget(button)
+            button.hide()
+
+        self.line_geometry_selector = LineGeometrySelector(self, "XENOCS")
+        self.line_geometry_selector.geometry_selected.connect(self.apply_line_geometry_selection)
+        q_buttons_layout.addWidget(self.line_geometry_selector, 1)
 
         self.update_q_geometry_button_styles()
         self.set_q_geometry_mode("XENOCS")
@@ -1393,6 +1399,24 @@ class ViewTab(QWidget):
             return
 
         self.q_geometry_mode = mode
+        if hasattr(self, "line_geometry_selector") and mode in self.line_geometry_selector.geometries:
+            self.line_geometry_selector.set_current_name(mode)
+        self.update_q_geometry_button_styles()
+        self.refresh_file_information()
+        self.update_image()
+
+    def apply_line_geometry_selection(self, name, geometry):
+        values = line_geometry_to_lrphoton(geometry)
+        self.custom_q_geometry = {
+            "xc": values["xc"],
+            "yc": values["yc"],
+            "distance_m": values["distance_m"],
+            "pixel_x_mm": values["pixel_x_mm"],
+            "pixel_y_mm": values["pixel_y_mm"],
+            "wavelength_a": values["wavelength_a"],
+        }
+        self.save_custom_q_geometry()
+        self.q_geometry_mode = "Custom" if name not in {"XENOCS", "ID02", "ID13"} else name
         self.update_q_geometry_button_styles()
         self.refresh_file_information()
         self.update_image()
