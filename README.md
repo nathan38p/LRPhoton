@@ -60,7 +60,53 @@ At startup, LRPhoton automatically checks for updates from the GitHub repository
 
 ## Troubleshooting
 
-If the application does not open or asks for missing Python dependencies, open a terminal and install all required dependencies manually.
+If LRPhoton does not open, closes immediately, or prints an error such as `ModuleNotFoundError: No module named ...`, install the Python dependencies manually from a terminal.
+
+The required Python modules are listed in:
+
+```text
+requirements.txt
+```
+
+They are currently:
+
+```text
+PySide6
+numpy
+matplotlib
+h5py
+fabio
+requests
+hdf5plugin
+scipy
+pyFAI
+```
+
+### Install all Python modules
+
+First update `pip`, then install the requirements.
+
+On Windows:
+
+```text
+python -m ensurepip --upgrade
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+On macOS:
+
+```text
+python3 -m ensurepip --upgrade
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
+```
+
+If you are not running the command from the LRPhoton folder, use the full path to `requirements.txt`.
+
+### Manual one-line install
+
+If needed, the same dependencies can be installed directly.
 
 On Windows:
 
@@ -72,4 +118,44 @@ On macOS:
 
 ```text
 python3 -m pip install PySide6 numpy matplotlib h5py fabio requests hdf5plugin scipy pyFAI
+```
+
+### Vimba / SALS camera module
+
+The SALS camera tab also needs Allied Vision Vimba support. LRPhoton ships a local wheel for `vmbpy` in:
+
+```text
+assets/wheels/
+```
+
+If the camera tab reports that `vmbpy` is missing, install it manually from the LRPhoton folder.
+
+On Windows:
+
+```text
+python -m pip install assets/wheels/vmbpy-1.0.4-py3-none-any.whl
+```
+
+On macOS:
+
+```text
+python3 -m pip install assets/wheels/vmbpy-1.0.4-py3-none-any.whl
+```
+
+For real camera acquisition, Allied Vision Vimba X must also be installed on the computer, and no other program should already have full access to the camera.
+
+### Test the installation
+
+From the LRPhoton folder:
+
+On Windows:
+
+```text
+python main.py
+```
+
+On macOS:
+
+```text
+python3 main.py
 ```

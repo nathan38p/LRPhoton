@@ -33,11 +33,17 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from tabs.line_geometry import LineGeometrySelector, default_center_text
-from tabs.ui_style import FILE_BROWSER_WIDTH, GROUP_BOX_STYLE, PAGE_MARGINS, PANEL_MARGINS
+from tabs.ui_style import BLOCK_SPACING, FILE_BROWSER_WIDTH, GROUP_BOX_MARGINS, GROUP_BOX_STYLE, PAGE_MARGINS
 
 
 class VimbaSALSWidget(QWidget):
     back_requested = Signal()
+    FIELD_HEIGHT = 24
+    CAMERA_SPIN_WIDTH = 70
+    CAMERA_LABEL_WIDTH = 112
+    CAMERA_SHORT_LABEL_WIDTH = 58
+    CAMERA_OFFSET_LABEL_WIDTH = 66
+    SALS_LABEL_WIDTH = 100
     APP_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
     CAMERA_ID = "DEV_000F315BB2BF"
     CAMERA_MODEL = "Mako G-419B"
@@ -172,19 +178,19 @@ class VimbaSALSWidget(QWidget):
     def build_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(*PAGE_MARGINS)
-        main_layout.setSpacing(6)
+        main_layout.setSpacing(BLOCK_SPACING)
 
         body_layout = QHBoxLayout()
         body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(6)
+        body_layout.setSpacing(BLOCK_SPACING)
         main_layout.addLayout(body_layout, 1)
 
         controls_box = QGroupBox("SALS acquisition")
         controls_box.setStyleSheet(GROUP_BOX_STYLE)
         controls_box.setFixedWidth(FILE_BROWSER_WIDTH)
         controls_layout = QVBoxLayout(controls_box)
-        controls_layout.setContentsMargins(*PANEL_MARGINS)
-        controls_layout.setSpacing(6)
+        controls_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        controls_layout.setSpacing(BLOCK_SPACING)
         body_layout.addWidget(controls_box, 0)
 
         self.connect_button = QPushButton("Connect camera")
@@ -193,7 +199,7 @@ class VimbaSALSWidget(QWidget):
 
         live_buttons_layout = QHBoxLayout()
         live_buttons_layout.setContentsMargins(0, 0, 0, 0)
-        live_buttons_layout.setSpacing(4)
+        live_buttons_layout.setSpacing(6)
         self.start_button = QPushButton("Start live")
         self.start_button.clicked.connect(self.start_live)
         live_buttons_layout.addWidget(self.start_button)
@@ -237,32 +243,25 @@ class VimbaSALSWidget(QWidget):
         self.reverse_y_checkbox.setChecked(self.DEFAULT_REVERSE_Y)
         self.style_acquisition_fields()
 
-        camera_form = QGridLayout()
-        camera_form.setContentsMargins(0, 0, 0, 0)
-        camera_form.setHorizontalSpacing(6)
-        camera_form.setVerticalSpacing(6)
-        camera_form.setColumnStretch(1, 1)
-        camera_form.setColumnStretch(3, 1)
-        camera_form.addWidget(QLabel("Exposure (µs)"), 0, 0)
-        camera_form.addWidget(self.exposure_edit, 0, 1, 1, 3)
-        camera_form.addWidget(QLabel("Width"), 1, 0)
-        camera_form.addWidget(self.width_spinbox, 1, 1)
-        camera_form.addWidget(QLabel("Offset X"), 1, 2)
-        camera_form.addWidget(self.offset_x_spinbox, 1, 3)
-        camera_form.addWidget(QLabel("Height"), 2, 0)
-        camera_form.addWidget(self.height_spinbox, 2, 1)
-        camera_form.addWidget(QLabel("Offset Y"), 2, 2)
-        camera_form.addWidget(self.offset_y_spinbox, 2, 3)
-        camera_form.addWidget(QLabel("Pixel format"), 3, 0)
-        camera_form.addWidget(self.pixel_format_combo, 3, 1, 1, 3)
-        camera_form.addWidget(QLabel("Preview fps"), 4, 0)
-        camera_form.addWidget(self.fps_spinbox, 4, 1)
-        camera_form.addWidget(self.reverse_y_checkbox, 5, 1, 1, 3)
-        controls_layout.addLayout(camera_form)
+        controls_layout.addLayout(self.camera_field_row("Exposure (µs)", self.exposure_edit))
+        controls_layout.addLayout(
+            self.camera_double_field_row("Width", self.width_spinbox, "Offset X", self.offset_x_spinbox)
+        )
+        controls_layout.addLayout(
+            self.camera_double_field_row("Height", self.height_spinbox, "Offset Y", self.offset_y_spinbox)
+        )
+        controls_layout.addLayout(self.camera_field_row("Pixel format", self.pixel_format_combo))
+        controls_layout.addLayout(self.camera_field_row("Preview fps", self.fps_spinbox, add_stretch=True))
+        reverse_y_layout = QHBoxLayout()
+        reverse_y_layout.setContentsMargins(0, 0, 0, 0)
+        reverse_y_layout.addSpacing(self.CAMERA_LABEL_WIDTH + 8)
+        reverse_y_layout.addWidget(self.reverse_y_checkbox)
+        reverse_y_layout.addStretch(1)
+        controls_layout.addLayout(reverse_y_layout)
 
         camera_buttons_layout = QHBoxLayout()
         camera_buttons_layout.setContentsMargins(0, 0, 0, 0)
-        camera_buttons_layout.setSpacing(4)
+        camera_buttons_layout.setSpacing(8)
         self.camera_settings_button = QPushButton("All camera settings")
         self.camera_settings_button.clicked.connect(self.show_camera_settings_dialog)
         camera_buttons_layout.addWidget(self.camera_settings_button, 1)
@@ -273,28 +272,30 @@ class VimbaSALSWidget(QWidget):
 
         output_layout = QHBoxLayout()
         output_layout.setContentsMargins(0, 0, 0, 0)
-        output_layout.setSpacing(4)
+        output_layout.setSpacing(8)
         self.output_edit = QLineEdit(str(self.output_folder))
+        self.output_edit.setFixedHeight(self.FIELD_HEIGHT)
         output_layout.addWidget(self.output_edit, 1)
         self.output_button = QPushButton("Browse")
         self.output_button.clicked.connect(self.choose_output_folder)
         output_layout.addWidget(self.output_button)
-        controls_layout.addWidget(QLabel("Output folder"))
+        controls_layout.addWidget(self.section_label("Output folder"))
         controls_layout.addLayout(output_layout)
 
         self.prefix_edit = QLineEdit("sals")
+        self.prefix_edit.setFixedHeight(self.FIELD_HEIGHT)
         self.save_button = QPushButton("Save current EDF")
         self.save_button.clicked.connect(self.save_current_edf)
-        controls_layout.addWidget(QLabel("File prefix"))
+        controls_layout.addWidget(self.section_label("File prefix"))
         controls_layout.addWidget(self.prefix_edit)
         controls_layout.addWidget(self.save_button)
 
         sals_box = QGroupBox("EDF SALS parameters")
         sals_box.setStyleSheet(GROUP_BOX_STYLE)
         sals_layout = QGridLayout(sals_box)
-        sals_layout.setContentsMargins(8, 14, 8, 6)
-        sals_layout.setHorizontalSpacing(6)
-        sals_layout.setVerticalSpacing(6)
+        sals_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        sals_layout.setHorizontalSpacing(8)
+        sals_layout.setVerticalSpacing(8)
         sals_layout.setColumnStretch(1, 1)
         controls_layout.addWidget(sals_box)
 
@@ -329,8 +330,8 @@ class VimbaSALSWidget(QWidget):
         preview_box = QGroupBox("Live EDF preview")
         preview_box.setStyleSheet(GROUP_BOX_STYLE)
         preview_layout = QVBoxLayout(preview_box)
-        preview_layout.setContentsMargins(*PANEL_MARGINS)
-        preview_layout.setSpacing(6)
+        preview_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        preview_layout.setSpacing(BLOCK_SPACING)
         body_layout.addWidget(preview_box, 1)
 
         self.figure = Figure(figsize=(6, 5))
@@ -341,6 +342,7 @@ class VimbaSALSWidget(QWidget):
         self.ax = self.figure.add_subplot(111)
         self.image_artist = None
         preview_layout.addWidget(self.canvas, 1)
+        self.canvas.setVisible(False)
 
         self.status_label = QLabel("Vimba is not connected.")
         self.status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -357,7 +359,7 @@ class VimbaSALSWidget(QWidget):
             self.offset_y_spinbox,
             self.fps_spinbox,
         ]:
-            widget.setFixedHeight(26)
+            widget.setFixedHeight(self.FIELD_HEIGHT)
         for widget in [
             self.width_spinbox,
             self.height_spinbox,
@@ -365,9 +367,9 @@ class VimbaSALSWidget(QWidget):
             self.offset_y_spinbox,
             self.fps_spinbox,
         ]:
-            widget.setMinimumWidth(70)
-        self.pixel_format_combo.setFixedHeight(30)
-        self.reverse_y_checkbox.setMinimumHeight(26)
+            widget.setMinimumWidth(self.CAMERA_SPIN_WIDTH)
+        self.pixel_format_combo.setFixedHeight(self.FIELD_HEIGHT)
+        self.reverse_y_checkbox.setMinimumHeight(self.FIELD_HEIGHT)
 
     def style_sals_fields(self):
         for widget in [
@@ -378,19 +380,51 @@ class VimbaSALSWidget(QWidget):
             self.center_x_edit,
             self.center_y_edit,
         ]:
-            widget.setFixedHeight(28)
+            widget.setFixedHeight(self.FIELD_HEIGHT)
             widget.setMinimumWidth(0)
         self.geometry_selector.setMinimumWidth(0)
-        self.geometry_selector.setFixedHeight(30)
+        self.geometry_selector.setFixedHeight(self.FIELD_HEIGHT)
         self.geometry_selector.combo.setMinimumWidth(0)
-        self.geometry_selector.combo.setFixedHeight(30)
-        self.geometry_selector.edit_button.setFixedHeight(30)
+        self.geometry_selector.combo.setFixedHeight(self.FIELD_HEIGHT)
+        self.geometry_selector.edit_button.setFixedHeight(self.FIELD_HEIGHT)
         self.geometry_selector.edit_button.setFixedWidth(54)
 
+    def form_label(self, text, minimum_width=0):
+        label = QLabel(f"{text}:")
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        if minimum_width:
+            label.setMinimumWidth(minimum_width)
+            label.setMaximumWidth(minimum_width)
+        return label
+
+    def section_label(self, text):
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        return label
+
+    def camera_field_row(self, label_text, field, add_stretch=False):
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(self.form_label(label_text, self.CAMERA_LABEL_WIDTH))
+        layout.addWidget(field, 0 if add_stretch else 1)
+        if add_stretch:
+            layout.addStretch(1)
+        return layout
+
+    def camera_double_field_row(self, left_label_text, left_field, right_label_text, right_field):
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(self.form_label(left_label_text, self.CAMERA_SHORT_LABEL_WIDTH))
+        layout.addWidget(left_field)
+        layout.addWidget(self.form_label(right_label_text, self.CAMERA_OFFSET_LABEL_WIDTH))
+        layout.addWidget(right_field)
+        layout.addStretch(1)
+        return layout
+
     def add_labeled_field(self, layout, row, label_text, widget):
-        label = QLabel(label_text)
-        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        label.setMinimumWidth(100)
+        label = self.form_label(label_text, self.SALS_LABEL_WIDTH)
         layout.addWidget(label, row, 0)
         layout.addWidget(widget, row, 1)
 
@@ -1137,6 +1171,7 @@ class VimbaSALSWidget(QWidget):
     def update_preview(self):
         if self.current_frame is None:
             return
+        self.canvas.setVisible(True)
         image = np.asarray(self.current_frame, dtype=float)
         display_image, vmin, vmax = self.preview_display_image(image)
         self.ax.clear()
