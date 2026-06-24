@@ -163,7 +163,7 @@ REPORT_EMAIL = "nathan.piaget@univ-grenoble-alpes.fr"
 GITHUB_OWNER = "nathan38p"
 GITHUB_REPO = "LRPhoton"
 GITHUB_BRANCH = "main"
-# Invisible build marker: no functional change.
+# Invisible build marker for update validation: no functional change.
 GITHUB_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
 UPDATE_INFO_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits/{GITHUB_BRANCH}"
 RAW_FILE_URL = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}"
