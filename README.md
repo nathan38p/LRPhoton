@@ -2,16 +2,11 @@
 
 ## Overview
 
-<table style="border: 0;">
-  <tr>
-    <td style="border: 0; padding: 0 18px 0 0; vertical-align: middle;">
-      <img src="assets/LRPhoton.png" alt="LRPhoton" height="140">
-    </td>
-    <td style="border: 0; padding: 0; vertical-align: middle;">
-      LRPhoton is a Python application for SAXS/WAXS data processing and visualization dedicated to laboratory and synchrotron scattering data, including XENOCS laboratory SAXS systems and ESRF beamlines ID13 and ID02.
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="assets/LRPhoton.png" alt="LRPhoton" height="140">
+</p>
+
+LRPhoton is a Python application for SAXS/WAXS data processing and visualization dedicated to laboratory and synchrotron scattering data, including XENOCS laboratory SAXS systems and ESRF beamlines ID13 and ID02.
 
 ## Windows installation
 
