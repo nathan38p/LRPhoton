@@ -169,7 +169,7 @@ python3 main.py
 
 ## Credits
 
-<p>
+<p align="center">
   <a href="https://lrp.univ-grenoble-alpes.fr/"><img src="assets/LRP.svg" alt="LRP" height="36"></a>
   <a href="https://www.cnrs.fr/"><img src="assets/CNRS.png" alt="CNRS" height="36"></a>
   <a href="https://www.univ-grenoble-alpes.fr/"><img src="assets/UGA.png" alt="Université Grenoble Alpes" height="36"></a>
