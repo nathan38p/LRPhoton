@@ -177,6 +177,6 @@ python3 main.py
   <a href="https://www.univ-grenoble-alpes.fr/"><img src="assets/UGA.png" alt="Université Grenoble Alpes" height="44"></a>
 </p>
 
-LRPhoton was developped during Nathan Piaget's PhD at the laboratoire Rhéologie et Procédés (LRP, CNRS / Université Grenoble Alpes).
+LRPhoton was developped during Nathan Piaget's PhD at the laboratoire Rhéologie et Procédés (LRP, UMR 5520, CNRS / Université Grenoble Alpes).
 
 If LRPhoton contributes to results presented in a scientific publication, please cite the software.
