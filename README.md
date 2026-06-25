@@ -1,6 +1,6 @@
 # LRPhoton
 
-## Overview
+## 🔎 Overview
 
 <p align="center">
   <img src="assets/LRPhoton.png" alt="LRPhoton" height="140">
