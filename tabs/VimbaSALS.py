@@ -1,4 +1,5 @@
 from datetime import datetime
+import os
 from pathlib import Path
 import sys
 
@@ -476,9 +477,9 @@ class VimbaSALSWidget(QWidget):
         try:
             self.vmb = VmbSystem.get_instance()
             self.vmb.__enter__()
-            cameras = list(self.vmb.get_all_cameras())
+            cameras = self.discover_vimba_cameras()
             if not cameras:
-                raise RuntimeError("No Vimba camera detected. Close Vimba X Viewer if it has full access.")
+                raise RuntimeError(self.no_vimba_camera_message())
 
             self.camera = self.select_mako_camera(cameras)
             self.camera.__enter__()
@@ -489,6 +490,59 @@ class VimbaSALSWidget(QWidget):
         except Exception as exc:
             self.disconnect_camera()
             self.status_label.setText(f"Camera connection failed: {exc}")
+
+    def discover_vimba_cameras(self):
+        if self.vmb is None:
+            return []
+        try:
+            discover_cameras = getattr(self.vmb, "_Impl__discover_cameras", None)
+            if callable(discover_cameras):
+                discover_cameras()
+        except Exception:
+            pass
+        try:
+            return list(self.vmb.get_all_cameras())
+        except Exception:
+            return []
+
+    def no_vimba_camera_message(self):
+        gentl_paths = self.vimba_gentl_paths_text()
+        transport_layers = self.vimba_transport_layers_text()
+        message = (
+            "No Vimba camera detected. Quit Vimba X Viewer, unplug/replug the camera, "
+            "then retry. On macOS with a GigE camera, allow LRPhoton/Python in "
+            "System Settings > Privacy & Security > Local Network."
+        )
+        if transport_layers:
+            message += f" Transport layers loaded: {transport_layers}."
+        if gentl_paths:
+            message += f" GENICAM_GENTL64_PATH={gentl_paths}."
+        return message
+
+    def vimba_transport_layers_text(self):
+        if self.vmb is None:
+            return ""
+        try:
+            layers = list(self.vmb.get_all_transport_layers())
+        except Exception:
+            return ""
+        layer_ids = []
+        for layer in layers:
+            try:
+                layer_ids.append(Path(str(layer.get_id())).name)
+            except Exception:
+                pass
+        return ", ".join(layer_ids)
+
+    def vimba_gentl_paths_text(self):
+        paths = os.environ.get("GENICAM_GENTL64_PATH", "")
+        if not paths:
+            return ""
+        return os.pathsep.join(
+            str(Path(path).expanduser().resolve())
+            for path in paths.split(os.pathsep)
+            if path
+        )
 
     def select_mako_camera(self, cameras):
         for camera in cameras:

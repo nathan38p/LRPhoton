@@ -48,12 +48,20 @@ def configure_bundled_vimbax_runtime():
         return
 
     frameworks_path = bundled_file_path("assets", "vimbax", "Frameworks")
+    system_cti_path = Path("/Library/Application Support/Allied Vision/Vimba X/cti")
     cti_path = bundled_file_path("assets", "vimbax", "cti")
     if frameworks_path.exists():
-        os.environ["VIMBA_X_HOME"] = str(frameworks_path)
-    if cti_path.exists():
-        os.environ["GENICAM_GENTL64_PATH"] = str(cti_path)
-        os.environ["GENICAM_GENTL32_PATH"] = str(cti_path)
+        os.environ.setdefault("VIMBA_X_HOME", str(frameworks_path))
+    cti_paths = [path for path in (system_cti_path, cti_path) if path.exists()]
+    if cti_paths:
+        for variable in ("GENICAM_GENTL64_PATH", "GENICAM_GENTL32_PATH"):
+            values = [
+                str(Path(path).expanduser().resolve())
+                for path in os.environ.get(variable, "").split(os.pathsep)
+                if path
+            ]
+            values.extend(str(path.resolve()) for path in cti_paths)
+            os.environ[variable] = os.pathsep.join(dict.fromkeys(values))
 
 
 def ensure_local_python_wheels():
@@ -155,6 +163,7 @@ from PySide6.QtGui import QColor, QPainter, QPixmap, QIcon
 # Application version and author
 APP_NAME = "LRPhoton"
 APP_VERSION = "2026.05"
+APP_SUBTITLE = "SAXS/WAXS/SALS data processing"
 APP_AUTHOR = "Nathan Piaget - Laboratoire Rhéologie et Procédés"
 APP_AFFILIATION = "CNRS - Université Grenoble Alpes"
 # Constants
@@ -359,7 +368,7 @@ class MainWindow(QMainWindow):
         title_row.addWidget(self.dev_label)
         title_row.addStretch()
 
-        subtitle = QLabel("SAXS/WAXS/SALS data processing")
+        subtitle = QLabel(APP_SUBTITLE)
         subtitle.setStyleSheet("""
             QLabel {
                 font-size: 12px;
@@ -804,7 +813,21 @@ class MainWindow(QMainWindow):
                 color: #222222;
             }
         """)
-        layout.addWidget(title_label)
+        subtitle_label = QLabel(APP_SUBTITLE)
+        subtitle_label.setAlignment(Qt.AlignCenter)
+        subtitle_label.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                color: #777777;
+            }
+        """)
+
+        title_block = QVBoxLayout()
+        title_block.setContentsMargins(0, 0, 0, 0)
+        title_block.setSpacing(0)
+        title_block.addWidget(title_label)
+        title_block.addWidget(subtitle_label)
+        layout.addLayout(title_block)
 
         if self.is_development_copy():
             build_info_html = f"Build: {self.get_build_name()}"
@@ -816,7 +839,7 @@ class MainWindow(QMainWindow):
 
         info_label = QLabel(
             f"<div style='text-align:center;'>"
-            f"<b>{APP_AUTHOR}</b><br><br>"
+            f"<b>{APP_AUTHOR}</b><br>"
             f"{APP_AFFILIATION}<br><br>"
             f"<a href='{GITHUB_URL}'>{GITHUB_URL}</a><br><br>"
             f"{build_info_html}"
