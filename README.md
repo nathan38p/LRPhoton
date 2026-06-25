@@ -166,3 +166,5 @@ python3 main.py
 ## Credits
 
 LRPhoton was developped during Nathan Piaget's PhD at the laboratoire Rhéologie et Procédés (LRP, CNRS / Université Grenoble Alpes).
+
+If LRPhoton contributes to results presented in a scientific publication, please cite the software.
