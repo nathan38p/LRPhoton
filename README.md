@@ -56,6 +56,8 @@ The LRPhoton files stay in `/Applications/LRPhoton`.
 
 ## Update System
 
+Development is ongoing, new features, improvements and bug fixes are added regularly.
+
 At startup, LRPhoton automatically checks for updates from the GitHub repository and downloads modified internal files when a newer version is available.
 
 ## Troubleshooting
