@@ -135,11 +135,51 @@ def number_value(text):
     return float(text)
 
 
+def parse_header_text(header_text):
+    if header_text is None:
+        return {}
+
+    if isinstance(header_text, bytes):
+        header_text = header_text.decode("latin-1", errors="ignore")
+
+    mapping = {}
+    for raw_line in str(header_text).splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+
+        if "=" in line:
+            key, value = line.split("=", 1)
+        elif ":" in line:
+            key, value = line.split(":", 1)
+        else:
+            continue
+
+        key = key.strip()
+        value = value.strip()
+        if key:
+            mapping[key] = value
+
+    return mapping
+
+
 def header_number(header, *keys):
+    if header is None:
+        return None
+
+    if isinstance(header, (str, bytes)):
+        header = parse_header_text(header)
+    elif not isinstance(header, dict):
+        try:
+            header = dict(header)
+        except Exception:
+            return None
+
+    normalized = {str(k): str(v) for k, v in header.items()}
     for key in keys:
-        if key in header:
+        if key in normalized:
             try:
-                return number_value(header[key])
+                return number_value(normalized[key])
             except (TypeError, ValueError):
                 return None
     return None
@@ -147,6 +187,14 @@ def header_number(header, *keys):
 
 def header_to_line_geometry(header, fallback=None, name="XENOCS"):
     fallback = dict(fallback or {})
+    if isinstance(header, (str, bytes)):
+        header = parse_header_text(header)
+    elif not isinstance(header, dict):
+        try:
+            header = dict(header)
+        except Exception:
+            header = {}
+
     cx = header_number(header, "Center_1", "center_1", "Center X", "CenterX", "center_x", "BeamCenterX", "Beam_x", "beam_x")
     cy = header_number(header, "Center_2", "center_2", "Center Y", "CenterY", "center_y", "BeamCenterY", "Beam_y", "beam_y")
     px = header_number(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX", "pixel_size_x", "x_pixel_size", "pixel_x")

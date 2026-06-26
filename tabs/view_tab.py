@@ -1,5 +1,6 @@
 import fnmatch
 import json
+import re
 from pathlib import Path
 
 import h5py
@@ -50,7 +51,7 @@ from .instrument_presets import (
     ID13_DEFAULT_WAVELENGTH_A,
 )
 from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path
-from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
+from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton, parse_header_text
 from .ui_style import (
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
@@ -1698,12 +1699,34 @@ class ViewTab(QWidget):
 
         self.images = None
         self.headers = {}
+        self.raw_header_text = ""
         frames = []
 
         edf = fabio.open(str(path))
 
         try:
             nframes = int(getattr(edf, "nframes", 1) or 1)
+
+            header_text = ""
+            try:
+                with open(path, "rb") as handle:
+                    header_bytes = handle.read(65536)
+                    header_text = header_bytes.decode("latin-1", errors="ignore")
+
+                header_match = re.search(r"EDF_HeaderSize\s*=\s*(\d+)", header_text)
+                if header_match:
+                    header_size = int(header_match.group(1))
+                    with open(path, "rb") as handle:
+                        header_bytes = handle.read(header_size)
+                        header_text = header_bytes.decode("latin-1", errors="ignore")
+            except Exception:
+                header_text = ""
+
+            if header_text:
+                self.raw_header_text = header_text
+                parsed_header = parse_header_text(header_text)
+            else:
+                parsed_header = {}
 
             if nframes <= 1:
                 frames.append(np.array(edf.data, dtype=float).copy())
@@ -1716,6 +1739,9 @@ class ViewTab(QWidget):
 
                     if i == 0:
                         self.headers = dict(frame.header)
+
+            if parsed_header:
+                self.headers = {**self.headers, **parsed_header}
 
         finally:
             try:
