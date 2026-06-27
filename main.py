@@ -9,6 +9,9 @@ import zipfile
 import subprocess
 import base64
 import importlib.util
+import locale
+import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -178,6 +181,7 @@ GITHUB_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
 UPDATE_INFO_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits/{GITHUB_BRANCH}"
 RAW_FILE_URL = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}"
 SOURCE_ZIP_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
+STATS_PING_URL = "https://lrphoton-stats.lrphoton-stats.workers.dev/ping"
 LOCAL_VERSION_FILE = Path(__file__).resolve().parent / ".lrphoton_commit"
 USER_SETTINGS_FILE = Path.home() / ".lrphoton" / "settings.json"
 
@@ -291,6 +295,61 @@ class ColoredTabBar(QTabBar):
 
 
 class MainWindow(QMainWindow):
+    def load_user_settings(self):
+        try:
+            return json.loads(USER_SETTINGS_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def save_user_settings(self, data):
+        try:
+            USER_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            USER_SETTINGS_FILE.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        except OSError:
+            pass
+
+    def get_or_create_install_id(self):
+        data = self.load_user_settings()
+        install_id = str(data.get("install_id", "")).strip()
+        if install_id:
+            return install_id
+
+        install_id = str(uuid.uuid4())
+        data["install_id"] = install_id
+        self.save_user_settings(data)
+        return install_id
+
+    def get_system_language(self):
+        for getter in (
+            lambda: locale.getlocale()[0],
+            lambda: locale.getdefaultlocale()[0],
+        ):
+            try:
+                language = getter()
+                if language:
+                    return str(language)
+            except Exception:
+                pass
+        return "unknown"
+
+    def get_usage_channel(self):
+        return "development" if self.is_development_copy() else "stable"
+
+    def send_usage_ping(self):
+        def worker():
+            try:
+                payload = {
+                    "install_id": self.get_or_create_install_id(),
+                    "current_version": APP_VERSION,
+                    "platform": platform.system() or sys.platform,
+                    "language": self.get_system_language(),
+                    "channel": self.get_usage_channel(),
+                }
+                requests.post(STATS_PING_URL, json=payload, timeout=3)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
     def __init__(self):
         super().__init__()
 
@@ -1504,6 +1563,7 @@ def main():
     """)
 
     window = MainWindow()
+    QTimer.singleShot(2000, window.send_usage_ping)
     if "--force-update-check" in sys.argv:
         QTimer.singleShot(400, lambda: window.check_for_updates(silent=False))
     elif window.can_check_for_updates():
