@@ -389,8 +389,6 @@ ID02_DEFAULT_DISTANCE_M = 10.0002
 ID02_DEFAULT_PIXEL_MM = 0.075
 ID02_DEFAULT_WAVELENGTH_A = 1.01402
 CENTER_X_KEYS = (
-    "Theoretical_Center_1",
-    "theoretical_center_1",
     "Center_1",
     "center_1",
     "CenterX",
@@ -398,10 +396,10 @@ CENTER_X_KEYS = (
     "BeamCenterX",
     "Beam_x",
     "beam_x",
+    "Theoretical_Center_1",
+    "theoretical_center_1",
 )
 CENTER_Y_KEYS = (
-    "Theoretical_Center_2",
-    "theoretical_center_2",
     "Center_2",
     "center_2",
     "CenterY",
@@ -409,6 +407,8 @@ CENTER_Y_KEYS = (
     "BeamCenterY",
     "Beam_y",
     "beam_y",
+    "Theoretical_Center_2",
+    "theoretical_center_2",
 )
 ID13_PYFAI_CONFIG = {
     "application": "pyfai-integrate",
@@ -860,7 +860,10 @@ def pyfai_radial_average(
         from pyFAI.azimuthalIntegrator import AzimuthalIntegrator
 
     img = image.astype(np.float64)
-    invalid_mask = ~np.isfinite(img) | (img <= 0) | (img >= 4e9)
+    # Normal radial integration defaults now match the Test window defaults:
+    # bbox / histogram / cython, no automatic detector mask, no solid-angle correction.
+    # q range and azimuthal sector still come from the Radial parameters panel and remain priority.
+    invalid_mask = None
     pixel1_m = float(pixel_y_mm) * 1e-3
     pixel2_m = float(pixel_x_mm) * 1e-3
     wavelength_m = wavelength_to_nm(float(wavelength_a)) * 1e-9
@@ -922,10 +925,9 @@ def pyfai_radial_average(
         radial_range=radial_range,
         azimuth_range=azimuth_range,
         mask=invalid_mask,
-        # Full pixel splitting is slower but matches pyFAI's reference behaviour
-        # better at low q, where a single detector pixel covers a large q interval.
-        method=("full", "histogram", "cython"),
-        correctSolidAngle=True,
+        # Default chosen from the Test window comparison.
+        method=("bbox", "histogram", "cython"),
+        correctSolidAngle=False,
     )
 
     q_axis = np.asarray(getattr(result, "radial", result[0]), dtype=float)
@@ -966,7 +968,483 @@ def pyfai_radial_average(
     if not np.any(valid_bins):
         raise ValueError("pyFAI returned no valid I(q) bins after filtering.")
 
+
     return q_axis[valid_bins], intensity[valid_bins], counts[valid_bins].astype(int), invalid_mask
+
+
+# ============================================================
+# ==================== PYFAI RADIAL TEST DIALOG ==============
+# ============================================================
+
+class PyFAIRadialTestDialog(QDialog):
+    """Interactive pyFAI radial integration tester with a reference DAT overlay."""
+
+    def __init__(self, parent, image, file_path, geometry, header=None, frame_count=1, frame_index=None, poni_path=None):
+        super().__init__(parent)
+        self.setWindowTitle("pyFAI radial integration test")
+        self.resize(1100, 760)
+
+        self.image = np.asarray(image, dtype=np.float64)
+        self.file_path = Path(file_path)
+        self.geometry = dict(geometry)
+        self.header = dict(header or {})
+        self.frame_count = int(frame_count or 1)
+        self.frame_index = frame_index
+        self.poni_path = poni_path
+        self.reference_path = None
+
+        layout = QVBoxLayout(self)
+
+        top_layout = QGridLayout()
+        layout.addLayout(top_layout)
+
+        self.geometry_info_label = QLabel(self.geometry_summary_text())
+        self.geometry_info_label.setWordWrap(True)
+        self.geometry_info_label.setStyleSheet("font-size: 11px; color: #333; padding: 4px;")
+
+        self.reference_combo = QComboBox()
+        self.reference_combo.addItem("No reference", None)
+        self.populate_reference_combo()
+        self.reference_combo.currentIndexChanged.connect(self.recalculate)
+        for index in range(self.reference_combo.count()):
+            item_text = self.reference_combo.itemText(index)
+            if item_text.endswith("XENOCS.dat") or "XENOCS" in item_text:
+                self.reference_combo.setCurrentIndex(index)
+                break
+        self.reference_browse_button = QPushButton("Reference .dat...")
+        self.reference_browse_button.clicked.connect(self.choose_reference_file)
+
+        self.reference_unit_combo = QComboBox()
+        self.reference_unit_combo.addItem("Auto-detect reference q unit", "auto")
+        self.reference_unit_combo.addItem("Reference q in nm⁻¹", "nm")
+        self.reference_unit_combo.addItem("Reference q in Å⁻¹ → convert to nm⁻¹", "angstrom")
+        self.reference_unit_combo.currentIndexChanged.connect(self.recalculate)
+
+        self.split_combo = QComboBox()
+        for value in ["no", "bbox", "full", "pseudo"]:
+            self.split_combo.addItem(value, value)
+        self.split_combo.setCurrentText("bbox")
+        self.split_combo.currentIndexChanged.connect(self.recalculate)
+
+        self.algorithm_combo = QComboBox()
+        for value in ["histogram", "csr", "lut"]:
+            self.algorithm_combo.addItem(value, value)
+        self.algorithm_combo.currentIndexChanged.connect(self.recalculate)
+
+        self.implementation_combo = QComboBox()
+        for value in ["cython", "python"]:
+            self.implementation_combo.addItem(value, value)
+        self.implementation_combo.currentIndexChanged.connect(self.recalculate)
+
+        self.solid_angle_checkbox = QCheckBox("correctSolidAngle")
+        self.solid_angle_checkbox.setChecked(False)
+        self.solid_angle_checkbox.stateChanged.connect(self.recalculate)
+
+        self.mask_combo = QComboBox()
+        self.mask_combo.addItem("Strict: finite, >0, <4e9", "strict")
+        self.mask_combo.addItem("Finite only", "finite_only")
+        self.mask_combo.addItem("Finite and positive", "finite_positive")
+        self.mask_combo.addItem("No mask", "none")
+        self.mask_combo.setCurrentIndex(3)
+        self.mask_combo.currentIndexChanged.connect(self.recalculate)
+
+        self.center_x_shift = QDoubleSpinBox()
+        self.center_x_shift.setDecimals(3)
+        self.center_x_shift.setRange(-50, 50)
+        self.center_x_shift.setSingleStep(0.1)
+        self.center_x_shift.setValue(0)
+        self.center_x_shift.valueChanged.connect(self.recalculate)
+
+        self.center_y_shift = QDoubleSpinBox()
+        self.center_y_shift.setDecimals(3)
+        self.center_y_shift.setRange(-50, 50)
+        self.center_y_shift.setSingleStep(0.1)
+        self.center_y_shift.setValue(0)
+        self.center_y_shift.valueChanged.connect(self.recalculate)
+
+        self.n_bins_spin = QSpinBox()
+        self.n_bins_spin.setRange(10, 10000)
+        self.n_bins_spin.setValue(int(self.geometry.get("n_bins", 1000)))
+        self.n_bins_spin.valueChanged.connect(self.recalculate)
+
+        self.q_min_edit = QLineEdit(str(self.geometry.get("q_min", "") or ""))
+        self.q_min_edit.setPlaceholderText("auto")
+        self.q_min_edit.textChanged.connect(self.recalculate)
+        self.q_max_edit = QLineEdit(str(self.geometry.get("q_max", "") or ""))
+        self.q_max_edit.setPlaceholderText("auto")
+        self.q_max_edit.textChanged.connect(self.recalculate)
+
+        self.sector_min_spin = QDoubleSpinBox()
+        self.sector_min_spin.setDecimals(3)
+        self.sector_min_spin.setRange(-360, 360)
+        self.sector_min_spin.setValue(float(self.geometry.get("sector_min", 0)))
+        self.sector_min_spin.valueChanged.connect(self.recalculate)
+        self.sector_max_spin = QDoubleSpinBox()
+        self.sector_max_spin.setDecimals(3)
+        self.sector_max_spin.setRange(-360, 360)
+        self.sector_max_spin.setValue(float(self.geometry.get("sector_max", 360)))
+        self.sector_max_spin.valueChanged.connect(self.recalculate)
+
+        row = 0
+        top_layout.addWidget(QLabel("Reference:"), row, 0)
+        top_layout.addWidget(self.reference_combo, row, 1, 1, 3)
+        top_layout.addWidget(self.reference_browse_button, row, 4)
+        top_layout.addWidget(self.reference_unit_combo, row, 5)
+        row += 1
+        top_layout.addWidget(QLabel("Geometry used:"), row, 0)
+        top_layout.addWidget(self.geometry_info_label, row, 1, 1, 5)
+        row += 1
+        # UI lines after geometry row, previously misplaced in geometry_summary_text
+        top_layout.addWidget(QLabel("Pixel splitting:"), row, 0)
+        top_layout.addWidget(self.split_combo, row, 1)
+        top_layout.addWidget(QLabel("Algorithm:"), row, 2)
+        top_layout.addWidget(self.algorithm_combo, row, 3)
+        top_layout.addWidget(QLabel("Implementation:"), row, 4)
+        top_layout.addWidget(self.implementation_combo, row, 5)
+        row += 1
+        top_layout.addWidget(self.solid_angle_checkbox, row, 0)
+        top_layout.addWidget(QLabel("Mask:"), row, 1)
+        top_layout.addWidget(self.mask_combo, row, 2, 1, 2)
+        row += 1
+        top_layout.addWidget(QLabel("Center Δx px:"), row, 0)
+        top_layout.addWidget(self.center_x_shift, row, 1)
+        top_layout.addWidget(QLabel("Center Δy px:"), row, 2)
+        top_layout.addWidget(self.center_y_shift, row, 3)
+        top_layout.addWidget(QLabel("Bins:"), row, 4)
+        top_layout.addWidget(self.n_bins_spin, row, 5)
+        row += 1
+        top_layout.addWidget(QLabel("q min nm⁻¹:"), row, 0)
+        top_layout.addWidget(self.q_min_edit, row, 1)
+        top_layout.addWidget(QLabel("q max nm⁻¹:"), row, 2)
+        top_layout.addWidget(self.q_max_edit, row, 3)
+        top_layout.addWidget(QLabel("ψ min/max:"), row, 4)
+        sector_box = QHBoxLayout()
+        sector_box.addWidget(self.sector_min_spin)
+        sector_box.addWidget(self.sector_max_spin)
+        top_layout.addLayout(sector_box, row, 5)
+
+        button_layout = QHBoxLayout()
+        self.save_button = QPushButton("Save tested curve .dat")
+        self.save_button.clicked.connect(self.save_current_curve)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        button_layout.addWidget(self.save_button)
+        button_layout.addStretch(1)
+        button_layout.addWidget(self.close_button)
+        layout.addLayout(button_layout)
+
+        self.canvas = PlotCanvas()
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        layout.addWidget(self.toolbar)
+        layout.addWidget(self.canvas, stretch=1)
+
+        self.log_label = QLabel("")
+        self.log_label.setWordWrap(True)
+        layout.addWidget(self.log_label)
+
+        self.current_q = None
+        self.current_i = None
+        self.current_counts = None
+        self.current_label = None
+        self.recalculate()
+    def geometry_summary_text(self):
+        """Show the geometry actually used by the test integration, with header values when available."""
+        header_values, missing = header_q_geometry_values(self.header)
+
+        used_cx = float(self.geometry.get("xc", 0.0))
+        used_cy = float(self.geometry.get("yc", 0.0))
+        used_dist = float(self.geometry.get("distance_m", 0.0))
+        used_px = float(self.geometry.get("pixel_x_mm", 0.0))
+        used_py = float(self.geometry.get("pixel_y_mm", 0.0))
+        used_wav_a = float(self.geometry.get("wavelength_a", 0.0))
+        used_wav_nm = wavelength_to_nm(used_wav_a) if used_wav_a > 0 else 0.0
+
+        header_cx = header_values.get("cx")
+        header_cy = header_values.get("cy")
+        header_dist = header_values.get("dist")
+        header_px = header_pixel_to_mm(header_values.get("px"))
+        header_py = header_pixel_to_mm(header_values.get("py"))
+        header_wav_a = header_wavelength_to_a(header_values.get("wav"))
+
+        text = (
+            f"Used: center=({used_cx:.6g}, {used_cy:.6g}) px ; "
+            f"distance={used_dist:.6g} m ; "
+            f"pixel=({used_px:.6g}, {used_py:.6g}) mm ; "
+            f"λ={used_wav_a:.6g} Å = {used_wav_nm:.6g} nm"
+        )
+
+        header_parts = []
+        if header_cx is not None and header_cy is not None:
+            header_parts.append(f"center=({header_cx:.6g}, {header_cy:.6g}) px")
+        if header_dist is not None:
+            header_parts.append(f"distance={header_dist:.6g} m")
+        if header_px is not None and header_py is not None:
+            header_parts.append(f"pixel=({header_px:.6g}, {header_py:.6g}) mm")
+        if header_wav_a is not None:
+            header_parts.append(f"λ={header_wav_a:.6g} Å")
+
+        if header_parts:
+            text += "\nHeader: " + " ; ".join(header_parts)
+        else:
+            text += "\nHeader: no complete geometry found"
+
+        center_source = self.header.get("Center source")
+        if center_source:
+            text += f" ; center source={center_source}"
+
+        return text
+
+    def populate_reference_combo(self):
+        folder = self.file_path.parent
+        for dat_path in sorted(folder.glob("*.dat")):
+            self.reference_combo.addItem(dat_path.name, str(dat_path))
+
+    def choose_reference_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose reference DAT", str(self.file_path.parent), "DAT files (*.dat);;All files (*)")
+        if not path:
+            return
+        path = str(Path(path))
+        for index in range(self.reference_combo.count()):
+            if self.reference_combo.itemData(index) == path:
+                self.reference_combo.setCurrentIndex(index)
+                return
+        self.reference_combo.addItem(Path(path).name, path)
+        self.reference_combo.setCurrentIndex(self.reference_combo.count() - 1)
+        self.reference_unit_combo.setCurrentIndex(0)
+
+    def detect_reference_q_unit(self, path):
+        """
+        Detects q unit in a .dat file header robustly.
+        Returns 'nm' or 'angstrom'.
+        """
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                header_lines = []
+                for _ in range(150):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    header_lines.append(line)
+        except Exception:
+            return "nm"
+
+        header_text = "".join(header_lines).lower()
+        compact = header_text.replace(" ", "").replace("_", "").replace("⁻", "-").replace("−", "-")
+        # Detect XENOCS and pyFAI headers for Angstrom
+        if ("q(a" in compact or "q(å" in compact or "q(angstrom" in compact or "q(ang" in compact):
+            return "angstrom"
+        # Detect nm headers
+        if ("q_nm-1" in compact or "q_nm^-1" in compact or "q/nm" in compact or "q / nm" in compact or "q(nm" in compact or "nm-1" in compact):
+            return "nm"
+        # If nothing detected, inspect first non-comment numeric line
+        for line in header_lines:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.replace(",", ".").split()
+            if len(parts) < 2:
+                continue
+            try:
+                qval = float(parts[0])
+            except Exception:
+                continue
+            if qval < 0.05:
+                return "angstrom"
+            else:
+                return "nm"
+        return "nm"
+
+    def load_dat_curve(self, path):
+        """Load the first two numeric columns of a DAT file while tolerating pyFAI/XENOCS headers."""
+        q_values = []
+        intensity_values = []
+        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                parts = stripped.replace(",", ".").split()
+                if len(parts) < 2:
+                    continue
+                try:
+                    q_value = float(parts[0])
+                    intensity_value = float(parts[1])
+                except ValueError:
+                    continue
+                q_values.append(q_value)
+                intensity_values.append(intensity_value)
+
+        if not q_values:
+            raise ValueError("no numeric q/I rows found")
+        return np.asarray(q_values, dtype=float), np.asarray(intensity_values, dtype=float)
+
+    def parse_float_or_zero(self, text):
+        text = normalize_decimal_text(text).strip()
+        if not text:
+            return 0.0
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0
+
+    def build_mask(self):
+        mode = self.mask_combo.currentData()
+        if mode == "none":
+            return None
+        if mode == "finite_only":
+            return ~np.isfinite(self.image)
+        if mode == "finite_positive":
+            return ~np.isfinite(self.image) | (self.image <= 0)
+        return ~np.isfinite(self.image) | (self.image <= 0) | (self.image >= 4e9)
+
+    def make_integrator(self):
+        try:
+            import pyFAI
+            try:
+                from pyFAI.integrator.azimuthal import AzimuthalIntegrator
+            except Exception:
+                from pyFAI.azimuthalIntegrator import AzimuthalIntegrator
+        except Exception as exc:
+            raise RuntimeError(f"pyFAI is not available: {exc}") from exc
+
+        dx = float(self.center_x_shift.value())
+        dy = float(self.center_y_shift.value())
+        if self.poni_path is not None and abs(dx) < 1e-12 and abs(dy) < 1e-12:
+            return pyFAI.load(str(self.poni_path))
+
+        pixel1_m = float(self.geometry["pixel_y_mm"]) * 1e-3
+        pixel2_m = float(self.geometry["pixel_x_mm"]) * 1e-3
+        wavelength_m = wavelength_to_nm(float(self.geometry["wavelength_a"])) * 1e-9
+        return AzimuthalIntegrator(
+            dist=float(self.geometry["distance_m"]),
+            poni1=(float(self.geometry["yc"]) + dy) * pixel1_m,
+            poni2=(float(self.geometry["xc"]) + dx) * pixel2_m,
+            pixel1=pixel1_m,
+            pixel2=pixel2_m,
+            wavelength=wavelength_m,
+        )
+
+    def reference_curve(self):
+        path = self.reference_combo.currentData()
+        if not path:
+            return None, None, None
+        try:
+            q, intensity = self.load_dat_curve(path)
+
+            # In this test window, every curve is compared in q / nm⁻¹.
+            selected_unit = self.reference_unit_combo.currentData() if hasattr(self, "reference_unit_combo") else "auto"
+            detected_unit = self.detect_reference_q_unit(path) if selected_unit == "auto" else selected_unit
+            if detected_unit == "angstrom":
+                q = q * 10.0
+
+            valid = np.isfinite(q) & np.isfinite(intensity) & (q > 0) & (intensity > 0)
+            if not np.any(valid):
+                raise ValueError("reference DAT contains no positive finite q/I pairs")
+
+            label = Path(path).name
+            return q[valid], intensity[valid], label
+        except Exception as exc:
+            self.log_label.clear()
+            return None, None, None
+
+    def recalculate(self):
+        try:
+            q_min = self.parse_float_or_zero(self.q_min_edit.text())
+            q_max = self.parse_float_or_zero(self.q_max_edit.text())
+            radial_range = None
+            if q_min > 0 or q_max > 0:
+                radial_range = (q_min if q_min > 0 else None, q_max if q_max > 0 else None)
+
+            sector_min = float(self.sector_min_spin.value())
+            sector_max = float(self.sector_max_spin.value())
+            azimuth_range = None
+            if abs(sector_max - sector_min) >= 1e-9 and abs((sector_max - sector_min) % 360.0) >= 1e-9:
+                if -180.0 <= sector_min <= 180.0 and -180.0 <= sector_max <= 180.0 and sector_min < sector_max:
+                    azimuth_range = (sector_min, sector_max)
+
+            split = self.split_combo.currentData()
+            algorithm = self.algorithm_combo.currentData()
+            implementation = self.implementation_combo.currentData()
+            method = (split, algorithm, implementation)
+
+            integrator = self.make_integrator()
+            result = integrator.integrate1d(
+                self.image.astype(np.float32, copy=False),
+                int(self.n_bins_spin.value()),
+                unit="q_nm^-1",
+                radial_range=radial_range,
+                azimuth_range=azimuth_range,
+                mask=self.build_mask(),
+                dummy=None,
+                delta_dummy=None,
+                method=method,
+                correctSolidAngle=bool(self.solid_angle_checkbox.isChecked()),
+            )
+
+            q = np.asarray(getattr(result, "radial", result[0]), dtype=float)
+            intensity = np.asarray(getattr(result, "intensity", result[1]), dtype=float)
+            counts = getattr(result, "count", None)
+            if counts is None:
+                counts = np.ones_like(q, dtype=int)
+            else:
+                counts = np.asarray(counts, dtype=int)
+            valid = np.isfinite(q) & np.isfinite(intensity) & (q > 0) & (intensity > 0)
+            q = q[valid]
+            intensity = intensity[valid]
+            counts = counts[valid] if counts.size == valid.size else np.ones_like(q, dtype=int)
+            if q.size == 0:
+                raise ValueError("No valid q bins returned by pyFAI.")
+
+            self.current_q = q
+            self.current_i = intensity
+            self.current_counts = counts
+            self.current_label = self.integration_label()
+            self.geometry_info_label.setText(self.geometry_summary_text())
+
+            ax = self.canvas.ax
+            ax.clear()
+            ax.plot(q, intensity, linewidth=1.4, label=self.current_label)
+            ref_q, ref_i, ref_name = self.reference_curve()
+            if ref_q is not None and ref_i is not None:
+                ax.plot(ref_q, ref_i, linewidth=1.4, linestyle="--", label=ref_name)
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+            ax.set_xlabel("q / nm⁻¹")
+            ax.set_ylabel("Intensity / a.u.")
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="lower left")
+            self.canvas.draw_idle()
+            self.log_label.clear()
+        except Exception as exc:
+            self.log_label.clear()
+
+    def integration_label(self):
+        return self.file_path.name
+
+    def save_current_curve(self):
+        if self.current_q is None or self.current_i is None:
+            return
+        parent = self.parent()
+        if parent is None or not hasattr(parent, "write_radial_result"):
+            return
+        safe_label = self.integration_label()
+        safe_label = safe_label.replace(self.file_path.name, "")
+        safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", safe_label).strip("_")
+        stem = f"{self.file_path.stem}_PYFAI_TEST_{safe_label}"
+        try:
+            out_file = parent.write_radial_result(
+                stem,
+                self.current_q,
+                self.current_i,
+                self.current_counts,
+                self.file_path,
+                self.frame_count,
+                frame_index=self.frame_index,
+                poni_path=self.poni_path,
+            )
+            self.log_label.setText(f"Saved: {out_file.name}")
+        except Exception as exc:
+            self.log_label.setText(f"Save error: {exc}")
 
 # ============================================================
 # =========================== CANVAS ==========================
@@ -1700,7 +2178,7 @@ class RadialTab(QWidget):
         filters_layout = QGridLayout()
 
         self.extensions_filter = QLineEdit("*.edf *.h5")
-        self.name_filter = QLineEdit("**")
+        self.name_filter = QLineEdit("*cave*")
 
         self.extensions_filter.textChanged.connect(self.refresh_files)
         self.name_filter.textChanged.connect(self.refresh_files)
@@ -1875,9 +2353,15 @@ class RadialTab(QWidget):
 
         params_layout.addLayout(form)
 
+        integrate_buttons_layout = QHBoxLayout()
         self.integrate_button = QPushButton("Integrate I(q)")
         self.integrate_button.clicked.connect(self.integrate_selected_files)
-        params_layout.addWidget(self.integrate_button)
+        self.radial_test_button = QPushButton("Test")
+        self.radial_test_button.setToolTip("Open an interactive pyFAI radial integration test window")
+        self.radial_test_button.clicked.connect(self.open_radial_test_dialog)
+        integrate_buttons_layout.addWidget(self.integrate_button, stretch=1)
+        integrate_buttons_layout.addWidget(self.radial_test_button, stretch=0)
+        params_layout.addLayout(integrate_buttons_layout)
 
         self.integration_progress = QProgressBar()
         self.integration_progress.setRange(0, 1)
@@ -2061,12 +2545,71 @@ class RadialTab(QWidget):
             self.frame_slider, self.prev_frame_button, self.next_frame_button,
             self.use_sector,
             self.sector_min, self.sector_max, self.q_min_filter, self.q_max_filter,
-            self.n_bins, self.normalization_mode, self.min_pixels_per_bin, self.intensity_scale, self.plot_mode, self.fit_button, self.show_legend, self.integrate_button,
+            self.n_bins, self.normalization_mode, self.min_pixels_per_bin, self.intensity_scale, self.plot_mode, self.fit_button, self.show_legend, self.integrate_button, self.radial_test_button,
             self.image_vmin_label, self.image_vmax_label,
             self.image_vmin_slider, self.image_vmax_slider, self.image_lock_contrast_checkbox, self.image_auto_contrast_button,
             self.integration_progress,
         ]:
             widget.setEnabled(enabled)
+    def open_radial_test_dialog(self):
+        files = self.selected_files()
+        if not files:
+            return
+
+        file_path = Path(files[0])
+        frame_index = None
+        try:
+            if file_path.suffix.lower() in [".h5", ".hdf5"] and self.h5_n_frames > 1:
+                frame_index = max(0, int(self.frame_spin.value()) - 1)
+                image, header = read_image_file(file_path, self.h5_dataset_name, frame_index)
+            else:
+                image, header = read_image_file(file_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Test", f"Could not read selected image:\n{exc}")
+            return
+
+        try:
+            xc = float(self.center_x.value())
+            yc = float(self.center_y.value())
+            distance_m = float(self.distance.value())
+            pixel_x_mm = float(self.pixel_x.value())
+            pixel_y_mm = float(self.pixel_y.value())
+            wavelength_a = float(self.wavelength.value())
+            q_min_text = normalize_decimal_text(self.q_min_filter.text()).strip()
+            q_max_text = normalize_decimal_text(self.q_max_filter.text()).strip()
+            q_min = float(q_min_text) if q_min_text else 0.0
+            q_max = float(q_max_text) if q_max_text else 0.0
+            sector_min = float(self.sector_min.value()) if self.use_sector.isChecked() else 0.0
+            sector_max = float(self.sector_max.value()) if self.use_sector.isChecked() else 360.0
+        except Exception as exc:
+            QMessageBox.warning(self, "Test", f"Invalid radial parameters:\n{exc}")
+            return
+
+        geometry = {
+            "xc": xc,
+            "yc": yc,
+            "distance_m": distance_m,
+            "pixel_x_mm": pixel_x_mm,
+            "pixel_y_mm": pixel_y_mm,
+            "wavelength_a": wavelength_a,
+            "q_min": q_min,
+            "q_max": q_max,
+            "sector_min": sector_min,
+            "sector_max": sector_max,
+            "n_bins": int(self.n_bins.value()),
+        }
+
+        dialog = PyFAIRadialTestDialog(
+            self,
+            image,
+            file_path,
+            geometry,
+            header=header,
+            frame_count=self.h5_n_frames,
+            frame_index=frame_index,
+            poni_path=self.poni_file_for_image(file_path),
+        )
+        dialog.show()
 
         for widget in [
             self.btn_xenocs,
@@ -2670,7 +3213,7 @@ class RadialTab(QWidget):
         user_requested_integrate = self.sender() is self.integrate_button
         integrate_all_h5_frames = user_requested_integrate
         tasks = self.radial_integration_tasks(files, integrate_all_h5_frames)
-        autosave_dat = len(tasks) > 1 and user_requested_integrate
+        autosave_dat = user_requested_integrate
         saved_dat_paths = []
         try:
             q_min_filter, q_max_filter = self.q_range_filter_values()
@@ -2751,15 +3294,23 @@ class RadialTab(QWidget):
                     )
                     intensity = intensity * normalization_factor
 
+                    frame_count = task["frame_count"]
+                    output_preview_path = self.radial_result_path(
+                        file_path.stem,
+                        file_path,
+                        frame_count,
+                        frame_index=task["frame_index"],
+                    )
                     x, y = self.make_plot_arrays(q, intensity)
-                    result_key = task["result_key"]
-                    line, = ax.plot(x, y, linewidth=1.2, label=task["plot_label"])
+                    result_key = output_preview_path.name
+                    line, = ax.plot(x, y, linewidth=1.2, label=result_key)
                     self.last_results[result_key] = (q, intensity, counts)
                     self.last_result_paths[result_key] = file_path
-                    frame_count = task["frame_count"]
                     self.last_result_frame_counts[result_key] = frame_count
                     self.last_result_frame_indices[result_key] = task["frame_index"] if task["is_h5"] else None
                     self.last_result_poni_paths[result_key] = matched_poni
+
+                    # (Diagnostic and reference curve code removed)
 
                     if autosave_dat:
                         out_file = self.write_radial_result(
@@ -2772,6 +3323,14 @@ class RadialTab(QWidget):
                             frame_index=task["frame_index"],
                             poni_path=matched_poni,
                         )
+                        if result_key != out_file.name:
+                            self.last_results[out_file.name] = self.last_results.pop(result_key)
+                            self.last_result_paths[out_file.name] = self.last_result_paths.pop(result_key)
+                            self.last_result_frame_counts[out_file.name] = self.last_result_frame_counts.pop(result_key)
+                            self.last_result_frame_indices[out_file.name] = self.last_result_frame_indices.pop(result_key)
+                            self.last_result_poni_paths[out_file.name] = self.last_result_poni_paths.pop(result_key)
+                            line.set_label(out_file.name)
+                            result_key = out_file.name
                         saved_dat_paths.append(out_file)
 
                     comparison_message = None
@@ -3354,7 +3913,7 @@ class RadialTab(QWidget):
         poni_text = str(Path(poni_path).expanduser().resolve()) if poni_path is not None else "none"
         with open(out_file, "w", encoding="utf-8") as file:
             file.write("# q_nm-1 I_q pixel_count\n")
-            file.write("# integration_engine pyFAI\n")
+            file.write("# integration_engine pyFAI no_splitting histogram cython\n")
             file.write(f"# poni_file {poni_text}\n")
             file.write(f"# normalization {self.normalization_mode.currentText()}\n")
             file.write(f"# intensity_scale {self.intensity_scale.value():.8g}\n")

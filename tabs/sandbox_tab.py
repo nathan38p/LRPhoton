@@ -134,13 +134,9 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.open_background_project_button.clicked.connect(self.open_background_project)
         selector_buttons.addWidget(self.open_background_project_button, 1, 0)
 
-        self.open_header_editor_project_button = self.make_project_button("📝 Header editor")
-        self.open_header_editor_project_button.clicked.connect(self.open_header_editor_project)
-        selector_buttons.addWidget(self.open_header_editor_project_button, 1, 1)
-
         self.open_tools_project_button = self.make_project_button("🛠️ Tools")
         self.open_tools_project_button.clicked.connect(self.open_tools_project)
-        selector_buttons.addWidget(self.open_tools_project_button, 1, 2)
+        selector_buttons.addWidget(self.open_tools_project_button, 1, 1)
 
         self.open_converter_project_button = self.make_project_button("🔄 Convert format")
         self.open_converter_project_button.clicked.connect(self.open_format_converter_project)
@@ -548,7 +544,7 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
 
         self.header_editor_project = HeaderEditorTab()
         self.header_editor_project.folder_changed.connect(lambda folder: self.folder_changed.emit(Path(folder), self))
-        self.header_editor_project_page = self.wrap_sandbox_project(self.header_editor_project)
+        self.header_editor_project_page = self.wrap_sandbox_project(self.header_editor_project, show_back_button=False)
         self.project_stack.addWidget(self.header_editor_project_page)
 
         self.tools_project = ToolsTab()
@@ -699,12 +695,13 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         layout.addStretch(1)
         return page
 
-    def wrap_sandbox_project(self, content_widget):
+    def wrap_sandbox_project(self, content_widget, show_back_button=True):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(self.make_back_to_projects_button(), 0)
+        if show_back_button:
+            layout.addWidget(self.make_back_to_projects_button(), 0)
         layout.addWidget(content_widget, 1)
         return page
 

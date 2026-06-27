@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import h5py
@@ -99,6 +100,43 @@ def read_curve_file(file_path):
     if suffix in {".h5", ".hdf5"}:
         return read_h5_curves(file_path)
     return read_dat_curves(file_path)
+
+
+def _normalise_q_unit_text(text):
+    unit = str(text or "").strip().lower()
+    unit = unit.replace("angstrom", "a").replace("ångström", "a").replace("å", "a")
+    unit = unit.replace("−", "-").replace("⁻", "-").replace("¹", "1")
+    unit = unit.replace(" ", "")
+    unit = unit.replace("^{-1}", "-1").replace("^(-1)", "-1").replace("^-1", "-1")
+    return unit
+
+
+def _dat_q_unit(raw_text, file_x_label=""):
+    sources = []
+    if file_x_label:
+        sources.append(file_x_label)
+    sources.extend(raw_text.splitlines()[:80])
+
+    for source in sources:
+        match = re.search(r"\bq\s*\(([^)]*)\)", source, flags=re.IGNORECASE)
+        if not match:
+            continue
+        unit = _normalise_q_unit_text(match.group(1))
+        if "nm" in unit:
+            return "nm"
+        if unit in {"a-1", "1/a"} or unit.startswith("a-1"):
+            return "A"
+
+    compact = _normalise_q_unit_text("\n".join(sources))
+    if "q_nm" in compact or "nm-1" in compact or "1/nm" in compact:
+        return "nm"
+    if "q(a" in compact or "q_a" in compact or "a-1" in compact or "1/a" in compact:
+        return "A"
+    return ""
+
+
+def _dat_q_to_nm_factor(raw_text, file_x_label=""):
+    return 10.0 if _dat_q_unit(raw_text, file_x_label) == "A" else 1.0
 
 
 def _h5_attr_text(value):
@@ -245,6 +283,7 @@ def read_dat_curves(file_path):
             curve_defs.append(payload)
 
     text = raw_text.replace(",", ".")
+    q_to_nm_factor = _dat_q_to_nm_factor(raw_text, file_x_label)
 
     if curve_defs:
         rows = []
@@ -277,6 +316,11 @@ def read_dat_curves(file_path):
             if not points:
                 continue
             array = np.asarray(points, dtype=float)
+            curve_x_label = str(info.get("x_label") or file_x_label or "")
+            curve_q_to_nm_factor = _dat_q_to_nm_factor(raw_text, curve_x_label)
+            if curve_q_to_nm_factor != 1.0:
+                array[:, 0] *= curve_q_to_nm_factor
+                curve_x_label = "q / nm⁻¹"
             order = np.argsort(array[:, 0])
             array = array[order]
             curves.append(
@@ -285,7 +329,7 @@ def read_dat_curves(file_path):
                     "y": array[:, 1],
                     "legend": str(info.get("label") or f"{file_path.stem} {index + 1}"),
                     "axis": normalize_plot_axis(info.get("axis", "left")),
-                    "x_label": str(info.get("x_label") or file_x_label or ""),
+                    "x_label": curve_x_label,
                     "y_label": str(info.get("y_label") or info.get("label") or ""),
                     "manual_dataset": is_manual_dataset,
                 }
@@ -330,13 +374,16 @@ def read_dat_curves(file_path):
 
     order = np.argsort(array[:, 0])
     array = array[order]
+    if q_to_nm_factor != 1.0:
+        array[:, 0] *= q_to_nm_factor
+        file_x_label = "q / nm⁻¹"
     return [
         {
             "x": array[:, 0],
             "y": array[:, 1],
             "legend": file_path.stem,
             "axis": "left",
-            "x_label": "",
+            "x_label": file_x_label,
             "y_label": "",
             "manual_dataset": False,
         }

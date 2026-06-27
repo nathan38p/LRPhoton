@@ -431,7 +431,6 @@ class MainWindow(QMainWindow):
 
         header_layout.addStretch()
         header_layout.addWidget(self.tab_bar)
-        header_layout.addStretch()
         header_layout.addWidget(self.header_balance_spacer)
 
         self.version_label = QPushButton()
@@ -488,6 +487,12 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
         tools_menu = menu_bar.addMenu("Tools")
 
+        header_editor_action = QAction("Header editor", self)
+        header_editor_action.triggered.connect(self.open_header_editor)
+        tools_menu.addAction(header_editor_action)
+
+        tools_menu.addSeparator()
+
         find_center_action = QAction("Find center", self)
         find_center_action.triggered.connect(self.open_center_tab)
         tools_menu.addAction(find_center_action)
@@ -516,6 +521,23 @@ class MainWindow(QMainWindow):
 
         self.tab_bar.setCurrentIndex(index)
         self.on_tab_changed(index)
+
+    def open_header_editor(self):
+        if not hasattr(self, "pages") or not hasattr(self, "sandbox_tab"):
+            return
+
+        index = self.pages.indexOf(self.sandbox_tab)
+        if index < 0:
+            return
+
+        self.initialize_tab_folder(index)
+        self.pages.setCurrentIndex(index)
+        self.tab_bar.blockSignals(True)
+        self.tab_bar.setCurrentIndex(-1)
+        self.tab_bar.blockSignals(False)
+        if hasattr(self.sandbox_tab, "open_header_editor_project"):
+            self.sandbox_tab.open_header_editor_project()
+        self.sync_pages_width_to_window()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

@@ -31,6 +31,8 @@ from tabs.instrument_presets import (
 GEOMETRY_FILE = Path.home() / ".lrphoton" / "line_geometries.json"
 SELECT_GEOMETRY_ITEM = "Beamline"
 ADD_GEOMETRY_ITEM = "+ Ajouter une ligne..."
+LRP_SALS_DEFAULT_NAME = "LRP SALS default"
+LEGACY_SALS_DEFAULT_NAME = "SALS default"
 
 LINE_GEOMETRY_SELECTOR_STYLE = """
     QComboBox {
@@ -70,8 +72,8 @@ def default_center_text(size):
 
 def default_line_geometries():
     return {
-        "SALS default": {
-            "name": "SALS default",
+        LRP_SALS_DEFAULT_NAME: {
+            "name": LRP_SALS_DEFAULT_NAME,
             "center_x": default_center_text(796),
             "center_y": default_center_text(796),
             "pixel_x_m": "5,5e-6",
@@ -119,6 +121,8 @@ def load_line_geometries():
         geometries = dict(defaults)
         for item in data.get("geometries", []):
             geometry = normalized_line_geometry(item)
+            if geometry["name"] == LEGACY_SALS_DEFAULT_NAME:
+                geometry["name"] = LRP_SALS_DEFAULT_NAME
             if geometry["name"]:
                 geometries[geometry["name"]] = geometry
         return geometries
@@ -414,10 +418,13 @@ def line_geometry_to_lrphoton(geometry):
 class LineGeometrySelector(QWidget):
     geometry_selected = Signal(str, dict)
 
-    def __init__(self, parent=None, current_name="SALS default"):
+    def __init__(self, parent=None, current_name=LRP_SALS_DEFAULT_NAME, show_poni=True):
         super().__init__(parent)
         self.context_owner = parent
+        self.show_poni = bool(show_poni)
         self.geometries = load_line_geometries()
+        if current_name == LEGACY_SALS_DEFAULT_NAME:
+            current_name = LRP_SALS_DEFAULT_NAME
         self.current_name = current_name if current_name in self.geometries else next(iter(self.geometries))
         self.has_explicit_selection = False
         self.context_geometry_provider = None
@@ -449,7 +456,8 @@ class LineGeometrySelector(QWidget):
         self.poni_button.clicked.connect(self.choose_poni_file)
         poni_layout.addWidget(self.poni_path, 1)
         poni_layout.addWidget(self.poni_button, 0)
-        layout.addLayout(poni_layout)
+        if self.show_poni:
+            layout.addLayout(poni_layout)
 
         self.setStyleSheet(LINE_GEOMETRY_SELECTOR_STYLE)
         self.refresh()
@@ -496,6 +504,8 @@ class LineGeometrySelector(QWidget):
         return geometry
 
     def selected_poni_path(self):
+        if not self.show_poni:
+            return None
         text = self.poni_path.text().strip()
         if not text:
             return None

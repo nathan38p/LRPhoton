@@ -1,6 +1,7 @@
 from datetime import datetime
 import os
 from pathlib import Path
+import re
 import sys
 
 import numpy as np
@@ -33,7 +34,7 @@ from PySide6.QtWidgets import (
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from tabs.line_geometry import LineGeometrySelector, default_center_text
+from tabs.line_geometry import LRP_SALS_DEFAULT_NAME, LineGeometrySelector, default_center_text
 from tabs.ui_style import BLOCK_SPACING, FILE_BROWSER_WIDTH, GROUP_BOX_MARGINS, GROUP_BOX_STYLE, PAGE_MARGINS
 
 
@@ -162,7 +163,7 @@ class VimbaSALSWidget(QWidget):
         self.current_frame = None
         self.frame_index = 0
         self.output_folder = Path.home() / "LRPhoton_SALS"
-        self.current_geometry_name = "SALS default"
+        self.current_geometry_name = LRP_SALS_DEFAULT_NAME
         self.is_closing = False
         self.is_grabbing_frame = False
         self.preview_xlim = None
@@ -310,12 +311,9 @@ class VimbaSALSWidget(QWidget):
         file_layout.addWidget(self.section_label("Output folder"))
         file_layout.addLayout(output_layout)
 
-        self.prefix_edit = QLineEdit("sals")
-        self.prefix_edit.setFixedHeight(self.FIELD_HEIGHT)
         self.save_button = QPushButton("Save current EDF")
         self.save_button.setFixedHeight(self.FIELD_HEIGHT)
         self.save_button.clicked.connect(self.save_current_edf)
-        file_layout.addLayout(self.camera_field_row("File prefix", self.prefix_edit))
         file_layout.addWidget(self.save_button)
 
         sals_box = QGroupBox("EDF header")
@@ -327,13 +325,15 @@ class VimbaSALSWidget(QWidget):
         sals_layout.setColumnStretch(1, 1)
         controls_layout.addWidget(sals_box)
 
-        self.geometry_selector = LineGeometrySelector(self, "SALS default")
+        self.geometry_selector = LineGeometrySelector(self, LRP_SALS_DEFAULT_NAME, show_poni=False)
+        self.geometry_selector.set_current_name(LRP_SALS_DEFAULT_NAME, explicit=True)
         self.geometry_selector.geometry_selected.connect(self.apply_line_geometry)
 
         self.distance_edit = QLineEdit("")
         self.pixel_x_edit = QLineEdit("")
         self.pixel_y_edit = QLineEdit("")
         self.wavelength_edit = QLineEdit("")
+        self.sample_name_edit = QLineEdit("sals")
         self.center_x_edit = QLineEdit(self.default_center_text(self.DEFAULT_ROI_WIDTH))
         self.center_y_edit = QLineEdit(self.default_center_text(self.DEFAULT_ROI_HEIGHT))
         self.width_spinbox.valueChanged.connect(self.update_default_center_x)
@@ -343,14 +343,16 @@ class VimbaSALSWidget(QWidget):
         self.pixel_x_edit.setPlaceholderText("m")
         self.pixel_y_edit.setPlaceholderText("m")
         self.wavelength_edit.setPlaceholderText("m")
+        self.sample_name_edit.setPlaceholderText("Sample name")
         self.style_sals_fields()
         self.add_labeled_field(sals_layout, 0, "Ligne", self.geometry_selector)
-        self.add_labeled_field(sals_layout, 1, "Distance (m)", self.distance_edit)
-        self.add_labeled_field(sals_layout, 2, "Pixel X (m)", self.pixel_x_edit)
-        self.add_labeled_field(sals_layout, 3, "Pixel Y (m)", self.pixel_y_edit)
-        self.add_labeled_field(sals_layout, 4, "Wavelength (m)", self.wavelength_edit)
-        self.add_labeled_field(sals_layout, 5, "Center X", self.center_x_edit)
-        self.add_labeled_field(sals_layout, 6, "Center Y", self.center_y_edit)
+        self.add_labeled_field(sals_layout, 1, "Sample name", self.sample_name_edit)
+        self.add_labeled_field(sals_layout, 2, "Distance (m)", self.distance_edit)
+        self.add_labeled_field(sals_layout, 3, "Pixel X (m)", self.pixel_x_edit)
+        self.add_labeled_field(sals_layout, 4, "Pixel Y (m)", self.pixel_y_edit)
+        self.add_labeled_field(sals_layout, 5, "Wavelength (m)", self.wavelength_edit)
+        self.add_labeled_field(sals_layout, 6, "Center X", self.center_x_edit)
+        self.add_labeled_field(sals_layout, 7, "Center Y", self.center_y_edit)
         self.apply_line_geometry(self.geometry_selector.current_name, self.geometry_selector.current_geometry())
 
         controls_layout.addStretch(1)
@@ -1166,18 +1168,18 @@ class VimbaSALSWidget(QWidget):
         self.center_y_edit.setText(str(geometry.get("center_y", "")))
         self.pixel_x_edit.setText(str(geometry.get("pixel_x_m", "")))
         self.pixel_y_edit.setText(str(geometry.get("pixel_y_m", "")))
-        distance_m = self.DEFAULT_DISTANCE_M if name == "SALS default" else geometry.get("distance_m", "")
+        distance_m = self.DEFAULT_DISTANCE_M if name == LRP_SALS_DEFAULT_NAME else geometry.get("distance_m", "")
         self.distance_edit.setText(str(distance_m))
         self.wavelength_edit.setText(str(geometry.get("wavelength_m", "")))
         if self.current_frame is not None:
             self.update_preview()
 
     def update_default_center_x(self, value):
-        if self.current_geometry_name == "SALS default":
+        if self.current_geometry_name == LRP_SALS_DEFAULT_NAME:
             self.center_x_edit.setText(self.default_center_text(value))
 
     def update_default_center_y(self, value):
-        if self.current_geometry_name == "SALS default":
+        if self.current_geometry_name == LRP_SALS_DEFAULT_NAME:
             self.center_y_edit.setText(self.default_center_text(value))
 
     def start_live(self):
@@ -1443,7 +1445,8 @@ class VimbaSALSWidget(QWidget):
         folder = Path(self.output_edit.text()).expanduser()
         folder.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        prefix = self.prefix_edit.text().strip() or "sals"
+        sample_name = self.sample_name_edit.text().strip() or "sals"
+        prefix = self.filename_prefix_from_sample_name(sample_name)
         output_path = folder / f"{prefix}_{timestamp}.edf"
 
         image = np.asarray(self.current_frame)
@@ -1465,6 +1468,7 @@ class VimbaSALSWidget(QWidget):
         wavelength_m = self.optional_float(self.wavelength_edit.text())
         center_x = self.optional_float(self.center_x_edit.text())
         center_y = self.optional_float(self.center_y_edit.text())
+        sample_name = self.sample_name_edit.text().strip()
         header = {
             "HeaderID": "EH:000001:000000:000000",
             "Image": str(self.frame_index),
@@ -1482,6 +1486,7 @@ class VimbaSALSWidget(QWidget):
             "AcquisitionDate": timestamp,
             "ExposureTime": self.exposure_edit.text().strip(),
             "Gain": self.gain_edit.text().strip(),
+            "SampleName": sample_name,
             "LRPhotonModule": "VimbaSALS",
             "LineGeometry": self.current_geometry_name,
             "SampleDistance": self.format_header_number(distance_m),
@@ -1493,6 +1498,13 @@ class VimbaSALSWidget(QWidget):
             "YReversed": "1" if self.reverse_y_checkbox.isChecked() else "0",
         }
         return {key: value for key, value in header.items() if value not in {None, ""}}
+
+    def filename_prefix_from_sample_name(self, sample_name):
+        text = str(sample_name).strip() or "sals"
+        text = re.sub(r"\s+", "_", text)
+        text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
+        text = text.strip("._")
+        return text or "sals"
 
     def edf_data_type(self, image):
         dtype = np.asarray(image).dtype
