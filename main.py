@@ -519,6 +519,11 @@ class MainWindow(QMainWindow):
             feedback_action = QAction("Feedback", self)
             feedback_action.triggered.connect(self.open_issue_report_dialog)
             help_menu.addAction(feedback_action)
+            return
+
+        feedback_action = QAction("Feedback", self)
+        feedback_action.triggered.connect(self.open_issue_report_dialog)
+        menu_bar.addAction(feedback_action)
 
     def open_center_tab(self):
         if not hasattr(self, "pages") or not hasattr(self, "centre_tab"):
