@@ -310,27 +310,136 @@ class MainWindow(QMainWindow):
 
     def get_or_create_install_id(self):
         data = self.load_user_settings()
-        install_id = str(data.get("install_id", "")).strip()
+        install_key = self.get_install_id_settings_key()
+        install_id = str(data.get(install_key, "")).strip()
         if install_id:
             return install_id
 
         install_id = str(uuid.uuid4())
-        data["install_id"] = install_id
+        data[install_key] = install_id
         self.save_user_settings(data)
         return install_id
 
+    def get_install_id_settings_key(self):
+        app_dir = Path(__file__).resolve().parent
+        normalized_path = str(app_dir).replace("\\", "/").lower()
+
+        if self.is_development_copy():
+            return "install_id_development"
+
+        if normalized_path.startswith("/applications/lrphoton"):
+            return "install_id_stable"
+
+        safe_path = base64.urlsafe_b64encode(str(app_dir).encode("utf-8")).decode("ascii").rstrip("=")
+        return f"install_id_{safe_path}"
+
     def get_system_language(self):
+        try:
+            if sys.platform == "darwin":
+                result = subprocess.run(
+                    ["defaults", "read", "-g", "AppleLanguages"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                for line in result.stdout.splitlines():
+                    cleaned = line.strip().strip('"').strip(",")
+                    if cleaned and cleaned not in {"(", ")"}:
+                        return cleaned.replace("_", "-")
+        except Exception:
+            pass
+
+        try:
+            if sys.platform.startswith("win"):
+                import ctypes
+                buffer = ctypes.create_unicode_buffer(85)
+                if ctypes.windll.kernel32.GetUserDefaultLocaleName(buffer, len(buffer)):
+                    return buffer.value.replace("_", "-")
+        except Exception:
+            pass
+
+        for variable in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+            value = os.environ.get(variable, "").strip()
+            if value:
+                language = value.split(":", 1)[0].split(".", 1)[0]
+                if language and language.upper() != "C":
+                    return language.replace("_", "-")
+
         for getter in (
             lambda: locale.getlocale()[0],
             lambda: locale.getdefaultlocale()[0],
         ):
             try:
                 language = getter()
-                if language:
-                    return str(language)
+                if language and str(language).upper() != "C":
+                    return str(language).replace("_", "-")
             except Exception:
                 pass
         return "unknown"
+
+    def get_system_country(self):
+        language = self.get_system_language()
+        if "-" in language:
+            country = language.rsplit("-", 1)[1].strip().upper()
+            if len(country) == 2 and country.isalpha():
+                return country
+
+        try:
+            if sys.platform == "darwin":
+                result = subprocess.run(
+                    ["defaults", "read", "-g", "AppleLocale"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                locale_value = result.stdout.strip().replace("_", "-")
+                if "-" in locale_value:
+                    country = locale_value.rsplit("-", 1)[1].strip().upper()
+                    if len(country) == 2 and country.isalpha():
+                        return country
+        except Exception:
+            pass
+
+        try:
+            if sys.platform.startswith("win"):
+                import ctypes
+                buffer = ctypes.create_unicode_buffer(85)
+                if ctypes.windll.kernel32.GetUserDefaultLocaleName(buffer, len(buffer)):
+                    locale_value = buffer.value.replace("_", "-")
+                    if "-" in locale_value:
+                        country = locale_value.rsplit("-", 1)[1].strip().upper()
+                        if len(country) == 2 and country.isalpha():
+                            return country
+        except Exception:
+            pass
+
+        return "unknown"
+
+    def get_system_platform(self):
+        system = platform.system()
+        if system == "Darwin":
+            return "macOS"
+        if system == "Windows":
+            return "Windows"
+        if system == "Linux":
+            return "Linux"
+        return system or sys.platform
+
+    def get_system_platform_version(self):
+        try:
+            if sys.platform == "darwin":
+                return f"macOS {platform.mac_ver()[0]}"
+            if sys.platform.startswith("win"):
+                version = platform.version()
+                release = platform.release()
+                return f"Windows {release} ({version})"
+            if sys.platform.startswith("linux"):
+                return f"Linux {platform.release()}"
+        except Exception:
+            pass
+        return platform.platform()
 
     def get_usage_channel(self):
         return "development" if self.is_development_copy() else "stable"
@@ -341,7 +450,9 @@ class MainWindow(QMainWindow):
                 payload = {
                     "install_id": self.get_or_create_install_id(),
                     "current_version": APP_VERSION,
-                    "platform": platform.system() or sys.platform,
+                    "platform": self.get_system_platform(),
+                    "platform_version": self.get_system_platform_version(),
+                    "country": self.get_system_country(),
                     "language": self.get_system_language(),
                     "channel": self.get_usage_channel(),
                 }
@@ -406,7 +517,7 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        self.dev_label = QLabel("BETA")
+        self.dev_label = QLabel("DEV")
         self.dev_label.setStyleSheet("""
             QLabel {
                 font-size: 10px;
