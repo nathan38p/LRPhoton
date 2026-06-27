@@ -500,30 +500,9 @@ class MainWindow(QMainWindow):
             help_menu.addAction(feedback_action)
             return
 
-        self.feedback_menu_button = QPushButton("Feedback")
-        self.feedback_menu_button.setFixedHeight(24)
-        self.feedback_menu_button.setCursor(Qt.PointingHandCursor)
-        self.feedback_menu_button.setStyleSheet("""
-            QPushButton {
-                border: 0px;
-                border-radius: 4px;
-                background: transparent;
-                color: #222222;
-                font-size: 13px;
-                padding: 0px 10px;
-            }
-            QPushButton:hover {
-                background: #eeeeee;
-            }
-        """)
-        self.feedback_menu_button.clicked.connect(self.open_issue_report_dialog)
-
-        feedback_corner = QWidget()
-        feedback_corner_layout = QHBoxLayout(feedback_corner)
-        feedback_corner_layout.setContentsMargins(0, 0, 12, 0)
-        feedback_corner_layout.setSpacing(0)
-        feedback_corner_layout.addWidget(self.feedback_menu_button)
-        menu_bar.setCornerWidget(feedback_corner, Qt.TopRightCorner)
+        feedback_action = QAction("Feedback", self)
+        feedback_action.triggered.connect(self.open_issue_report_dialog)
+        menu_bar.addAction(feedback_action)
 
     def open_center_tab(self):
         if not hasattr(self, "pages") or not hasattr(self, "centre_tab"):
