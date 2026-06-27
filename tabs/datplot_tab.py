@@ -75,15 +75,44 @@ PLOT_Y_AXIS_LABELS = {
     "right2": "R2",
 }
 PLOT_TRANSFORMED_MODES = {
-    "Kratky (q²I(q))": {"power": 2, "x_power": 1, "x_label": "q", "y_label": "q²I(q)"},
-    "qI(q)": {"power": 1, "x_power": 1, "x_label": "q", "y_label": "qI(q)"},
-    "q⁴I(q)": {"power": 4, "x_power": 1, "x_label": "q", "y_label": "q⁴I(q)"},
-    "q⁴I(q⁴)": {"power": 4, "x_power": 4, "x_label": "q⁴", "y_label": "q⁴I(q⁴)"},
+    "Guinier ln(I(q)) vs q²": {"y_transform": "ln_i", "x_power": 2, "x_label": "q²", "y_label": "ln(I(q))"},
+    "Porod q⁴I(q) vs q": {"power": 4, "x_power": 1, "x_label": "q", "y_label": "q⁴I(q)"},
+    "Kratky q²I(q) vs q": {"power": 2, "x_power": 1, "x_label": "q", "y_label": "q²I(q)"},
+    "Debye-Bueche 1/sqrt(I(q)) vs q²": {"y_transform": "inv_sqrt_i", "x_power": 2, "x_label": "q²", "y_label": "1/sqrt(I(q))"},
+    "Ornstein-Zernike 1/I(q) vs q²": {"y_transform": "inv_i", "x_power": 2, "x_label": "q²", "y_label": "1/I(q)"},
+    "q⁴I(q) vs q⁴": {"power": 4, "x_power": 4, "x_label": "q⁴", "y_label": "q⁴I(q)"},
 }
-PLOT_LOG_X_MODES = {"log linear", "log log", "Kratky (q²I(q))", "q⁴I(q)", "q⁴I(q⁴)"}
-PLOT_LOG_Y_MODES = {"linear log", "log log", "Kratky (q²I(q))", "q⁴I(q)", "q⁴I(q⁴)"}
+PLOT_LOG_X_MODES = {"log-lin", "log-log", "log linear", "log log"}
+PLOT_LOG_Y_MODES = {"lin-log", "log-log", "linear log", "log log"}
 PLOT_LOG_LOG_MODES = PLOT_LOG_X_MODES & PLOT_LOG_Y_MODES
 Q_AXIS_LABELS = {"q / nm⁻¹", "q / Å⁻¹", "q / A⁻¹", "q / nm^-1", "q / A^-1"}
+SUPERSCRIPT_DIGITS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+
+
+def format_power_unit(unit, power):
+    exponent = str(-int(power)).translate(SUPERSCRIPT_DIGITS)
+    return f"{unit}{exponent}"
+
+
+def transform_x_axis_label(transform, q_unit):
+    power = transform.get("x_power", 1)
+    if power == 1:
+        return f"q / {format_power_unit(q_unit, 1)}"
+    return f"{transform['x_label']} / {format_power_unit(q_unit, power)}"
+
+
+def transform_y_axis_label(transform, q_unit):
+    y_transform = transform.get("y_transform")
+    if y_transform == "ln_i":
+        return "ln(I(q) / a.u.)"
+    if y_transform == "inv_sqrt_i":
+        return "1/sqrt(I(q)) / a.u.⁻¹/²"
+    if y_transform == "inv_i":
+        return "1/I(q) / a.u.⁻¹"
+    power = transform.get("power", 0)
+    if power:
+        return f"{transform['y_label']} / a.u. {format_power_unit(q_unit, power)}"
+    return f"{transform['y_label']} / a.u."
 
 
 # ============================================================
@@ -911,16 +940,19 @@ class DatPlotTab(QWidget):
         # Plot settings widgets (previously in settings_box, now just created here)
         self.plot_mode = QComboBox()
         self.plot_mode.addItems([
-            "linear linear",
-            "linear log",
-            "log linear",
-            "log log",
-            "Kratky (q²I(q))",
-            "qI(q)",
-            "q⁴I(q)",
-            "q⁴I(q⁴)",
+            "log-log",
+            "log-lin",
+            "lin-log",
+            "lin-lin",
+            "Guinier ln(I(q)) vs q²",
+            "Porod q⁴I(q) vs q",
+            "Kratky q²I(q) vs q",
+            "Debye-Bueche 1/sqrt(I(q)) vs q²",
+            "Ornstein-Zernike 1/I(q) vs q²",
+            "q⁴I(q) vs q⁴",
         ])
-        self.plot_mode.setCurrentText("log log")
+        self.plot_mode.insertSeparator(4)
+        self.plot_mode.setCurrentText("log-log")
         self.plot_mode.currentTextChanged.connect(self.update_plot)
 
         self.auto_limits = QCheckBox("Auto limits")
@@ -2347,9 +2379,9 @@ class DatPlotTab(QWidget):
                 x = np.asarray(self.make_plot_x(curve["x"]), dtype=float)
                 y = np.asarray(curve["y"], dtype=float)
                 valid = np.isfinite(x) & np.isfinite(y)
-                if mode in ("log linear", "log log"):
+                if mode in PLOT_LOG_X_MODES:
                     valid &= x > 0
-                if mode in ("linear log", "log log"):
+                if mode in PLOT_LOG_Y_MODES:
                     valid &= y > 0
                 if np.any(valid):
                     fit_ax.plot(
@@ -3224,7 +3256,15 @@ class DatPlotTab(QWidget):
         transform = PLOT_TRANSFORMED_MODES.get(mode)
         if transform is not None:
             q = self.make_display_q(x)
-            return q ** transform["power"] * y
+            y_values = np.asarray(y, dtype=float)
+            y_transform = transform.get("y_transform")
+            if y_transform == "ln_i":
+                return np.log(y_values)
+            if y_transform == "inv_sqrt_i":
+                return 1.0 / np.sqrt(y_values)
+            if y_transform == "inv_i":
+                return 1.0 / y_values
+            return q ** transform.get("power", 0) * y_values
 
         return y
 
@@ -3247,6 +3287,9 @@ class DatPlotTab(QWidget):
     def q_axis_label(self):
         return "q / A⁻¹" if self.q_axis_unit == "A" else "q / nm⁻¹"
 
+    def q_axis_unit_label(self):
+        return "A" if self.q_axis_unit == "A" else "nm"
+
     def is_q_axis_label(self, label):
         return str(label or "").strip() in Q_AXIS_LABELS
 
@@ -3255,7 +3298,10 @@ class DatPlotTab(QWidget):
             return "ψ", "I"
         transform = PLOT_TRANSFORMED_MODES.get(self.plot_mode.currentText())
         if transform is not None:
-            return transform["x_label"], transform["y_label"]
+            return (
+                transform_x_axis_label(transform, self.q_axis_unit_label()),
+                transform_y_axis_label(transform, self.q_axis_unit_label()),
+            )
         return "q", "I"
 
     def update_graph_coordinates(self, event):
@@ -3280,6 +3326,8 @@ class DatPlotTab(QWidget):
             x_name, y_name = self.graph_coordinate_labels()
             if x_name == "ψ":
                 x_suffix = "°"
+            elif self.plot_mode.currentText() in PLOT_TRANSFORMED_MODES:
+                x_suffix = ""
             else:
                 x_suffix = " A⁻¹" if self.q_axis_unit == "A" else " nm⁻¹"
             self.graph_coordinate_label.setText(
@@ -3318,7 +3366,7 @@ class DatPlotTab(QWidget):
         if not curves:
             return
         has_manual_dataset = any(curve.get("manual_dataset", False) for curve in curves.values())
-        mode = "linear linear" if has_manual_dataset or self.curves_are_really_0_to_360() else "log log"
+        mode = "lin-lin" if has_manual_dataset or self.curves_are_really_0_to_360() else "log-log"
 
         if self.plot_mode.currentText() == mode:
             return
@@ -3449,15 +3497,15 @@ class DatPlotTab(QWidget):
         self.draw_guide_bars(ax)
         self.draw_peak_labels(ax)
 
-        if mode == "linear linear" or mode == "qI(q)":
+        if mode in {"linear linear", "lin-lin"} or mode in PLOT_TRANSFORMED_MODES:
             ax.set_xscale("linear")
             for target_ax in axis_map.values():
                 target_ax.set_yscale("linear")
-        elif mode == "linear log":
+        elif mode in {"linear log", "lin-log"}:
             ax.set_xscale("linear")
             for target_ax in axis_map.values():
                 target_ax.set_yscale("log")
-        elif mode == "log linear":
+        elif mode in {"log linear", "log-lin"}:
             ax.set_xscale("log")
             for target_ax in axis_map.values():
                 target_ax.set_yscale("linear")
@@ -3480,8 +3528,8 @@ class DatPlotTab(QWidget):
                 if str(curve.get("x_label", "")).strip()
             ]
             default_x_label = (
-                transform["x_label"]
-                if transform is not None and transform["x_power"] != 1
+                transform_x_axis_label(transform, self.q_axis_unit_label())
+                if transform is not None
                 else (
                     self.q_axis_label()
                     if curve_x_labels and self.is_q_axis_label(curve_x_labels[0])
@@ -3489,7 +3537,7 @@ class DatPlotTab(QWidget):
                 )
             )
             ax.set_xlabel(self.x_label.text() or default_x_label)
-            if transform is not None and transform["x_power"] != 1 and self.x_label.text() in ("", self.q_axis_label()):
+            if transform is not None and self.x_label.text() in ("", self.q_axis_label()):
                 ax.set_xlabel(default_x_label)
             elif curve_x_labels and (not self.x_label.text() or self.is_q_axis_label(self.x_label.text())):
                 ax.set_xlabel(default_x_label)
@@ -3502,12 +3550,17 @@ class DatPlotTab(QWidget):
             ]
             if labels:
                 axis_curve_labels[axis_name] = labels[0]
-        transformed_y_label = PLOT_TRANSFORMED_MODES.get(mode, {}).get("y_label")
+        transform = PLOT_TRANSFORMED_MODES.get(mode)
+        transformed_y_label = (
+            transform_y_axis_label(transform, self.q_axis_unit_label())
+            if transform is not None
+            else None
+        )
         axis_labels = {
-            "left": axis_curve_labels.get("left") or transformed_y_label or (self.y_label.text() or "Intensity / a.u."),
-            "left2": axis_curve_labels.get("left2") or transformed_y_label or "Left 2 / a.u.",
-            "right": axis_curve_labels.get("right") or transformed_y_label or "Right / a.u.",
-            "right2": axis_curve_labels.get("right2") or transformed_y_label or "Right 2 / a.u.",
+            "left": transformed_y_label or axis_curve_labels.get("left") or (self.y_label.text() or "Intensity / a.u."),
+            "left2": transformed_y_label or axis_curve_labels.get("left2") or "Left 2 / a.u.",
+            "right": transformed_y_label or axis_curve_labels.get("right") or "Right / a.u.",
+            "right2": transformed_y_label or axis_curve_labels.get("right2") or "Right 2 / a.u.",
         }
         for axis_name, target_ax in axis_map.items():
             target_ax.set_ylabel(axis_labels[axis_name])

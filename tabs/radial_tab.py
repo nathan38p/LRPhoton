@@ -68,6 +68,44 @@ from .ui_style import (
     style_q_geometry_buttons,
 )
 
+RADIAL_TRANSFORMED_MODES = {
+    "Guinier ln(I(q)) vs q²": {"y_transform": "ln_i", "x_power": 2, "x_label": "q²", "y_label": "ln(I(q))"},
+    "Porod q⁴I(q) vs q": {"power": 4, "x_power": 1, "x_label": "q", "y_label": "q⁴I(q)"},
+    "Kratky q²I(q) vs q": {"power": 2, "x_power": 1, "x_label": "q", "y_label": "q²I(q)"},
+    "Debye-Bueche 1/sqrt(I(q)) vs q²": {"y_transform": "inv_sqrt_i", "x_power": 2, "x_label": "q²", "y_label": "1/sqrt(I(q))"},
+    "Ornstein-Zernike 1/I(q) vs q²": {"y_transform": "inv_i", "x_power": 2, "x_label": "q²", "y_label": "1/I(q)"},
+    "q⁴I(q) vs q⁴": {"power": 4, "x_power": 4, "x_label": "q⁴", "y_label": "q⁴I(q)"},
+}
+RADIAL_LOG_X_MODES = {"log-log", "log-lin", "log log", "log linear"}
+RADIAL_LOG_Y_MODES = {"log-log", "lin-log", "log log", "linear log"}
+SUPERSCRIPT_DIGITS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+
+
+def format_power_unit(unit, power):
+    exponent = str(-int(power)).translate(SUPERSCRIPT_DIGITS)
+    return f"{unit}{exponent}"
+
+
+def transform_x_axis_label(transform, q_unit):
+    power = transform.get("x_power", 1)
+    if power == 1:
+        return f"q / {format_power_unit(q_unit, 1)}"
+    return f"{transform['x_label']} / {format_power_unit(q_unit, power)}"
+
+
+def transform_y_axis_label(transform, q_unit):
+    y_transform = transform.get("y_transform")
+    if y_transform == "ln_i":
+        return "ln(I(q) / a.u.)"
+    if y_transform == "inv_sqrt_i":
+        return "1/sqrt(I(q)) / a.u.⁻¹/²"
+    if y_transform == "inv_i":
+        return "1/I(q) / a.u.⁻¹"
+    power = transform.get("power", 0)
+    if power:
+        return f"{transform['y_label']} / a.u. {format_power_unit(q_unit, power)}"
+    return f"{transform['y_label']} / a.u."
+
 
 # ============================================================
 # ========================= FILE TOOLS ========================
@@ -2317,22 +2355,19 @@ class RadialTab(QWidget):
         self.intensity_scale.setFixedHeight(24)
         self.plot_mode = QComboBox()
         self.plot_mode.addItems([
-            "linear linear",
-            "linear log",
-            "log log",
-            "log linear",
-            "qI linear",
-            "qI log",
-            "qI log linear",
-            "qI linear log",
-            "Kratky linear",
-            "Kratky log",
-            "Kratky log linear",
-            "Kratky linear log",
-            "2θ linear",
-            "2θ log",
+            "log-log",
+            "log-lin",
+            "lin-log",
+            "lin-lin",
+            "Guinier ln(I(q)) vs q²",
+            "Porod q⁴I(q) vs q",
+            "Kratky q²I(q) vs q",
+            "Debye-Bueche 1/sqrt(I(q)) vs q²",
+            "Ornstein-Zernike 1/I(q) vs q²",
+            "q⁴I(q) vs q⁴",
         ])
-        self.plot_mode.setCurrentText("log log")
+        self.plot_mode.insertSeparator(4)
+        self.plot_mode.setCurrentText("log-log")
         self.plot_mode.setFixedWidth(140)
         self.plot_mode.currentTextChanged.connect(self.update_plot_mode)
         self.show_legend = QCheckBox("Legend")
@@ -2630,7 +2665,7 @@ class RadialTab(QWidget):
         if hasattr(self, "save_graph_button"):
             self.save_graph_button.setEnabled(enabled)
 
-        self.plot_mode.setCurrentText("log log")
+        self.plot_mode.setCurrentText("log-log")
         self.update_frame_selector_visibility()
         self.update_mask_parameter_state()
 
@@ -3246,7 +3281,7 @@ class RadialTab(QWidget):
                     q_max = q_max_filter
                     sector_min = self.sector_min.value() if self.use_sector.isChecked() else 0
                     sector_max = self.sector_max.value() if self.use_sector.isChecked() else 360
-                    use_log_bins = self.plot_mode.currentText() in ["log log", "log linear", "qI log", "qI log linear", "Kratky log", "Kratky log linear"]
+                    use_log_bins = self.plot_mode.currentText() in RADIAL_LOG_X_MODES or self.plot_mode.currentText() in ["qI log", "qI log linear", "Kratky log", "Kratky log linear"]
 
                     diagnostics = q_geometry_diagnostics(
                         image,
@@ -3452,11 +3487,26 @@ class RadialTab(QWidget):
         mode = self.plot_mode.currentText()
         if mode in ["2θ linear", "2θ log"]:
             return q_nm_to_two_theta_deg(q, self.wavelength.value() if wavelength_value is None else wavelength_value)
-        return q * self.q_display_factor()
+        q_display = np.asarray(q, dtype=float) * self.q_display_factor()
+        transform = RADIAL_TRANSFORMED_MODES.get(mode)
+        if transform is not None:
+            return q_display ** transform["x_power"]
+        return q_display
 
 
     def make_plot_y(self, q, intensity):
-        scaled_intensity = intensity * self.intensity_scale.value()
+        q_display = np.asarray(q, dtype=float) * self.q_display_factor()
+        scaled_intensity = np.asarray(intensity, dtype=float) * self.intensity_scale.value()
+        transform = RADIAL_TRANSFORMED_MODES.get(self.plot_mode.currentText())
+        if transform is not None:
+            y_transform = transform.get("y_transform")
+            if y_transform == "ln_i":
+                return np.log(scaled_intensity)
+            if y_transform == "inv_sqrt_i":
+                return 1.0 / np.sqrt(scaled_intensity)
+            if y_transform == "inv_i":
+                return 1.0 / scaled_intensity
+            return q_display ** transform.get("power", 0) * scaled_intensity
         if self.plot_mode.currentText() in ["qI linear", "qI log", "qI log linear", "qI linear log"]:
             return self.make_plot_x(q) * scaled_intensity
         if self.plot_mode.currentText() in ["Kratky linear", "Kratky log", "Kratky log linear", "Kratky linear log"]:
@@ -3468,16 +3518,16 @@ class RadialTab(QWidget):
         y = np.asarray(self.make_plot_y(q, intensity), dtype=float)
         mode = self.plot_mode.currentText()
         valid = np.isfinite(x) & np.isfinite(y)
-        if mode in ["log log", "log linear", "qI log", "qI log linear", "Kratky log", "Kratky log linear"]:
+        if mode in RADIAL_LOG_X_MODES or mode in ["qI log", "qI log linear", "Kratky log", "Kratky log linear"]:
             valid &= x > 0
-        if mode in ["log log", "linear log", "qI log", "qI linear log", "Kratky log", "Kratky linear log", "2θ log"]:
+        if mode in RADIAL_LOG_Y_MODES or mode in ["qI log", "qI linear log", "Kratky log", "Kratky linear log", "2θ log"]:
             valid &= y > 0
         x = x.copy()
         y = y.copy()
-        if mode in ["log log", "linear log", "qI log", "qI linear log", "Kratky log", "Kratky linear log", "2θ log"]:
+        if mode in RADIAL_LOG_Y_MODES or mode in ["qI log", "qI linear log", "Kratky log", "Kratky linear log", "2θ log"]:
             y = self.interpolate_nonpositive_log_y(x, y, valid)
             valid = np.isfinite(x) & np.isfinite(y)
-            if mode in ["log log", "qI log", "Kratky log"]:
+            if mode in RADIAL_LOG_X_MODES or mode in ["qI log", "Kratky log"]:
                 valid &= x > 0
             if mode in ["2θ log"]:
                 valid &= x >= 0
@@ -3506,31 +3556,39 @@ class RadialTab(QWidget):
     def q_axis_label(self):
         return "q / Å⁻¹" if self.q_axis_unit == "A" else "q / nm⁻¹"
 
+    def q_axis_unit_label(self):
+        return "Å" if self.q_axis_unit == "A" else "nm"
+
     def apply_plot_axes(self):
         ax = self.canvas.ax
         mode = self.plot_mode.currentText()
 
+        transform = RADIAL_TRANSFORMED_MODES.get(mode)
+
         if mode in ["2θ linear", "2θ log"]:
             ax.set_xlabel("2θ / °")
+        elif transform is not None:
+            ax.set_xlabel(transform_x_axis_label(transform, self.q_axis_unit_label()))
         else:
             ax.set_xlabel(self.q_axis_label())
 
         ax.set_ylabel(
+            transform_y_axis_label(transform, self.q_axis_unit_label()) if transform is not None else
             "q²I(q)"
             if mode in ["Kratky linear", "Kratky log", "Kratky log linear", "Kratky linear log"]
             else ("qI(q)" if mode in ["qI linear", "qI log", "qI log linear", "qI linear log"] else "I(q)")
         )
 
-        if mode == "linear linear":
+        if mode in {"linear linear", "lin-lin"} or transform is not None:
             ax.set_xscale("linear")
             ax.set_yscale("linear")
-        elif mode == "linear log":
+        elif mode in {"linear log", "lin-log"}:
             ax.set_xscale("linear")
             ax.set_yscale("log")
-        elif mode == "log log":
+        elif mode in {"log log", "log-log"}:
             ax.set_xscale("log")
             ax.set_yscale("log")
-        elif mode == "log linear":
+        elif mode in {"log linear", "log-lin"}:
             ax.set_xscale("log")
             ax.set_yscale("linear")
         elif mode == "qI linear":
@@ -3618,7 +3676,7 @@ class RadialTab(QWidget):
         if self.plot_mode.currentText() in ["2θ linear", "2θ log"]:
             QMessageBox.warning(self, "Not an I(q) plot", "Power-law fitting is only available on q-based I(q) plots.")
             return
-        if self.plot_mode.currentText() in [
+        if self.plot_mode.currentText() in RADIAL_TRANSFORMED_MODES or self.plot_mode.currentText() in [
             "qI linear", "qI log", "qI log linear", "qI linear log",
             "Kratky linear", "Kratky log", "Kratky log linear", "Kratky linear log",
         ]:
@@ -3825,14 +3883,22 @@ class RadialTab(QWidget):
             return
 
         try:
-            if self.plot_mode.currentText() in ["2θ linear", "2θ log"]:
+            mode = self.plot_mode.currentText()
+            transform = RADIAL_TRANSFORMED_MODES.get(mode)
+            if mode in ["2θ linear", "2θ log"]:
                 x_label = "2θ"
                 x_unit = "°"
+                y_label = "I"
+            elif transform is not None:
+                x_label = transform_x_axis_label(transform, self.q_axis_unit_label())
+                x_unit = ""
+                y_label = transform_y_axis_label(transform, self.q_axis_unit_label())
             else:
                 x_label = "q"
                 x_unit = " Å⁻¹" if self.q_axis_unit == "A" else " nm⁻¹"
+                y_label = "I"
             self.graph_coordinate_label.setText(
-                f"{x_label} = {event.xdata:.6g}{x_unit} | I = {event.ydata:.6g}"
+                f"{x_label} = {event.xdata:.6g}{x_unit} | {y_label} = {event.ydata:.6g}"
             )
         except Exception:
             self.graph_coordinate_label.setText("q = - | I = -")

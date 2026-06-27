@@ -67,6 +67,44 @@ from .ui_style import (
     style_q_geometry_buttons,
 )
 
+ANISOTROPY_TRANSFORMED_MODES = {
+    "Guinier ln(I(q)) vs q²": {"y_transform": "ln_i", "x_power": 2, "x_label": "q²", "y_label": "ln(I(q))"},
+    "Porod q⁴I(q) vs q": {"power": 4, "x_power": 1, "x_label": "q", "y_label": "q⁴I(q)"},
+    "Kratky q²I(q) vs q": {"power": 2, "x_power": 1, "x_label": "q", "y_label": "q²I(q)"},
+    "Debye-Bueche 1/sqrt(I(q)) vs q²": {"y_transform": "inv_sqrt_i", "x_power": 2, "x_label": "q²", "y_label": "1/sqrt(I(q))"},
+    "Ornstein-Zernike 1/I(q) vs q²": {"y_transform": "inv_i", "x_power": 2, "x_label": "q²", "y_label": "1/I(q)"},
+    "q⁴I(q) vs q⁴": {"power": 4, "x_power": 4, "x_label": "q⁴", "y_label": "q⁴I(q)"},
+}
+ANISOTROPY_LOG_X_MODES = {"log-log", "log-lin", "log log", "log linear"}
+ANISOTROPY_LOG_Y_MODES = {"log-log", "lin-log", "log log", "linear log"}
+SUPERSCRIPT_DIGITS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+
+
+def format_power_unit(unit, power):
+    exponent = str(-int(power)).translate(SUPERSCRIPT_DIGITS)
+    return f"{unit}{exponent}"
+
+
+def transform_x_axis_label(transform, q_unit):
+    power = transform.get("x_power", 1)
+    if power == 1:
+        return f"q / {format_power_unit(q_unit, 1)}"
+    return f"{transform['x_label']} / {format_power_unit(q_unit, power)}"
+
+
+def transform_y_axis_label(transform, q_unit):
+    y_transform = transform.get("y_transform")
+    if y_transform == "ln_i":
+        return "ln(I(q) / a.u.)"
+    if y_transform == "inv_sqrt_i":
+        return "1/sqrt(I(q)) / a.u.⁻¹/²"
+    if y_transform == "inv_i":
+        return "1/I(q) / a.u.⁻¹"
+    power = transform.get("power", 0)
+    if power:
+        return f"{transform['y_label']} / a.u. {format_power_unit(q_unit, power)}"
+    return f"{transform['y_label']} / a.u."
+
 
 # ============================================================
 # =========================== TOOLS ===========================
@@ -1499,7 +1537,19 @@ class HermansTab(QWidget):
         self.plot_toolbar = NavigationToolbar(self.canvas, self)
 
         self.anisotropy_plot_mode = QComboBox()
-        self.anisotropy_plot_mode.addItems(["log-log", "lin-lin", "lin-log", "log-lin", "Kratky"])
+        self.anisotropy_plot_mode.addItems([
+            "log-log",
+            "log-lin",
+            "lin-log",
+            "lin-lin",
+            "Guinier ln(I(q)) vs q²",
+            "Porod q⁴I(q) vs q",
+            "Kratky q²I(q) vs q",
+            "Debye-Bueche 1/sqrt(I(q)) vs q²",
+            "Ornstein-Zernike 1/I(q) vs q²",
+            "q⁴I(q) vs q⁴",
+        ])
+        self.anisotropy_plot_mode.insertSeparator(4)
         self.anisotropy_plot_mode.setFixedWidth(120)
         self.anisotropy_plot_mode.currentIndexChanged.connect(self.calculate_anisotropy)
 
@@ -1996,6 +2046,12 @@ class HermansTab(QWidget):
 
     def graph_coordinate_labels(self):
         if self.is_anisotropy_mode():
+            transform = ANISOTROPY_TRANSFORMED_MODES.get(self.anisotropy_plot_mode.currentText())
+            if transform is not None:
+                return (
+                    transform_x_axis_label(transform, self.q_axis_unit_label()),
+                    transform_y_axis_label(transform, self.q_axis_unit_label()),
+                )
             return "q", "I"
         return "ψ", "I"
 
@@ -2005,9 +2061,10 @@ class HermansTab(QWidget):
 
         try:
             if self.is_anisotropy_mode():
-                unit_label = "Å⁻¹" if self.q_axis_unit == "A" else "nm⁻¹"
+                x_name, y_name = self.graph_coordinate_labels()
+                unit_label = "" if x_name != "q" else (" Å⁻¹" if self.q_axis_unit == "A" else " nm⁻¹")
                 self.graph_coordinate_label.setText(
-                    f"q = {event.xdata:.6g} {unit_label} | I = {event.ydata:.6g}"
+                    f"{x_name} = {event.xdata:.6g}{unit_label} | {y_name} = {event.ydata:.6g}"
                 )
             else:
                 x_name, y_name = self.graph_coordinate_labels()
@@ -2023,7 +2080,8 @@ class HermansTab(QWidget):
             return
 
         if self.is_anisotropy_mode():
-            self.graph_coordinate_label.setText("q = - | I = -")
+            x_name, y_name = self.graph_coordinate_labels()
+            self.graph_coordinate_label.setText(f"{x_name} = - | {y_name} = -")
         else:
             x_name, y_name = self.graph_coordinate_labels()
             self.graph_coordinate_label.setText(f"{x_name} = - | {y_name} = -")
@@ -2033,6 +2091,9 @@ class HermansTab(QWidget):
 
     def q_axis_label(self):
         return "q / Å⁻¹" if self.q_axis_unit == "A" else "q / nm⁻¹"
+
+    def q_axis_unit_label(self):
+        return "Å" if self.q_axis_unit == "A" else "nm"
 
     def on_graph_button_press(self, event):
         if event.button != 1 or not self.is_anisotropy_mode():
@@ -3096,6 +3157,7 @@ class HermansTab(QWidget):
 
         plot_mode = self.anisotropy_plot_mode.currentText()
         q_display = q * self.q_display_factor()
+        transform = ANISOTROPY_TRANSFORMED_MODES.get(plot_mode)
         x_values = q_display
         y_iv = iv
         y_ih = ih
@@ -3104,16 +3166,30 @@ class HermansTab(QWidget):
         x_scale = "linear"
         y_scale = "linear"
 
-        if plot_mode == "Kratky":
-            y_iv = iv * q_display ** 2
-            y_ih = ih * q_display ** 2
-            y_label = "q² I(q)"
-        elif plot_mode == "log-log":
+        if transform is not None:
+            x_values = q_display ** transform["x_power"]
+            y_transform = transform.get("y_transform")
+            if y_transform == "ln_i":
+                y_iv = np.log(iv)
+                y_ih = np.log(ih)
+            elif y_transform == "inv_sqrt_i":
+                y_iv = 1.0 / np.sqrt(iv)
+                y_ih = 1.0 / np.sqrt(ih)
+            elif y_transform == "inv_i":
+                y_iv = 1.0 / iv
+                y_ih = 1.0 / ih
+            else:
+                power = transform.get("power", 0)
+                y_iv = iv * q_display ** power
+                y_ih = ih * q_display ** power
+            x_label = transform_x_axis_label(transform, self.q_axis_unit_label())
+            y_label = transform_y_axis_label(transform, self.q_axis_unit_label())
+        elif plot_mode in ANISOTROPY_LOG_X_MODES and plot_mode in ANISOTROPY_LOG_Y_MODES:
             x_scale = "log"
             y_scale = "log"
-        elif plot_mode == "lin-log":
+        elif plot_mode in ANISOTROPY_LOG_Y_MODES:
             y_scale = "log"
-        elif plot_mode == "log-lin":
+        elif plot_mode in ANISOTROPY_LOG_X_MODES:
             x_scale = "log"
 
         plot_valid_iv = np.isfinite(x_values) & np.isfinite(y_iv)
@@ -3141,14 +3217,19 @@ class HermansTab(QWidget):
             q_min = min(self.q_min_filter.value(), self.q_max_filter.value())
             q_max = max(self.q_min_filter.value(), self.q_max_filter.value())
             if q_max > q_min:
+                x_min_display = q_min * self.q_display_factor()
+                x_max_display = q_max * self.q_display_factor()
+                if transform is not None:
+                    x_min_display = x_min_display ** transform["x_power"]
+                    x_max_display = x_max_display ** transform["x_power"]
                 if x_scale == "log":
                     positive_x = x_values[np.isfinite(x_values) & (x_values > 0)]
-                    lower = q_min * self.q_display_factor() if q_min > 0 else (float(np.nanmin(positive_x)) if positive_x.size else None)
-                    upper = q_max * self.q_display_factor()
+                    lower = x_min_display if q_min > 0 else (float(np.nanmin(positive_x)) if positive_x.size else None)
+                    upper = x_max_display
                     if lower is not None and upper > lower:
                         ax.set_xlim(lower, upper)
                 else:
-                    ax.set_xlim(q_min * self.q_display_factor(), q_max * self.q_display_factor())
+                    ax.set_xlim(x_min_display, x_max_display)
         ax.grid(True, which="both")
         install_selectable_legend(ax, ax.legend(loc="best"))
         self.canvas.draw_idle()
