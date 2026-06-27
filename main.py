@@ -504,18 +504,40 @@ class MainWindow(QMainWindow):
         self.sync_pages_width_to_window()
 
     def build_menu_bar(self):
-        tools_menu = self.menuBar().addMenu("Tools")
+        menu_bar = self.menuBar()
+        tools_menu = menu_bar.addMenu("Tools")
 
         find_center_action = QAction("Find center", self)
         find_center_action.triggered.connect(self.open_center_tab)
         tools_menu.addAction(find_center_action)
 
-        self.feedback_menu_action = QAction("💬", self)
-        self.feedback_menu_action.setToolTip("Feedback")
-        self.feedback_menu_action.setStatusTip("Feedback")
-        self.feedback_menu_action.triggered.connect(self.open_issue_report_dialog)
-        self.feedback_menu_action.setVisible(not self.is_development_copy())
-        self.menuBar().addAction(self.feedback_menu_action)
+        if self.is_development_copy():
+            return
+
+        if sys.platform == "darwin":
+            feedback_action = QAction("💬 Feedback", self)
+            feedback_action.triggered.connect(self.open_issue_report_dialog)
+            tools_menu.addAction(feedback_action)
+            return
+
+        self.feedback_menu_button = QPushButton("💬")
+        self.feedback_menu_button.setFixedSize(34, 24)
+        self.feedback_menu_button.setToolTip("Feedback")
+        self.feedback_menu_button.setCursor(Qt.PointingHandCursor)
+        self.feedback_menu_button.setStyleSheet("""
+            QPushButton {
+                border: 0px;
+                border-radius: 4px;
+                background: transparent;
+                font-size: 16px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background: #eeeeee;
+            }
+        """)
+        self.feedback_menu_button.clicked.connect(self.open_issue_report_dialog)
+        menu_bar.setCornerWidget(self.feedback_menu_button, Qt.TopRightCorner)
 
     def open_center_tab(self):
         if not hasattr(self, "pages") or not hasattr(self, "centre_tab"):
