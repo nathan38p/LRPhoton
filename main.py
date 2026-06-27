@@ -532,6 +532,8 @@ class MainWindow(QMainWindow):
         """)
         self.dev_label.setFixedHeight(18)
         self.dev_label.setVisible(self.is_development_copy())
+        self.dev_label.setCursor(Qt.PointingHandCursor)
+        self.dev_label.mousePressEvent = lambda event: self.open_statistics_dialog()
 
         self.update_status_label = QLabel("")
         self.update_status_label.setStyleSheet("""
@@ -671,6 +673,22 @@ class MainWindow(QMainWindow):
         self.build_tabs()
         self.resize_to_available_screen()
         self.sync_pages_width_to_window()
+
+    def open_statistics_dialog(self):
+        if not self.is_development_copy():
+            return
+
+        try:
+            stats_path = Path(__file__).resolve().parent / "tabs" / "stats.py"
+            spec = importlib.util.spec_from_file_location("lrphoton_stats_dialog", stats_path)
+            if spec is None or spec.loader is None:
+                raise ImportError("Could not load tabs/stats.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            dialog = module.LRPhotonStatsDialog(self)
+            dialog.exec()
+        except Exception as exc:
+            QMessageBox.warning(self, "Statistics error", f"Could not open LRPhoton statistics:\n{exc}")
 
     def build_menu_bar(self):
         menu_bar = self.menuBar()
