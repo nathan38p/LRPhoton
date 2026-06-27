@@ -863,6 +863,7 @@ def pyfai_radial_average(
     # Normal radial integration defaults now match the Test window defaults:
     # bbox / histogram / cython, no automatic detector mask, no solid-angle correction.
     # q range and azimuthal sector still come from the Radial parameters panel and remain priority.
+    # Use strict mask: finite, >0, <4e9 (matches Test window default)
     invalid_mask = None
     pixel1_m = float(pixel_y_mm) * 1e-3
     pixel2_m = float(pixel_x_mm) * 1e-3

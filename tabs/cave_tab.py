@@ -2709,6 +2709,16 @@ class CaveTab(QWidget):
         self.cave_angle_label = QLabel("Cave angle:")
         form_layout.addWidget(self.cave_angle_label, 3, 0)
         form_layout.addWidget(self.cave_angle_spin, 3, 1)
+        # Hide Center X, Center Y, and Cave angle controls in the UI, but keep their spinboxes and values for internal use
+        for widget in [
+            self.centre_x_label,
+            self.xc_spin,
+            self.centre_y_label,
+            self.yc_spin,
+            self.cave_angle_label,
+            self.cave_angle_spin,
+        ]:
+            widget.hide()
 
         self.frame_label = QLabel("Frame:")
         self.frame_spin = QSpinBox()
@@ -2957,10 +2967,7 @@ class CaveTab(QWidget):
 
     def set_controls_enabled(self, enabled):
         for widget in [
-            self.xc_spin,
-            self.yc_spin,
             self.beamstop_y_spin,
-            self.cave_angle_spin,
             self.frame_spin,
             self.frame_slider,
             self.nan_operator_combo,
@@ -3386,7 +3393,10 @@ class CaveTab(QWidget):
 
         self.beamstop_y_spin.setEnabled(is_id13 and self.image is not None)
         self.id13_beamstop_checkbox.setEnabled(is_id13 and self.image is not None)
-        self.cave_angle_spin.setEnabled(self.image is not None)
+        self.cave_angle_spin.setEnabled(False)
+        self.cave_angle_spin.setVisible(False)
+        if hasattr(self, "cave_angle_label"):
+            self.cave_angle_label.setVisible(False)
 
         self.id13_beamstop_checkbox.blockSignals(True)
         self.id13_beamstop_checkbox.setChecked(is_id13)

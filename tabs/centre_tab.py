@@ -238,62 +238,128 @@ def read_h5_first_image(filename: str):
 
 def compute_directional_iq_nm_general(img, xc, yc, angle_deg, half_width,
                                       d_m, px_x_mm, px_y_mm, lambda_a):
-    ny, nx = img.shape
+    """Directional I(q) using the same pyFAI integration mode as the Radial tab.
 
-    px_x_m = px_x_mm * 1e-3
-    px_y_m = px_y_mm * 1e-3
-    lambda_m = lambda_a * 1e-10
+    Default integration mode intentionally matches Radial:
+    bbox / histogram / cython, q_nm^-1, no detector mask, no solid-angle correction.
+    The angle is used as a narrow azimuthal sector around the requested direction.
+    """
+    img = np.asarray(img, dtype=np.float64)
 
-    theta = np.deg2rad(angle_deg)
+    try:
+        try:
+            import pyFAI
+            try:
+                from pyFAI.integrator.azimuthal import AzimuthalIntegrator
+            except Exception:
+                from pyFAI.azimuthalIntegrator import AzimuthalIntegrator
+        except Exception as exc:
+            raise RuntimeError(f"pyFAI unavailable: {exc}") from exc
 
-    ux = np.cos(theta)
-    uy = np.sin(theta)
-    vx = -np.sin(theta)
-    vy = np.cos(theta)
+        pixel1_m = float(px_y_mm) * 1e-3
+        pixel2_m = float(px_x_mm) * 1e-3
+        wavelength_m = float(lambda_a) * 1e-10
 
-    corners_x = np.array([1, nx, 1, nx], dtype=float) - xc
-    corners_y = np.array([1, 1, ny, ny], dtype=float) - yc
+        integrator = AzimuthalIntegrator(
+            dist=float(d_m),
+            poni1=float(yc) * pixel1_m,
+            poni2=float(xc) * pixel2_m,
+            pixel1=pixel1_m,
+            pixel2=pixel2_m,
+            wavelength=wavelength_m,
+        )
 
-    t_corners = corners_x * ux + corners_y * uy
-    t_max = int(np.floor(np.max(t_corners)))
+        # Convert the line direction into a narrow pyFAI azimuth sector.
+        # Keep a small minimum width so the graph remains stable while moving the center.
+        sector_half_width_deg = max(0.5, float(half_width) if float(half_width) > 0 else 0.5)
+        center_angle = ((float(angle_deg) + 180.0) % 360.0) - 180.0
+        az_min = center_angle - sector_half_width_deg
+        az_max = center_angle + sector_half_width_deg
+        if az_min < -180.0:
+            az_min = -180.0
+        if az_max > 180.0:
+            az_max = 180.0
+        if az_min >= az_max:
+            az_min, az_max = None, None
 
-    if t_max < 0:
-        return np.array([]), np.array([])
+        radial_range = None
+        n_bins = max(200, int(np.hypot(*img.shape)))
+        result = integrator.integrate1d(
+            img.astype(np.float32, copy=False),
+            n_bins,
+            unit="q_nm^-1",
+            radial_range=radial_range,
+            azimuth_range=(az_min, az_max) if az_min is not None and az_max is not None else None,
+            mask=None,
+            dummy=None,
+            delta_dummy=None,
+            method=("bbox", "histogram", "cython"),
+            correctSolidAngle=False,
+        )
 
-    t_vals = np.arange(0, t_max + 1, dtype=float)
-    q_vals = np.full_like(t_vals, np.nan, dtype=float)
-    i_vals = np.full_like(t_vals, np.nan, dtype=float)
+        q_vals = np.asarray(getattr(result, "radial", result[0]), dtype=float)
+        i_vals = np.asarray(getattr(result, "intensity", result[1]), dtype=float)
+        valid = np.isfinite(q_vals) & np.isfinite(i_vals) & (q_vals > 0) & (i_vals > 0)
+        return q_vals[valid], i_vals[valid]
 
-    half_width = int(round(half_width))
+    except Exception:
+        # Fallback to the previous pixel-line method if pyFAI is unavailable.
+        ny, nx = img.shape
 
-    for i, t in enumerate(t_vals):
-        if half_width == 0:
-            x = int(round(xc + t * ux))
-            y = int(round(yc + t * uy))
+        px_x_m = px_x_mm * 1e-3
+        px_y_m = px_y_mm * 1e-3
+        lambda_m = lambda_a * 1e-10
 
-            if 1 <= x <= nx and 1 <= y <= ny:
-                i_vals[i] = img[y - 1, x - 1]
-        else:
-            vals = []
-            for w in range(-half_width, half_width + 1):
-                x = int(round(xc + t * ux + w * vx))
-                y = int(round(yc + t * uy + w * vy))
+        theta = np.deg2rad(angle_deg)
+
+        ux = np.cos(theta)
+        uy = np.sin(theta)
+        vx = -np.sin(theta)
+        vy = np.cos(theta)
+
+        corners_x = np.array([1, nx, 1, nx], dtype=float) - xc
+        corners_y = np.array([1, 1, ny, ny], dtype=float) - yc
+
+        t_corners = corners_x * ux + corners_y * uy
+        t_max = int(np.floor(np.max(t_corners)))
+
+        if t_max < 0:
+            return np.array([]), np.array([])
+
+        t_vals = np.arange(0, t_max + 1, dtype=float)
+        q_vals = np.full_like(t_vals, np.nan, dtype=float)
+        i_vals = np.full_like(t_vals, np.nan, dtype=float)
+
+        half_width = int(round(half_width))
+
+        for i, t in enumerate(t_vals):
+            if half_width == 0:
+                x = int(round(xc + t * ux))
+                y = int(round(yc + t * uy))
 
                 if 1 <= x <= nx and 1 <= y <= ny:
-                    vals.append(img[y - 1, x - 1])
+                    i_vals[i] = img[y - 1, x - 1]
+            else:
+                vals = []
+                for w in range(-half_width, half_width + 1):
+                    x = int(round(xc + t * ux + w * vx))
+                    y = int(round(yc + t * uy + w * vy))
 
-            if vals:
-                vals = np.asarray(vals, dtype=float)
-                if np.any(np.isfinite(vals)):
-                    i_vals[i] = np.nanmean(vals)
+                    if 1 <= x <= nx and 1 <= y <= ny:
+                        vals.append(img[y - 1, x - 1])
 
-        dx_m = t * ux * px_x_m
-        dy_m = t * uy * px_y_m
-        r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
-        two_theta = np.arctan(r_m / d_m)
-        q_vals[i] = ((4 * np.pi / lambda_m) * np.sin(two_theta / 2)) / 1e9
+                if vals:
+                    vals = np.asarray(vals, dtype=float)
+                    if np.any(np.isfinite(vals)):
+                        i_vals[i] = np.nanmean(vals)
 
-    return q_vals, i_vals
+            dx_m = t * ux * px_x_m
+            dy_m = t * uy * px_y_m
+            r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+            two_theta = np.arctan(r_m / d_m)
+            q_vals[i] = ((4 * np.pi / lambda_m) * np.sin(two_theta / 2)) / 1e9
+
+        return q_vals, i_vals
 
 
 # ============================================================
@@ -1742,7 +1808,9 @@ class CentreTab(QWidget):
         px_x = self.edit_px_x.value()
         px_y = self.edit_px_y.value()
         lam = self.edit_lambda.value()
-        half_width = 0
+        # Find Center uses the same pyFAI integration mode as Radial.
+        # This value is interpreted as the half-width of the azimuthal sector in degrees.
+        half_width = 0.5
 
         ang_h = self.theta_deg
         ang_h2 = self.theta_deg + 180

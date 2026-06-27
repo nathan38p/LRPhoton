@@ -244,8 +244,20 @@ def get_header_float(header: dict, *names):
             try:
                 return float(normalize_decimal_text(header[name]))
             except (TypeError, ValueError):
-                return None
+                continue
     return None
+
+
+def get_header_center_values(header: dict):
+    cx = get_header_float(header, "Center_1", "center_1", "CenterX", "center_x")
+    cy = get_header_float(header, "Center_2", "center_2", "CenterY", "center_y")
+
+    if cx is not None and cy is not None:
+        return cx, cy, "Center_1/Center_2"
+
+    tx = get_header_float(header, "Theoretical_Center_1", "theoretical_center_1")
+    ty = get_header_float(header, "Theoretical_Center_2", "theoretical_center_2")
+    return tx, ty, "Theoretical fallback"
 
 
 def read_dat_header_float(file_path: Path, key: str):
@@ -376,14 +388,28 @@ def azimuthal_normalization_factor(header: dict, mode: str):
 
     return 1.0, "raw"
 
+def rotate_psi_reference(psi_values, reference_angle_deg):
+    psi = np.asarray(psi_values, dtype=float)
+    return (psi - float(reference_angle_deg)) % 360.0
 
 ID02_DEFAULT_CENTER_X = 914.4
 ID02_DEFAULT_CENTER_Y = 996.5
 ID02_DEFAULT_DISTANCE_M = 10.0002
 ID02_DEFAULT_PIXEL_MM = 0.075
 ID02_DEFAULT_WAVELENGTH_A = 1.01402
-CENTER_X_KEYS = ("Center_1", "center_1", "CenterX", "center_x", "BeamCenterX", "Beam_x", "beam_x")
-CENTER_Y_KEYS = ("Center_2", "center_2", "CenterY", "center_y", "BeamCenterY", "Beam_y", "beam_y")
+CENTER_X_KEYS = (
+    "Center_1", "center_1",
+    "CenterX", "center_x",
+    "BeamCenterX", "Beam_x", "beam_x",
+    "Theoretical_Center_1", "theoretical_center_1",
+)
+
+CENTER_Y_KEYS = (
+    "Center_2", "center_2",
+    "CenterY", "center_y",
+    "BeamCenterY", "Beam_y", "beam_y",
+    "Theoretical_Center_2", "theoretical_center_2",
+)
 
 
 # ============================================================
@@ -552,6 +578,458 @@ def pyfai_azimuthal_average(
 
 
 # ============================================================
+# PYFAI AZIMUTHAL TEST DIALOG
+# ============================================================
+
+class PyFAIAzimuthalTestDialog(QDialog):
+    """Interactive pyFAI azimuthal integration tester with pyFAI-like options."""
+
+    def __init__(self, parent, image, file_path, geometry, header=None, frame_count=1, frame_index=None):
+        super().__init__(parent)
+        self.setWindowTitle("pyFAI azimuthal integration test")
+        self.resize(1250, 780)
+
+        self.image = np.asarray(image, dtype=np.float64)
+        self.file_path = Path(file_path)
+        self.geometry = dict(geometry)
+        self.header = dict(header or {})
+        self.frame_count = int(frame_count or 1)
+        self.frame_index = frame_index
+        self.reference_path = None
+
+        root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(8, 8, 8, 8)
+        root_layout.setSpacing(10)
+
+        left_panel = QWidget()
+        left_panel.setFixedWidth(390)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
+        root_layout.addWidget(left_panel, stretch=0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        left_layout.addWidget(scroll, stretch=1)
+        controls = QWidget()
+        scroll.setWidget(controls)
+        controls_layout = QVBoxLayout(controls)
+        controls_layout.setContentsMargins(4, 4, 4, 4)
+        controls_layout.setSpacing(8)
+
+        reference_box = QGroupBox("Reference I(ψ)")
+        reference_layout = QVBoxLayout(reference_box)
+        self.reference_combo = QComboBox()
+        self.reference_combo.addItem("No reference", None)
+        self.populate_reference_combo()
+        self.reference_combo.currentIndexChanged.connect(self.recalculate)
+        self.reference_browse_button = QPushButton("Choose reference .dat...")
+        self.reference_browse_button.clicked.connect(self.choose_reference_file)
+        reference_layout.addWidget(self.reference_combo)
+        reference_layout.addWidget(self.reference_browse_button)
+        controls_layout.addWidget(reference_box)
+
+        geometry_box = QGroupBox("Geometry used")
+        geometry_layout = QVBoxLayout(geometry_box)
+        self.geometry_info_label = QLabel(self.geometry_summary_text())
+        self.geometry_info_label.setWordWrap(True)
+        self.geometry_info_label.setStyleSheet("font-size: 11px; color: #333; padding: 4px;")
+        geometry_layout.addWidget(self.geometry_info_label)
+        controls_layout.addWidget(geometry_box)
+
+        method_box = QGroupBox("pyFAI method")
+        method_layout = QFormLayout(method_box)
+        self.split_combo = QComboBox()
+        for label, value in [("Any", "*"), ("No splitting", "no"), ("Bounding box", "bbox"), ("Pseudo split (2D)", "pseudo"), ("Full splitting", "full")]:
+            self.split_combo.addItem(label, value)
+        self.split_combo.setCurrentText("Bounding box")
+        self.split_combo.currentIndexChanged.connect(self.recalculate)
+
+        self.algorithm_combo = QComboBox()
+        for label, value in [("Any", "*"), ("Histogram", "histogram"), ("LUT", "lut"), ("CSR", "csr"), ("CSC", "csc")]:
+            self.algorithm_combo.addItem(label, value)
+        self.algorithm_combo.setCurrentText("Histogram")
+        self.algorithm_combo.currentIndexChanged.connect(self.recalculate)
+
+        self.implementation_combo = QComboBox()
+        for label, value in [("Any", "*"), ("Python", "python"), ("Cython", "cython"), ("OpenCL", "opencl")]:
+            self.implementation_combo.addItem(label, value)
+        self.implementation_combo.setCurrentText("Cython")
+        self.implementation_combo.currentIndexChanged.connect(self.recalculate)
+
+        method_layout.addRow("Pixel splitting:", self.split_combo)
+        method_layout.addRow("Algorithm:", self.algorithm_combo)
+        method_layout.addRow("Implementation:", self.implementation_combo)
+        controls_layout.addWidget(method_box)
+
+        preprocessing_box = QGroupBox("Preprocessing")
+        preprocessing_layout = QFormLayout(preprocessing_box)
+        self.solid_angle_checkbox = QCheckBox("Solid angle correction")
+        self.solid_angle_checkbox.setChecked(False)
+        self.solid_angle_checkbox.stateChanged.connect(self.recalculate)
+        self.mask_combo = QComboBox()
+        self.mask_combo.addItem("Strict: finite, >0, <4e9", "strict")
+        self.mask_combo.addItem("Finite only", "finite_only")
+        self.mask_combo.addItem("Finite and positive", "finite_positive")
+        self.mask_combo.addItem("No mask", "none")
+        self.mask_combo.setCurrentIndex(3)
+        self.mask_combo.currentIndexChanged.connect(self.recalculate)
+        self.dummy_edit = QLineEdit()
+        self.dummy_edit.setPlaceholderText("none")
+        self.dummy_edit.textChanged.connect(self.recalculate)
+        self.delta_dummy_edit = QLineEdit()
+        self.delta_dummy_edit.setPlaceholderText("none")
+        self.delta_dummy_edit.textChanged.connect(self.recalculate)
+        self.polarization_edit = QLineEdit()
+        self.polarization_edit.setPlaceholderText("none, e.g. 0.99")
+        self.polarization_edit.textChanged.connect(self.recalculate)
+        preprocessing_layout.addRow(self.solid_angle_checkbox)
+        preprocessing_layout.addRow("Auto mask:", self.mask_combo)
+        preprocessing_layout.addRow("Dummy:", self.dummy_edit)
+        preprocessing_layout.addRow("Delta dummy:", self.delta_dummy_edit)
+        preprocessing_layout.addRow("Polarization:", self.polarization_edit)
+        controls_layout.addWidget(preprocessing_box)
+
+        integration_box = QGroupBox("Azimuthal integration")
+        integration_layout = QFormLayout(integration_box)
+        self.psi_points_spin = QSpinBox()
+        self.psi_points_spin.setRange(10, 10000)
+        self.psi_points_spin.setValue(int(self.geometry.get("psi_points", 360)))
+        self.psi_points_spin.valueChanged.connect(self.recalculate)
+        self.q_min_edit = QLineEdit(str(self.geometry.get("q_min", "") or ""))
+        self.q_min_edit.setPlaceholderText("auto")
+        self.q_min_edit.textChanged.connect(self.recalculate)
+        self.q_max_edit = QLineEdit(str(self.geometry.get("q_max", "") or ""))
+        self.q_max_edit.setPlaceholderText("auto")
+        self.q_max_edit.textChanged.connect(self.recalculate)
+        self.axis_mask_spin = QSpinBox()
+        self.axis_mask_spin.setRange(0, 100)
+        self.axis_mask_spin.setValue(int(self.geometry.get("axis_mask_px", 0)))
+        self.axis_mask_spin.valueChanged.connect(self.recalculate)
+        self.min_pixels_spin = QSpinBox()
+        self.min_pixels_spin.setRange(1, 1000000)
+        self.min_pixels_spin.setValue(int(self.geometry.get("min_pixels", 1)))
+        self.min_pixels_spin.valueChanged.connect(self.recalculate)
+        integration_layout.addRow("ψ points:", self.psi_points_spin)
+        integration_layout.addRow("q min nm⁻¹:", self.q_min_edit)
+        integration_layout.addRow("q max nm⁻¹:", self.q_max_edit)
+        integration_layout.addRow("Axis mask px:", self.axis_mask_spin)
+        integration_layout.addRow("Min pixels/bin:", self.min_pixels_spin)
+        controls_layout.addWidget(integration_box)
+
+        geometry_offset_box = QGroupBox("Manual center offsets")
+        geometry_offset_layout = QFormLayout(geometry_offset_box)
+        self.center_x_shift = QDoubleSpinBox()
+        self.center_x_shift.setDecimals(3)
+        self.center_x_shift.setRange(-50, 50)
+        self.center_x_shift.setSingleStep(0.1)
+        self.center_x_shift.setValue(0)
+        self.center_x_shift.valueChanged.connect(self.recalculate)
+        self.center_y_shift = QDoubleSpinBox()
+        self.center_y_shift.setDecimals(3)
+        self.center_y_shift.setRange(-50, 50)
+        self.center_y_shift.setSingleStep(0.1)
+        self.center_y_shift.setValue(0)
+        self.center_y_shift.valueChanged.connect(self.recalculate)
+        geometry_offset_layout.addRow("Center Δx px:", self.center_x_shift)
+        geometry_offset_layout.addRow("Center Δy px:", self.center_y_shift)
+        controls_layout.addWidget(geometry_offset_box)
+
+        display_box = QGroupBox("Display / correction")
+        display_layout = QFormLayout(display_box)
+        self.x_scale_combo = QComboBox()
+        self.x_scale_combo.addItems(["linear", "log"])
+        self.x_scale_combo.currentTextChanged.connect(self.recalculate)
+        self.y_scale_combo = QComboBox()
+        self.y_scale_combo.addItems(["linear", "log"])
+        self.y_scale_combo.currentTextChanged.connect(self.recalculate)
+        self.normalization_combo = QComboBox()
+        self.normalization_combo.addItem("Raw detector intensity", "raw")
+        self.normalization_combo.addItem("Counts/s: I / ExposureTime", "exposure")
+        self.normalization_combo.addItem("I / TransmittedFlux", "flux")
+        self.normalization_combo.addItem("Counts/s/flux", "exposure_flux")
+        self.normalization_combo.currentIndexChanged.connect(self.recalculate)
+        self.intensity_scale_spin = QDoubleSpinBox()
+        self.intensity_scale_spin.setDecimals(6)
+        self.intensity_scale_spin.setRange(1e-12, 1e12)
+        self.intensity_scale_spin.setValue(1.0)
+        self.intensity_scale_spin.valueChanged.connect(self.recalculate)
+        display_layout.addRow("x scale:", self.x_scale_combo)
+        display_layout.addRow("y scale:", self.y_scale_combo)
+        display_layout.addRow("Normalization:", self.normalization_combo)
+        display_layout.addRow("I scale:", self.intensity_scale_spin)
+        controls_layout.addWidget(display_box)
+
+        self.save_button = QPushButton("Save tested I(ψ) .dat")
+        self.save_button.clicked.connect(self.save_current_curve)
+        controls_layout.addWidget(self.save_button)
+        controls_layout.addStretch(1)
+
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        left_layout.addWidget(self.close_button)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        root_layout.addWidget(right_panel, stretch=1)
+
+        self.canvas = PlotCanvas()
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        right_layout.addWidget(self.toolbar)
+        right_layout.addWidget(self.canvas, stretch=1)
+
+        self.log_label = QLabel("")
+        self.log_label.setWordWrap(True)
+        right_layout.addWidget(self.log_label)
+
+        self.current_psi = None
+        self.current_i = None
+        self.current_counts = None
+        self.current_label = None
+        self.recalculate()
+
+    def geometry_summary_text(self):
+        used_cx = float(self.geometry.get("xc", 0.0))
+        used_cy = float(self.geometry.get("yc", 0.0))
+        used_dist = float(self.geometry.get("distance_m", 0.0))
+        used_px = float(self.geometry.get("pixel_x_mm", 0.0))
+        used_py = float(self.geometry.get("pixel_y_mm", 0.0))
+        used_wav_a = float(self.geometry.get("wavelength_a", 0.0))
+        return (
+            f"Used for integration: center=({used_cx:.6g}, {used_cy:.6g}) px ; "
+            f"distance={used_dist:.6g} m ; pixel=({used_px:.6g}, {used_py:.6g}) mm ; "
+            f"λ={used_wav_a:.6g} Å"
+        )
+
+    def populate_reference_combo(self):
+        folder = self.file_path.parent
+        for dat_path in sorted(folder.glob("*.dat")):
+            lower = dat_path.stem.lower()
+            if "azim" in lower or "psi" in lower:
+                self.reference_combo.addItem(dat_path.name, str(dat_path))
+
+    def choose_reference_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose reference I(ψ) DAT", str(self.file_path.parent), "DAT files (*.dat);;All files (*)")
+        if not path:
+            return
+        path = str(Path(path))
+        for index in range(self.reference_combo.count()):
+            if self.reference_combo.itemData(index) == path:
+                self.reference_combo.setCurrentIndex(index)
+                return
+        self.reference_combo.addItem(Path(path).name, path)
+        self.reference_combo.setCurrentIndex(self.reference_combo.count() - 1)
+
+    def parse_float_or_zero(self, text):
+        text = normalize_decimal_text(text).strip()
+        if not text:
+            return 0.0
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0
+
+    def parse_optional_float(self, text):
+        text = normalize_decimal_text(text).strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    def build_mask(self):
+        mode = self.mask_combo.currentData()
+        if mode == "none":
+            return None
+        if mode == "finite_only":
+            return ~np.isfinite(self.image)
+        if mode == "finite_positive":
+            return ~np.isfinite(self.image) | (self.image <= 0)
+        return ~np.isfinite(self.image) | (self.image <= 0) | (self.image >= 4e9)
+
+    def make_integrator(self):
+        try:
+            try:
+                from pyFAI.integrator.azimuthal import AzimuthalIntegrator
+            except Exception:
+                from pyFAI.azimuthalIntegrator import AzimuthalIntegrator
+        except Exception as exc:
+            raise RuntimeError(f"pyFAI unavailable: {exc}") from exc
+
+        dx = float(self.center_x_shift.value())
+        dy = float(self.center_y_shift.value())
+        pixel1_m = float(self.geometry["pixel_y_mm"]) * 1e-3
+        pixel2_m = float(self.geometry["pixel_x_mm"]) * 1e-3
+        wavelength_m = float(self.geometry["wavelength_a"]) * 1e-10
+        return AzimuthalIntegrator(
+            dist=float(self.geometry["distance_m"]),
+            poni1=(float(self.geometry["yc"]) + dy) * pixel1_m,
+            poni2=(float(self.geometry["xc"]) + dx) * pixel2_m,
+            pixel1=pixel1_m,
+            pixel2=pixel2_m,
+            wavelength=wavelength_m,
+        )
+
+    def load_reference_curve(self):
+        path = self.reference_combo.currentData()
+        if not path:
+            return None, None, None
+        psi_values = []
+        intensity_values = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    parts = stripped.replace(",", ".").split()
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        psi_values.append(float(parts[0]))
+                        intensity_values.append(float(parts[1]))
+                    except ValueError:
+                        continue
+            if not psi_values:
+                raise ValueError("no numeric ψ/I rows found")
+            psi = np.asarray(psi_values, dtype=float)
+            intensity = np.asarray(intensity_values, dtype=float)
+            valid = np.isfinite(psi) & np.isfinite(intensity)
+            return psi[valid], intensity[valid], Path(path).name
+        except Exception:
+            return None, None, None
+
+    def compute_test_curve(self):
+        q_min = self.parse_float_or_zero(self.q_min_edit.text())
+        q_max = self.parse_float_or_zero(self.q_max_edit.text())
+        if q_max <= q_min:
+            raise ValueError("q max must be greater than q min for azimuthal integration.")
+
+        integrator = self.make_integrator()
+        try:
+            q_map = np.asarray(integrator.qArray(self.image.shape), dtype=float)
+        except Exception:
+            y, x = np.indices(self.image.shape)
+            dx_px = x + 1 - float(self.geometry["xc"])
+            dy_px = y + 1 - float(self.geometry["yc"])
+            dx_m = dx_px * float(self.geometry["pixel_x_mm"]) * 1e-3
+            dy_m = dy_px * float(self.geometry["pixel_y_mm"]) * 1e-3
+            r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+            two_theta = np.arctan2(r_m, float(self.geometry["distance_m"]))
+            q_map = (4 * np.pi / (float(self.geometry["wavelength_a"]) * 0.1)) * np.sin(two_theta / 2)
+
+        try:
+            chi_map = np.asarray(integrator.center_array(self.image.shape, "chi_rad"), dtype=float)
+        except Exception:
+            chi_map = np.asarray(integrator.chiArray(self.image.shape), dtype=float)
+
+        psi_map = (np.degrees(chi_map) + 360.0) % 360.0
+        weights = self.image.astype(np.float64).copy()
+        if self.solid_angle_checkbox.isChecked():
+            try:
+                solid_angle = np.asarray(integrator.solidAngleArray(self.image.shape), dtype=float)
+                weights = np.divide(weights, solid_angle, out=weights, where=np.isfinite(solid_angle) & (solid_angle > 0))
+            except Exception:
+                pass
+
+        dummy = self.parse_optional_float(self.dummy_edit.text())
+        delta_dummy = self.parse_optional_float(self.delta_dummy_edit.text())
+        if dummy is not None:
+            tolerance = delta_dummy if delta_dummy is not None else 0.0
+            if tolerance > 0:
+                dummy_mask = np.abs(weights - dummy) <= tolerance
+            else:
+                dummy_mask = weights == dummy
+        else:
+            dummy_mask = np.zeros_like(weights, dtype=bool)
+
+        mask = self.build_mask()
+        valid = np.isfinite(q_map) & np.isfinite(psi_map) & np.isfinite(weights)
+        valid &= q_map >= q_min
+        valid &= q_map <= q_max
+        if mask is not None:
+            valid &= ~mask
+        if dummy is not None:
+            valid &= ~dummy_mask
+
+        axis_mask_px = int(self.axis_mask_spin.value())
+        if axis_mask_px > 0:
+            y, x = np.indices(self.image.shape)
+            dx_px = x + 1 - float(self.geometry["xc"])
+            dy_px = y + 1 - float(self.geometry["yc"])
+            valid &= (np.abs(dx_px) > axis_mask_px) & (np.abs(dy_px) > axis_mask_px)
+
+        psi_values = psi_map[valid]
+        intensity_values = weights[valid]
+        if psi_values.size == 0:
+            raise ValueError("No valid pixel found in selected q crown.")
+
+        edges = np.linspace(0.0, 360.0, int(self.psi_points_spin.value()) + 1)
+        sums, _ = np.histogram(psi_values, bins=edges, weights=intensity_values)
+        counts, _ = np.histogram(psi_values, bins=edges)
+        psi_sums, _ = np.histogram(psi_values, bins=edges, weights=psi_values)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            intensity = sums / counts
+            psi = psi_sums / counts
+        valid_bins = np.isfinite(psi) & np.isfinite(intensity) & (counts >= max(1, int(self.min_pixels_spin.value())))
+        psi = psi[valid_bins]
+        intensity = intensity[valid_bins]
+        counts = counts[valid_bins]
+
+        normalization_factor, _label = azimuthal_normalization_factor(self.header, self.normalization_combo.currentData())
+        intensity = intensity * normalization_factor * float(self.intensity_scale_spin.value())
+        return psi, intensity, counts
+
+    def recalculate(self):
+        try:
+            psi, intensity, counts = self.compute_test_curve()
+            self.current_psi = psi
+            self.current_i = intensity
+            self.current_counts = counts
+            self.current_label = self.file_path.name
+            self.geometry_info_label.setText(self.geometry_summary_text())
+
+            ax = self.canvas.ax
+            ax.clear()
+            ax.plot(psi, intensity, linewidth=1.4, label=self.current_label)
+            ref_psi, ref_i, ref_name = self.load_reference_curve()
+            if ref_psi is not None and ref_i is not None:
+                ax.plot(ref_psi, ref_i, linewidth=1.4, linestyle="--", label=ref_name)
+            ax.set_xscale(self.x_scale_combo.currentText())
+            ax.set_yscale(self.y_scale_combo.currentText())
+            ax.set_xlabel("ψ / °")
+            ax.set_ylabel("Intensity / a.u.")
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="lower left")
+            self.canvas.draw_idle()
+            self.log_label.clear()
+        except Exception:
+            self.log_label.clear()
+
+    def save_current_curve(self):
+        if self.current_psi is None or self.current_i is None:
+            return
+        parent = self.parent()
+        if parent is None:
+            return
+        safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"azim_test_{self.split_combo.currentData()}_{self.algorithm_combo.currentData()}_{self.implementation_combo.currentData()}").strip("_")
+        out_file = self.file_path.with_name(f"{self.file_path.stem}_{safe_label}.dat")
+        try:
+            with open(out_file, "w", encoding="utf-8") as file:
+                file.write("# psi_deg I_psi pixel_count\n")
+                file.write(f"# source {self.file_path.name}\n")
+                file.write(f"# method {self.split_combo.currentData()} {self.algorithm_combo.currentData()} {self.implementation_combo.currentData()}\n")
+                file.write(f"# q_range_nm-1 {self.q_min_edit.text()} {self.q_max_edit.text()}\n")
+                for psi, intensity, count in zip(self.current_psi, self.current_i, self.current_counts):
+                    file.write(f"{psi:.10g} {intensity:.10g} {int(count)}\n")
+        except Exception:
+            pass
+
+
+# ============================================================
 # CANVAS
 # ============================================================
 
@@ -589,6 +1067,7 @@ class ImageCanvas(FigureCanvas):
         self.last_mask = None
         self.q_map = None
         self.coordinate_mode = "detector"
+        self.reference_angle_deg = 0.0
 
         self.mpl_connect("scroll_event", self._on_scroll)
         self.mpl_connect("button_press_event", self._on_press)
@@ -603,6 +1082,11 @@ class ImageCanvas(FigureCanvas):
 
     def set_coordinate_mode(self, mode):
         self.coordinate_mode = mode
+
+    def set_reference_angle(self, angle_deg):
+        self.reference_angle_deg = float(angle_deg)
+        if self.raw_image is not None:
+            self.show_image(self.raw_image, self.last_xc, self.last_yc, self.last_mask)
 
     def reset_display_limits(self):
         self.display_vmin = None
@@ -693,11 +1177,13 @@ class ImageCanvas(FigureCanvas):
                     ny, _nx = self.raw_image.shape
                     if ny > 0:
                         psi = (y_index / max(1, ny - 1)) * 360.0
-                        psi_text = f"{psi:.3f}°"
+                        psi = rotate_psi_reference(psi, self.reference_angle_deg)
+                        psi_text = f"{psi:.3f}°"    
                 elif self.last_xc is not None and self.last_yc is not None:
                     dx = (x_index + 1) - self.last_xc
                     dy = (y_index + 1) - self.last_yc
                     psi = np.degrees(np.arctan2(dy, dx)) % 360.0
+                    psi = rotate_psi_reference(psi, self.reference_angle_deg)
                     psi_text = f"{psi:.3f}°"
 
                 self.coordinate_label.setText(
@@ -799,13 +1285,31 @@ class ImageCanvas(FigureCanvas):
                 center_x = float(xc) - 1.0
                 center_y = float(yc) - 1.0
 
-                self.ax.axvline(center_x, color="red", linewidth=1.0)
-                self.ax.axhline(center_y, color="red", linewidth=1.0)
+                line_length = max(nx, ny) * 0.75
+
+                angle0 = np.deg2rad(float(self.reference_angle_deg))
+                angle90 = np.deg2rad(float(self.reference_angle_deg) + 90.0)
+
+                self.ax.plot(
+                    [center_x - line_length * np.cos(angle0), center_x + line_length * np.cos(angle0)],
+                    [center_y - line_length * np.sin(angle0), center_y + line_length * np.sin(angle0)],
+                    color="red",
+                    linewidth=1.0,
+                )
+
+                self.ax.plot(
+                    [center_x - line_length * np.cos(angle90), center_x + line_length * np.cos(angle90)],
+                    [center_y - line_length * np.sin(angle90), center_y + line_length * np.sin(angle90)],
+                    color="red",
+                    linewidth=1.0,
+                )
+
                 self.ax.plot(center_x, center_y, "wo", markersize=4)
 
                 radius = min(nx, ny) * 0.35
                 for angle in [0, 90, 180, 270]:
-                    rad = np.deg2rad(angle)
+                    detector_angle = (float(angle) + float(self.reference_angle_deg)) % 360.0
+                    rad = np.deg2rad(detector_angle)
                     x_text = center_x + radius * np.cos(rad)
                     y_text = center_y + radius * np.sin(rad)
                     self.ax.text(
@@ -1036,6 +1540,10 @@ class AzimuthalTab(QWidget):
         self.axis_mask_pixels.setValue(0)
         self.axis_mask_pixels.setFixedHeight(24)
         self.axis_mask_pixels.setMinimumWidth(parameter_field_width)
+        self.reference_angle = self.double_spin(0.0, decimals=3, minimum=-360.0)
+        self.reference_angle.setRange(-360.0, 360.0)
+        self.reference_angle.setSingleStep(1.0)
+        self.reference_angle.valueChanged.connect(self.reference_angle_changed)
         self.normalization_mode = QComboBox()
         self.normalization_mode.addItem("Raw detector intensity", "raw")
         self.normalization_mode.addItem("Counts/s: I / ExposureTime", "exposure")
@@ -1060,11 +1568,19 @@ class AzimuthalTab(QWidget):
         form.addWidget(self.q_min, 1, 1)
         form.addWidget(QLabel("q max (nm⁻¹):"), 2, 0)
         form.addWidget(self.q_max, 2, 1)
+        form.addWidget(QLabel("ψ reference angle (°):"), 3, 0)
+        form.addWidget(self.reference_angle, 3, 1)
         params_layout.addLayout(form)
 
+        integrate_buttons_layout = QHBoxLayout()
         self.integrate_button = QPushButton("Integrate I(ψ)")
         self.integrate_button.clicked.connect(self.integrate_selected_files)
-        params_layout.addWidget(self.integrate_button)
+        self.azimuthal_test_button = QPushButton("Test")
+        self.azimuthal_test_button.setToolTip("Open an interactive pyFAI azimuthal integration test window")
+        self.azimuthal_test_button.clicked.connect(self.open_azimuthal_test_dialog)
+        integrate_buttons_layout.addWidget(self.integrate_button, stretch=1)
+        integrate_buttons_layout.addWidget(self.azimuthal_test_button, stretch=0)
+        params_layout.addLayout(integrate_buttons_layout)
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
@@ -1226,7 +1742,7 @@ class AzimuthalTab(QWidget):
             self.wavelength, self.use_q_range, self.q_min, self.q_max, self.n_points,
             self.integration_engine, self.min_pixels_per_bin, self.axis_mask_pixels,
             self.normalization_mode, self.intensity_scale,
-            self.integrate_button, self.show_legend,
+            self.integrate_button, self.azimuthal_test_button, self.show_legend,
             self.frame_start_spin, self.frame_end_spin, self.prev_frame_button,
             self.next_frame_button, self.frame_slider,
             self.image_vmin_label, self.image_vmax_label,
@@ -1247,6 +1763,15 @@ class AzimuthalTab(QWidget):
             self.save_graph_button.setEnabled(enabled)
         self.update_frame_navigation_state()
         self.update_q_range_state()
+
+    def reference_angle_changed(self):
+        if hasattr(self, "image_canvas"):
+            self.image_canvas.set_reference_angle(float(self.reference_angle.value()))
+        selected = self.selected_files()
+        if selected:
+            self.display_selected_file_preview(selected[0])
+        if self.last_results:
+            self.integrate_selected_files()
 
     def update_q_range_state(self):
         use_q_range = self.use_q_range.isChecked()
@@ -1885,6 +2410,11 @@ class AzimuthalTab(QWidget):
                     if psi_values.size == 0:
                         raise ValueError("No valid ψ row found in the selected azimuthal image range.")
 
+                    psi = rotate_psi_reference(psi, float(self.reference_angle.value()))
+                    order = np.argsort(psi)
+                    psi = psi[order]
+                    intensity = intensity[order]
+                    counts = counts[order]
                     normalization_factor, normalization_label = azimuthal_normalization_factor(
                         header,
                         self.normalization_mode.currentData(),
@@ -1971,6 +2501,12 @@ class AzimuthalTab(QWidget):
                         self.min_pixels_per_bin.value(),
                         self.axis_mask_pixels.value(),
                     )
+
+                psi = rotate_psi_reference(psi, float(self.reference_angle.value()))
+                order = np.argsort(psi)
+                psi = psi[order]
+                intensity = intensity[order]
+                counts = counts[order]
 
                 normalization_factor, normalization_label = azimuthal_normalization_factor(
                     header,
@@ -2129,3 +2665,56 @@ class AzimuthalTab(QWidget):
                 except Exception:
                     file.write("# psi_deg I_psi pixel_count\n")
                 np.savetxt(file, data, fmt="%.8e %.8e %d")
+
+    def open_azimuthal_test_dialog(self):
+        files = self.selected_files()
+        if not files:
+            return
+
+        file_path = Path(files[0])
+        try:
+            image, header = read_image_file(file_path, frame_index=self.current_frame - 1)
+        except Exception as exc:
+            QMessageBox.warning(self, "Test", f"Could not read selected image:\n{exc}")
+            return
+
+        try:
+            header_xc = get_header_float(header, "Center_1", "center_1", "CenterX", "center_x")
+            header_yc = get_header_float(header, "Center_2", "center_2", "CenterY", "center_y")
+            center_source = "Center_1/Center_2"
+
+            if header_xc is None or header_yc is None:
+                header_xc = get_header_float(header, "Theoretical_Center_1", "theoretical_center_1")
+                header_yc = get_header_float(header, "Theoretical_Center_2", "theoretical_center_2")
+                center_source = "Theoretical fallback"
+
+            geometry = {
+                "xc": float(header_xc) if header_xc is not None else float(self.center_x.value()),
+                "yc": float(header_yc) if header_yc is not None else float(self.center_y.value()),
+                "center_source": center_source,
+                "distance_m": float(self.distance.value()),
+                "pixel_x_mm": float(self.pixel_x.value()),
+                "pixel_y_mm": float(self.pixel_y.value()),
+                "wavelength_a": float(self.wavelength.value()),
+                "q_min": float(self.q_min.value()) if self.use_q_range.isChecked() else 0.0,
+                "q_max": float(self.q_max.value()) if self.use_q_range.isChecked() else 1.0,
+                "psi_points": int(self.n_points.value()),
+                "axis_mask_px": int(self.axis_mask_pixels.value()),
+                "min_pixels": int(self.min_pixels_per_bin.value()),
+                "reference_angle_deg": float(self.reference_angle.value()),
+            }
+        except Exception as exc:
+            QMessageBox.warning(self, "Test", f"Invalid azimuthal parameters:\n{exc}")
+            return
+
+        dialog = PyFAIAzimuthalTestDialog(
+            self,
+            image,
+            file_path,
+            geometry,
+            header=header,
+            frame_count=self.total_frames,
+            frame_index=self.current_frame - 1,
+        )
+        self._azimuthal_test_dialog = dialog
+        dialog.show()
