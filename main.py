@@ -262,7 +262,8 @@ class ColoredTabBar(QTabBar):
         9: ("#dcfce7", "#16a34a"),  # Radial
         10: ("#dcfce7", "#16a34a"),  # Azimuthal
         11: ("#f3e8ff", "#9333ea"),  # Anisotropy
-        12: ("#e5e7eb", "#6b7280"),  # Sandbox
+        12: ("#cffafe", "#0891b2"),  # Distances
+        13: ("#e5e7eb", "#6b7280"),  # Sandbox
     }
 
     def tabSizeHint(self, index):
@@ -602,6 +603,7 @@ class MainWindow(QMainWindow):
         self.radial_tab_index = self.tab_bar.addTab("⭕ Radial")
         self.tab_bar.addTab("〰️ Azimuthal")
         self.tab_bar.addTab("🧬 Anisotropy")
+        self.distances_tab_index = self.tab_bar.addTab("📏 Distances")
         self.sandbox_tab_index = self.tab_bar.addTab("🧪 Sandbox")
 
         self.tab_bar.setTabText(self.background_tab_index, "🧹 Background")
@@ -617,6 +619,8 @@ class MainWindow(QMainWindow):
         self.tab_bar.setTabEnabled(self.capture_sals_tab_index, True)
         self.tab_bar.setTabText(self.sandbox_tab_index, "🧪 Sandbox")
         sandbox_available = self.is_development_copy()
+        self.tab_bar.setTabVisible(self.distances_tab_index, sandbox_available)
+        self.tab_bar.setTabEnabled(self.distances_tab_index, sandbox_available)
         self.tab_bar.setTabVisible(self.sandbox_tab_index, sandbox_available)
         self.tab_bar.setTabEnabled(self.sandbox_tab_index, sandbox_available)
         self.tab_bar.setTabVisible(self.unfold_tab_index, False)
@@ -848,6 +852,7 @@ class MainWindow(QMainWindow):
         from tabs.azimuthal_tab import AzimuthalTab
         from tabs.unfold_tab import UnfoldTab
         from tabs.hermans_tab import HermansTab
+        from tabs.distances_tab import DistancesTab
         from tabs.datplot_tab import DatPlotTab
         from tabs.tools_tab import ToolsTab
         from tabs.sandbox_tab import SandboxTab
@@ -868,7 +873,13 @@ class MainWindow(QMainWindow):
         self.azimuthal_tab = AzimuthalTab()
         self.unfold_tab = UnfoldTab()
         self.hermans_tab = HermansTab()
+        self.distances_tab = DistancesTab()
         self.sandbox_tab = SandboxTab()
+        development_copy = self.is_development_copy()
+        self.radial_tab.radial_test_button.setVisible(development_copy)
+        self.radial_tab.radial_test_button.setEnabled(development_copy)
+        self.azimuthal_tab.azimuthal_test_button.setVisible(development_copy)
+        self.azimuthal_tab.azimuthal_test_button.setEnabled(development_copy)
         self.view_tab.set_q_geometry_source_tab(self.azimuthal_tab)
         self.unfold_tab.set_q_geometry_source_tab(self.azimuthal_tab)
 
@@ -889,6 +900,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.radial_tab)
         self.pages.addWidget(self.azimuthal_tab)
         self.pages.addWidget(self.hermans_tab)
+        self.pages.addWidget(self.distances_tab)
         self.pages.addWidget(self.sandbox_tab)
 
         # Folder synchronisation between tabs using a folder browser.

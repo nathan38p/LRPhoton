@@ -2008,6 +2008,16 @@ class AzimuthalTab(QWidget):
 
         return [file_path_from_item(item, self.current_folder) for item in ordered_items]
 
+    def current_preview_file(self):
+        current_item = self.file_list.currentItem()
+        if current_item is not None:
+            current_file = file_path_from_item(current_item, self.current_folder)
+            if current_file is not None:
+                return current_file
+
+        selected = self.selected_files()
+        return selected[0] if selected else None
+
     def update_frame_controls_from_file(self, file_path):
         self.total_frames = 1
         self.current_frame = 1
@@ -2084,9 +2094,11 @@ class AzimuthalTab(QWidget):
         self.frame_counter_label.setText(f"{value} / {self.total_frames}")
         self.update_frame_navigation_state()
 
-        selected = self.selected_files()
-        if selected:
-            self.display_selected_file_preview(selected[0])
+        current_file = self.current_preview_file()
+        if current_file is not None:
+            self.display_selected_file_preview(current_file)
+            if self.last_results:
+                self.integrate_selected_files()
 
     def previous_frame(self):
         value = max(self.frame_slider.minimum(), self.frame_slider.value() - 1)
@@ -2387,6 +2399,97 @@ class AzimuthalTab(QWidget):
         fallback_max = self.q_max.value() if hasattr(self, "q_max") and self.q_max.value() > 0 else float(nx - 1)
         return np.linspace(0.0, float(fallback_max), nx)
 
+    def display_selected_file_preview(self, file_path):
+        if file_path is None:
+            return
+
+        try:
+            image, header = read_image_file(file_path, frame_index=self.current_frame - 1)
+        except Exception as exc:
+            self.log_box.setPlainText(f"Preview error: {Path(file_path).name}: {exc}")
+            self.image_canvas.raw_image = None
+            self.image_canvas.set_q_map(None)
+            self.image_coordinate_label.setText("ψ = - | q = - | I = -")
+            clear_plot_canvas(self.image_canvas)
+            return
+
+        if self.use_q_range.isChecked():
+            q_min = self.q_min.value()
+            q_max = self.q_max.value()
+        else:
+            q_min = 0.0
+            q_max = np.inf
+
+        try:
+            if is_azimuthal_processed_image(Path(file_path), header):
+                q_values_full = self.azimuthal_image_q_axis(image.shape, header)
+                q_step = float(np.nanmedian(np.diff(q_values_full))) if q_values_full.size > 1 else np.nan
+                if np.isfinite(q_step) and q_step > 0 and np.isfinite(q_max):
+                    q_min_for_mask = q_min - q_step / 2.0
+                    q_max_for_mask = q_max + q_step / 2.0
+                else:
+                    q_min_for_mask = q_min
+                    q_max_for_mask = q_max
+
+                q_map = np.tile(q_values_full, (image.shape[0], 1))
+                mask = azimuthal_processed_q_mask(
+                    image.shape,
+                    q_values_full,
+                    q_min=q_min_for_mask,
+                    q_max=q_max_for_mask,
+                )
+                self.image_canvas.set_coordinate_mode("azimuthal_image")
+                self.image_canvas.set_q_map(q_map)
+                self.image_canvas.show_image(image, 0.0, 0.0, mask=mask)
+                self.sync_image_intensity_sliders()
+                return
+
+            engine = self.integration_engine.currentText()
+            try:
+                if engine == "pyFAI":
+                    _psi, _intensity, _counts, mask, q_map = pyfai_azimuthal_average(
+                        image,
+                        self.center_x.value(),
+                        self.center_y.value(),
+                        self.distance.value(),
+                        self.pixel_x.value(),
+                        self.pixel_y.value(),
+                        self.wavelength.value(),
+                        q_min,
+                        q_max,
+                        self.n_points.value(),
+                        self.min_pixels_per_bin.value(),
+                        self.axis_mask_pixels.value(),
+                    )
+                else:
+                    raise RuntimeError("Use LRPhoton mean preview")
+            except Exception:
+                _psi, _intensity, _counts, mask, q_map = azimuthal_average(
+                    image,
+                    self.center_x.value(),
+                    self.center_y.value(),
+                    self.distance.value(),
+                    self.pixel_x.value(),
+                    self.pixel_y.value(),
+                    self.wavelength.value(),
+                    q_min,
+                    q_max,
+                    self.n_points.value(),
+                    self.min_pixels_per_bin.value(),
+                    self.axis_mask_pixels.value(),
+                )
+
+            self.image_canvas.set_coordinate_mode("detector")
+            self.image_canvas.set_q_map(q_map)
+            self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
+            self.sync_image_intensity_sliders()
+        except Exception as exc:
+            self.log_box.setPlainText(f"Preview error: {Path(file_path).name}: {exc}")
+            self.image_canvas.set_coordinate_mode("detector")
+            self.image_canvas.set_q_map(None)
+            self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=None)
+            self.sync_image_intensity_sliders()
+
     def integrate_selected_files(self):
         files = self.selected_files()
         if not files:
@@ -2443,7 +2546,7 @@ class AzimuthalTab(QWidget):
                     if psi_values.size == 0:
                         raise ValueError("No valid ψ row found in the selected azimuthal image range.")
 
-                    psi = rotate_psi_reference(psi, float(self.reference_angle.value()))
+                    psi = rotate_psi_reference(psi_values, float(self.reference_angle.value()))
                     order = np.argsort(psi)
                     psi = psi[order]
                     intensity = intensity[order]
@@ -2454,8 +2557,8 @@ class AzimuthalTab(QWidget):
                     )
                     intensity = intensity * normalization_factor * self.intensity_scale.value()
 
-                    ax.plot(psi_values, intensity, linewidth=1.2, label=file_path.stem)
-                    self.last_results[file_path.stem] = (psi_values, intensity, counts)
+                    ax.plot(psi, intensity, linewidth=1.2, label=file_path.stem)
+                    self.last_results[file_path.stem] = (psi, intensity, counts)
                     self.last_result_paths[file_path.stem] = file_path
                     self.last_result_frame_counts[file_path.stem] = int(header.get("Number of frames", 1) or 1)
 
@@ -2751,52 +2854,3 @@ class AzimuthalTab(QWidget):
         )
         self._azimuthal_test_dialog = dialog
         dialog.show()
-    def file_item_clicked(self, item):
-        if item is None:
-            return
-        self.file_list.setCurrentItem(item)
-        current_file = file_path_from_item(item, self.current_folder)
-        self.set_controls_enabled(True)
-        if hasattr(self, "image_lock_contrast_checkbox") and not self.image_lock_contrast_checkbox.isChecked():
-            self.image_canvas.reset_display_limits()
-        self.last_results = {}
-        self.last_result_paths = {}
-        self.last_result_frame_counts = {}
-        self.clear_graph_coordinates()
-        clear_plot_canvas(self.canvas)
-        self.apply_preset_from_file(current_file)
-        self.update_frame_controls_from_file(current_file)
-        self.display_selected_file_preview(current_file)
-    def current_file_changed(self, current, previous):
-        if current is None:
-            self.selection_changed()
-            return
-        self.refresh_selected_file_preview(current)
-
-    def file_item_clicked(self, item):
-        if item is None:
-            return
-        self.file_list.setCurrentItem(item)
-        self.refresh_selected_file_preview(item)
-
-    def refresh_selected_file_preview(self, item):
-        if item is None:
-            return
-
-        current_file = file_path_from_item(item, self.current_folder)
-        if current_file is None:
-            return
-
-        self.set_controls_enabled(True)
-        if hasattr(self, "image_lock_contrast_checkbox") and not self.image_lock_contrast_checkbox.isChecked():
-            self.image_canvas.reset_display_limits()
-
-        self.last_results = {}
-        self.last_result_paths = {}
-        self.last_result_frame_counts = {}
-        self.clear_graph_coordinates()
-        clear_plot_canvas(self.canvas)
-
-        self.apply_preset_from_file(current_file)
-        self.update_frame_controls_from_file(current_file)
-        self.display_selected_file_preview(current_file)
