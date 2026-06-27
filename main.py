@@ -362,11 +362,30 @@ class MainWindow(QMainWindow):
         self.dev_label.setFixedHeight(18)
         self.dev_label.setVisible(self.is_development_copy())
 
+        self.update_status_label = QLabel("")
+        self.update_status_label.setStyleSheet("""
+            QLabel {
+                font-size: 10px;
+                font-weight: 700;
+                color: #444444;
+                background: #f2f2f2;
+                border: 1px solid #dddddd;
+                border-radius: 5px;
+                padding: 0px 5px;
+                min-height: 18px;
+            }
+        """)
+        self.update_status_label.setFixedHeight(18)
+        self.update_status_label.setVisible(False)
+        self.update_status_label.setCursor(Qt.PointingHandCursor)
+        self.update_status_label.mousePressEvent = lambda event: self.on_update_button_clicked()
+
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(8)
         title_row.addWidget(title)
         title_row.addWidget(self.dev_label)
+        title_row.addWidget(self.update_status_label)
         title_row.addStretch()
 
         subtitle = QLabel(APP_SUBTITLE)
@@ -440,7 +459,7 @@ class MainWindow(QMainWindow):
         self.version_label.clicked.connect(self.on_update_button_clicked)
 
         self.available_update_sha = None
-        self.set_update_button_state("disabled", "Checking for updates…")
+        self.set_update_button_state("checking", "Checking for updates…")
         self.silent_update_test = (
             "--silent-update-test" in sys.argv
             or os.getenv("LRPHOTON_SILENT_UPDATE_TEST") in ("1", "true", "True", "TRUE")
@@ -964,41 +983,51 @@ class MainWindow(QMainWindow):
     def set_update_button_state(self, state, text=None):
         if text is not None:
             self.version_label.setText(text)
+            if hasattr(self, "update_status_label"):
+                self.update_status_label.setText(text)
+
+        if not hasattr(self, "update_status_label"):
+            return
 
         if state == "available":
             self.version_label.setEnabled(True)
-            self.version_label.setStyleSheet("""
-                QPushButton {
-                    font-size: 11px;
+            self.version_label.setVisible(False)
+            self.update_status_label.setVisible(True)
+            self.update_status_label.setEnabled(True)
+            self.update_status_label.setStyleSheet("""
+                QLabel {
+                    font-size: 10px;
+                    font-weight: 700;
                     color: #856404;
-                    padding: 4px 10px;
-                    border-radius: 8px;
+                    background: #fff3cd;
                     border: 1px solid #ffeeba;
-                    background: #fff3cd;
+                    border-radius: 5px;
+                    padding: 0px 5px;
+                    min-height: 18px;
                 }
-                QPushButton:disabled {
-                    color: #856404;
-                    background: #fff3cd;
-                    border-color: #ffeeba;
+            """)
+        elif state == "checking":
+            self.version_label.setEnabled(False)
+            self.version_label.setVisible(False)
+            self.update_status_label.setVisible(True)
+            self.update_status_label.setEnabled(False)
+            self.update_status_label.setStyleSheet("""
+                QLabel {
+                    font-size: 10px;
+                    font-weight: 700;
+                    color: #444444;
+                    background: #f2f2f2;
+                    border: 1px solid #dddddd;
+                    border-radius: 5px;
+                    padding: 0px 5px;
+                    min-height: 18px;
                 }
             """)
         else:
             self.version_label.setEnabled(False)
-            self.version_label.setStyleSheet("""
-                QPushButton {
-                    font-size: 11px;
-                    color: #444444;
-                    padding: 4px 10px;
-                    border-radius: 8px;
-                    border: 1px solid #dddddd;
-                    background: #f8f8f8;
-                }
-                QPushButton:disabled {
-                    color: #999999;
-                    background: #f2f2f2;
-                    border-color: #dddddd;
-                }
-            """)
+            self.version_label.setVisible(False)
+            self.update_status_label.setVisible(False)
+            self.update_status_label.setEnabled(False)
 
     def is_development_copy(self):
         """
@@ -1240,6 +1269,9 @@ class MainWindow(QMainWindow):
             if not self.can_check_for_updates():
                 self.version_label.setVisible(False)
                 self.version_label.setEnabled(False)
+                if hasattr(self, "update_status_label"):
+                    self.update_status_label.setVisible(False)
+                    self.update_status_label.setEnabled(False)
                 self.available_update_sha = None
                 return
             response = requests.get(UPDATE_INFO_URL, timeout=5)
@@ -1258,6 +1290,9 @@ class MainWindow(QMainWindow):
             if local_sha == remote_sha:
                 self.version_label.setVisible(False)
                 self.version_label.setEnabled(False)
+                if hasattr(self, "update_status_label"):
+                    self.update_status_label.setVisible(False)
+                    self.update_status_label.setEnabled(False)
                 self.available_update_sha = None
                 return
 
@@ -1265,6 +1300,9 @@ class MainWindow(QMainWindow):
                 self.save_local_commit(remote_sha)
                 self.version_label.setVisible(False)
                 self.version_label.setEnabled(False)
+                if hasattr(self, "update_status_label"):
+                    self.update_status_label.setVisible(False)
+                    self.update_status_label.setEnabled(False)
                 self.available_update_sha = None
                 return
 
@@ -1472,6 +1510,9 @@ def main():
     else:
         window.version_label.setVisible(False)
         window.version_label.setEnabled(False)
+        if hasattr(window, "update_status_label"):
+            window.update_status_label.setVisible(False)
+            window.update_status_label.setEnabled(False)
 
     sys.exit(app.exec())
 
