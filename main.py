@@ -515,29 +515,10 @@ class MainWindow(QMainWindow):
             return
 
         if sys.platform == "darwin":
-            feedback_action = QAction("💬 Feedback", self)
+            help_menu = menu_bar.addMenu("Help")
+            feedback_action = QAction("Feedback", self)
             feedback_action.triggered.connect(self.open_issue_report_dialog)
-            tools_menu.addAction(feedback_action)
-            return
-
-        self.feedback_menu_button = QPushButton("💬")
-        self.feedback_menu_button.setFixedSize(34, 24)
-        self.feedback_menu_button.setToolTip("Feedback")
-        self.feedback_menu_button.setCursor(Qt.PointingHandCursor)
-        self.feedback_menu_button.setStyleSheet("""
-            QPushButton {
-                border: 0px;
-                border-radius: 4px;
-                background: transparent;
-                font-size: 16px;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                background: #eeeeee;
-            }
-        """)
-        self.feedback_menu_button.clicked.connect(self.open_issue_report_dialog)
-        menu_bar.setCornerWidget(self.feedback_menu_button, Qt.TopRightCorner)
+            help_menu.addAction(feedback_action)
 
     def open_center_tab(self):
         if not hasattr(self, "pages") or not hasattr(self, "centre_tab"):
