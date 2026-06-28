@@ -847,6 +847,10 @@ class ImageCanvas(FigureCanvas):
         self.fig = Figure()
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")
+        self.fig.patch.set_alpha(0)
+        self.ax.set_facecolor("none")
         self.setFocusPolicy(Qt.StrongFocus)
         self.ax.set_axis_off()
         self.fig.subplots_adjust(left=0.005, right=0.995, top=0.995, bottom=0.005)
@@ -1096,6 +1100,8 @@ class ImageCanvas(FigureCanvas):
         previous_ylim = self.ax.get_ylim() if self.image_artist is not None else None
         self.raw_image = image
         self.ax.clear()
+        self.fig.patch.set_alpha(0)
+        self.ax.set_facecolor("none")
         self.ax.set_axis_off()
 
         display = image.astype(np.float64).copy()
@@ -1151,6 +1157,10 @@ class ManualCaveCanvas(FigureCanvas):
         self.fig = Figure()
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")
+        self.fig.patch.set_alpha(0)
+        self.ax.set_facecolor("none")
         self.ax.set_axis_off()
         self.fig.subplots_adjust(left=0.005, right=0.995, top=0.995, bottom=0.005)
         self._drag_start = None
@@ -2638,7 +2648,6 @@ class CaveTab(QWidget):
         self.line_geometry_selector.combo.setMinimumWidth(0)
         self.line_geometry_selector.combo.setMinimumContentsLength(7)
         self.line_geometry_selector.combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.line_geometry_selector.edit_button.setFixedWidth(44)
         preset_layout.addWidget(self.line_geometry_selector, 1)
 
         self.btn_xenocs.setChecked(True)

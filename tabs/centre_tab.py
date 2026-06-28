@@ -371,6 +371,10 @@ class ImageCanvas(FigureCanvas):
         self.fig = Figure(figsize=(4.2, 4.2), tight_layout=True)
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")
+        self.fig.patch.set_alpha(0)
+        self.ax.set_facecolor("none")
 
         self.raw_image = None
         self.im = None
@@ -405,9 +409,9 @@ class ImageCanvas(FigureCanvas):
             except Exception:
                 pass
             self.cbar = None
-        self.fig.patch.set_facecolor("white")
+        self.fig.patch.set_alpha(0)
         self.ax.clear()
-        self.ax.set_facecolor("white")
+        self.ax.set_facecolor("none")
         self.ax.set_axis_off()
         if self.coordinate_label is not None:
             self.coordinate_label.setText("x = - | y = - | r = - | I = -")
@@ -608,6 +612,8 @@ class ImageCanvas(FigureCanvas):
         old_ylim = self.ax.get_ylim() if self.im is not None and not self.reset_view_on_next_show else None
 
         self.ax.clear()
+        self.fig.patch.set_alpha(0)
+        self.ax.set_facecolor("none")
 
         img_disp = img.astype(float).copy()
         img_disp[~np.isfinite(img_disp)] = np.nan

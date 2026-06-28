@@ -109,6 +109,8 @@ class ViewImageCanvas(FigureCanvas):
     def __init__(self, figure, view_tab):
         self.view_tab = view_tab
         super().__init__(figure)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")
         self.setFocusPolicy(Qt.StrongFocus)
 
         try:
@@ -1038,9 +1040,10 @@ class ViewTab(QWidget):
 
 
         self.fig = Figure()
-        self.fig.patch.set_facecolor("white")
+        self.fig.patch.set_alpha(0)
 
         self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor("none")
         self.ax.set_axis_off()
         self.ax.set_aspect("equal")
 
@@ -1683,8 +1686,10 @@ class ViewTab(QWidget):
 
     def reset_figure(self):
         self.fig.clear()
+        self.fig.patch.set_alpha(0)
 
         self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor("none")
         self.ax.set_axis_off()
         self.ax.set_aspect("equal")
 

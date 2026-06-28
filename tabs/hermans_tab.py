@@ -673,6 +673,10 @@ class ImageCanvas(FigureCanvas):
         self.fig = Figure()
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")
+        self.fig.patch.set_alpha(0)
+        self.ax.set_facecolor("none")
         self.ax.set_axis_off()
         self.fig.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01)
         self.raw_image = None
@@ -802,6 +806,8 @@ class ImageCanvas(FigureCanvas):
         self.last_yc = yc
         self.reference_angle = float(reference_angle)
         self.ax.clear()
+        self.fig.patch.set_alpha(0)
+        self.ax.set_facecolor("none")
         self.ax.set_axis_off()
 
         display = image.astype(np.float64).copy()
@@ -929,6 +935,7 @@ class HermansTab(QWidget):
         self.instrument_mode = "XENOCS"
         self.custom_anisotropy_geometry = None
         self.q_axis_unit = "nm"
+        self._skip_initial_file_selection = True
         self._order_fit_timer = QTimer(self)
         self._order_fit_timer.setSingleShot(True)
         self._order_fit_timer.timeout.connect(self.calculate_order_parameter)
@@ -1950,11 +1957,22 @@ class HermansTab(QWidget):
         self.file_list.blockSignals(False)
 
         if self.available_files:
-            row = self.available_files.index(current_text) if current_text in self.available_files else 0
-            self.file_list.setCurrentRow(row)
-            item = self.file_list.item(row)
-            self.load_file(file_path_from_item(item, self.folder))
+            skip_initial_selection = (
+                self._skip_initial_file_selection
+                and self.is_anisotropy_mode()
+                and current_text is None
+            )
+            self._skip_initial_file_selection = False
+            if skip_initial_selection:
+                self.file_list.setCurrentRow(-1)
+                self.load_selected_file(None)
+            else:
+                row = self.available_files.index(current_text) if current_text in self.available_files else 0
+                self.file_list.setCurrentRow(row)
+                item = self.file_list.item(row)
+                self.load_file(file_path_from_item(item, self.folder))
         else:
+            self._skip_initial_file_selection = False
             self.current_file = None
             self.azimuth = None
             self.intensity = None

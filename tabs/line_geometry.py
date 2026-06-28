@@ -34,6 +34,7 @@ SELECT_GEOMETRY_ITEM = "Beamline"
 ADD_GEOMETRY_ITEM = "+ Ajouter une ligne..."
 LRP_SALS_DEFAULT_NAME = "LRP SALS default"
 LEGACY_SALS_DEFAULT_NAME = "SALS default"
+GEOMETRY_SELECTOR_BUTTON_WIDTH = 64
 
 LINE_GEOMETRY_SELECTOR_STYLE = """
     QComboBox {
@@ -478,6 +479,7 @@ class LineGeometrySelector(QWidget):
         self.combo = QComboBox()
         self.combo.currentTextChanged.connect(self.on_combo_changed)
         self.edit_button = QPushButton("Edit")
+        self.edit_button.setFixedWidth(GEOMETRY_SELECTOR_BUTTON_WIDTH)
         self.edit_button.clicked.connect(self.open_editor)
         selector_layout.addWidget(self.combo, 1)
         selector_layout.addWidget(self.edit_button, 0)
@@ -492,6 +494,7 @@ class LineGeometrySelector(QWidget):
         self.poni_path.setToolTip("Optional pyFAI .poni file. Its values complete and override the selected beamline/header geometry.")
         self.poni_path.editingFinished.connect(self.on_poni_changed)
         self.poni_button = QPushButton("Browse")
+        self.poni_button.setFixedWidth(GEOMETRY_SELECTOR_BUTTON_WIDTH)
         self.poni_button.clicked.connect(self.choose_poni_file)
         poni_layout.addWidget(self.poni_path, 1)
         poni_layout.addWidget(self.poni_button, 0)
