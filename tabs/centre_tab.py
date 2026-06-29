@@ -270,7 +270,7 @@ def compute_directional_iq_nm_general(img, xc, yc, angle_deg, half_width,
         )
 
         # Convert the line direction into a narrow pyFAI azimuth sector.
-        # Keep a small minimum width so the graph remains stable while moving the center.
+        # Keep a small minimum width so the plot remains stable while moving the center.
         sector_half_width_deg = max(0.5, float(half_width) if float(half_width) > 0 else 0.5)
         center_angle = ((float(angle_deg) + 180.0) % 360.0) - 180.0
         az_min = center_angle - sector_half_width_deg

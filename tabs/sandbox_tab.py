@@ -44,7 +44,7 @@ from tabs.instrument_presets import (
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
 )
-from tabs.ui_style import GROUP_BOX_STYLE, PAGE_MARGINS, PANEL_MARGINS, style_q_geometry_buttons
+from tabs.ui_style import GROUP_BOX_STYLE, PAGE_MARGINS, PANEL_MARGINS, emojiize_matplotlib_toolbar, style_q_geometry_buttons
 from tabs.sandbox_3d_view import Saxs3DProjectMixin
 from tabs.sandbox_imogolite import ImogoliteProjectMixin
 from tabs.sandbox_polynomials import PolynomialProjectMixin
@@ -205,6 +205,7 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.ax = self.figure.add_subplot(111, projection="3d")
         self.canvas.mpl_connect("button_press_event", self.on_canvas_click)
         self.toolbar = NavigationToolbar(self.canvas, self)
+        emojiize_matplotlib_toolbar(self.toolbar)
         plot_layout.addWidget(self.toolbar, 0)
 
         plot_area_layout = QHBoxLayout()

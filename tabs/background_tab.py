@@ -68,13 +68,14 @@ except Exception:
 
 
 class LazyImageStack:
-    def __init__(self, file_path, kind, data=None, dataset_path=None, frame_count=1, shape=None):
+    def __init__(self, file_path, kind, data=None, dataset_path=None, frame_count=1, shape=None, frame_axis=None):
         self.file_path = file_path
         self.kind = kind
         self.data = data
         self.dataset_path = dataset_path
         self.frame_count = int(frame_count)
         self.shape = shape
+        self.frame_axis = frame_axis
 
     def get_frame(self, frame_index):
         frame_index = max(0, min(int(frame_index), self.frame_count - 1))
@@ -91,7 +92,12 @@ class LazyImageStack:
                 dataset = handle[self.dataset_path]
                 if dataset.ndim == 2:
                     return np.asarray(dataset[:, :], dtype=np.float64)
-                return np.asarray(dataset[frame_index, :, :], dtype=np.float64)
+                frame_axis = 0 if self.frame_axis is None else self.frame_axis
+                if frame_axis == 0:
+                    return np.asarray(dataset[frame_index, :, :], dtype=np.float64)
+                if frame_axis == 1:
+                    return np.asarray(dataset[:, frame_index, :], dtype=np.float64)
+                return np.asarray(dataset[:, :, frame_index], dtype=np.float64)
 
         return None
 
@@ -253,11 +259,11 @@ class BackgroundTab(QWidget):
         self.save_preview_checkbox.setChecked(False)
         parameters_layout.addWidget(self.save_preview_checkbox)
 
-        self.save_current_button = QPushButton("Save current frame")
+        self.save_current_button = QPushButton("💾 Save current frame")
         self.save_current_button.clicked.connect(self.save_current_frame)
         parameters_layout.addWidget(self.save_current_button)
 
-        self.run_button = QPushButton("Save all frames")
+        self.run_button = QPushButton("💾 Save all frames")
         self.run_button.clicked.connect(self.run_background_subtraction)
         parameters_layout.addWidget(self.run_button)
 
@@ -385,12 +391,19 @@ class BackgroundTab(QWidget):
                 if dataset.ndim == 2:
                     frame_count = 1
                     shape = dataset.shape
+                    frame_axis = None
                 elif dataset.ndim == 3:
-                    frame_count = dataset.shape[0]
-                    shape = dataset.shape[-2:]
+                    frame_axis, frame_count, shape = self.h5_dataset_image_info(dataset.shape)
                 else:
                     raise ValueError("Unsupported HDF5 data dimensions.")
-            return LazyImageStack(file_path, "hdf5", dataset_path=dataset_path, frame_count=frame_count, shape=shape)
+            return LazyImageStack(
+                file_path,
+                "hdf5",
+                dataset_path=dataset_path,
+                frame_count=frame_count,
+                shape=shape,
+                frame_axis=frame_axis,
+            )
 
         data = np.loadtxt(file_path)
         if data.ndim == 2:
@@ -399,20 +412,62 @@ class BackgroundTab(QWidget):
 
     def find_first_image_dataset(self, h5_group):
         best_dataset = None
+        best_score = None
 
         def visitor(name, obj):
-            nonlocal best_dataset
-            if best_dataset is not None:
+            nonlocal best_dataset, best_score
+            if not isinstance(obj, h5py.Dataset) or obj.ndim not in (2, 3):
                 return
-            if isinstance(obj, h5py.Dataset) and obj.ndim in (2, 3):
-                shape = obj.shape
-                if len(shape) == 2 and min(shape) > 16:
-                    best_dataset = obj
-                elif len(shape) == 3 and min(shape[-2:]) > 16:
-                    best_dataset = obj
+            if not np.issubdtype(obj.dtype, np.number):
+                return
+
+            try:
+                frame_axis, frame_count, image_shape = self.h5_dataset_image_info(obj.shape)
+            except ValueError:
+                return
+            if min(image_shape) <= 16:
+                return
+
+            score = self.h5_dataset_image_score(name, obj, frame_axis, frame_count, image_shape)
+            if best_score is None or score > best_score:
+                best_dataset = obj
+                best_score = score
 
         h5_group.visititems(visitor)
         return best_dataset
+
+    def h5_dataset_image_info(self, shape):
+        shape = tuple(int(size) for size in shape)
+        if len(shape) == 2:
+            return None, 1, shape
+        if len(shape) == 3:
+            frame_axis = int(np.argmin(shape))
+            frame_count = int(shape[frame_axis])
+            image_shape = tuple(size for axis, size in enumerate(shape) if axis != frame_axis)
+            return frame_axis, frame_count, image_shape
+        raise ValueError("Dataset must be 2D or 3D.")
+
+    def h5_dataset_image_score(self, name, dataset, frame_axis, frame_count, image_shape):
+        lower_name = str(name).lower()
+        score = float(image_shape[0]) * float(image_shape[1])
+
+        if len(tuple(dataset.shape)) == 3:
+            score *= 10.0
+
+        if min(image_shape) >= 128:
+            score *= 4.0
+        elif min(image_shape) < 32:
+            score *= 0.05
+
+        if any(token in lower_name for token in ["data", "image", "eiger", "detector", "pilatus"]):
+            score *= 3.0
+        if any(token in lower_name for token in ["mask", "flat", "dark", "background", "metadata"]):
+            score *= 0.1
+
+        if frame_axis is not None and frame_count <= 1:
+            score *= 0.1
+
+        return score
 
     def update_frame_controls(self):
         frame_count = 1 if self.sample_stack is None else max(1, self.sample_stack.frame_count)
@@ -516,6 +571,14 @@ class BackgroundTab(QWidget):
         )
         canvas.draw_idle()
 
+    def display_values_for_contrast(self, image):
+        display = np.asarray(image, dtype=np.float64).copy()
+        display[~np.isfinite(display)] = np.nan
+        display[display < 0] = np.nan
+        with np.errstate(invalid="ignore", divide="ignore"):
+            display = np.log10(display + 1)
+        return display
+
     def block_contrast_signals(self, blocked):
         self.intensity_min_spin.blockSignals(blocked)
         self.intensity_max_spin.blockSignals(blocked)
@@ -594,7 +657,7 @@ class BackgroundTab(QWidget):
         if frame is None:
             return
 
-        finite_values = np.asarray(frame, dtype=np.float64)
+        finite_values = self.display_values_for_contrast(frame)
         finite_values = finite_values[np.isfinite(finite_values)]
         if finite_values.size == 0:
             return
@@ -618,7 +681,7 @@ class BackgroundTab(QWidget):
         if self.sample_stack is not None:
             frame = self.sample_stack.get_frame(self.current_frame_index())
             if not self.contrast_auto_initialized:
-                finite_values = np.asarray(frame, dtype=np.float64)
+                finite_values = self.display_values_for_contrast(frame)
                 finite_values = finite_values[np.isfinite(finite_values)]
                 if finite_values.size:
                     vmin, vmax = np.nanpercentile(finite_values, [1, 99])
@@ -697,6 +760,14 @@ class BackgroundTab(QWidget):
                 return selected_files[0]
         return ""
 
+    def stack_description(self, stack):
+        if stack is None or stack.kind != "hdf5":
+            return ""
+        details = [f"dataset: {stack.dataset_path}"]
+        if stack.frame_axis is not None:
+            details.append(f"frame axis: {stack.frame_axis}")
+        return " (" + ", ".join(details) + ")"
+
     def select_sample_file(self):
         file_path = self.open_data_file_dialog("Select sample file")
         if file_path:
@@ -711,7 +782,10 @@ class BackgroundTab(QWidget):
                 self.contrast_vmax = None
                 self.update_frame_controls()
                 self.update_sample_preview()
-                self.status_label.setText(f"Sample loaded: {self.sample_stack.frame_count} frame(s).")
+                self.status_label.setText(
+                    f"Sample loaded: {self.sample_stack.frame_count} frame(s)"
+                    f"{self.stack_description(self.sample_stack)}."
+                )
             except Exception as exc:
                 self.sample_stack = None
                 self.update_frame_controls()
@@ -728,7 +802,10 @@ class BackgroundTab(QWidget):
             try:
                 self.background_stack = self.open_image_stack(file_path)
                 self.update_result_preview()
-                self.status_label.setText(f"Background loaded: {self.background_stack.frame_count} frame(s).")
+                self.status_label.setText(
+                    f"Background loaded: {self.background_stack.frame_count} frame(s)"
+                    f"{self.stack_description(self.background_stack)}."
+                )
             except Exception as exc:
                 self.background_stack = None
                 self.update_result_preview()

@@ -177,7 +177,7 @@ class HeaderEditorTab(QWidget):
         self.remove_row_button.clicked.connect(self.remove_selected_rows)
         tools_box_layout.addWidget(self.remove_row_button)
 
-        self.save_copy_button = QPushButton("Save as copy")
+        self.save_copy_button = QPushButton("💾 Save as copy")
         self.save_copy_button.clicked.connect(self.save_as_copy)
         tools_box_layout.addWidget(self.save_copy_button)
 

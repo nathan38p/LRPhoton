@@ -2,8 +2,8 @@ import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QValidator
-from PySide6.QtWidgets import QDoubleSpinBox, QGroupBox, QVBoxLayout, QHBoxLayout, QToolButton, QStyle
+from PySide6.QtGui import QIcon, QValidator
+from PySide6.QtWidgets import QDoubleSpinBox, QGroupBox, QVBoxLayout, QHBoxLayout, QToolButton
 
 
 GROUP_BOX_STYLE = """
@@ -72,6 +72,8 @@ FRAME_COUNTER_WIDTH = 56
 FILE_BROWSER_WIDTH = 320
 MATPLOTLIB_TOOLBAR_ICON_SCALE = 0.8
 MATPLOTLIB_TOOLBAR_MAX_HEIGHT = 42
+MATPLOTLIB_TOOLBAR_BUTTON_SIZE = QSize(32, 32)
+MATPLOTLIB_TOOLBAR_EMOJI_SIZE = 28
 
 
 def normalize_decimal_text(text):
@@ -89,6 +91,87 @@ def normalize_decimal_text(text):
 def decimal_number_text(text):
     match = re.search(r"[-+]?(?:\d[\d.,]*|[\d.,]*\d)(?:[eE][-+]?\d+)?", str(text))
     return normalize_decimal_text(match.group(0)) if match else ""
+
+
+def matplotlib_toolbar_action_emoji(action):
+    try:
+        text = action.text().lower()
+    except Exception:
+        text = ""
+    try:
+        tooltip = action.toolTip().lower()
+    except Exception:
+        tooltip = ""
+    label = f"{text} {tooltip}"
+
+    if "home" in label:
+        return "🏠"
+    if "back" in label:
+        return "⬅️"
+    if "forward" in label:
+        return "➡️"
+    if "pan" in label:
+        return "✋"
+    if "zoom" in label:
+        return "🔍"
+    if "customize" in label or "edit axis" in label or "axis" in label:
+        return "⚙️"
+    if "save" in label:
+        return "💾"
+    return None
+
+
+def emojiize_matplotlib_toolbar(toolbar, button_size=MATPLOTLIB_TOOLBAR_BUTTON_SIZE):
+    try:
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+    except Exception:
+        pass
+
+    for action in list(toolbar.actions()):
+        try:
+            text = action.text().lower()
+        except Exception:
+            text = ""
+        if "subplots" in text:
+            try:
+                toolbar.removeAction(action)
+            except Exception:
+                pass
+
+    for action in toolbar.actions():
+        emoji = matplotlib_toolbar_action_emoji(action)
+        if not emoji:
+            continue
+        try:
+            original_text = action.text()
+            if not action.toolTip():
+                action.setToolTip(original_text)
+            action.setIcon(QIcon())
+            action.setText(emoji)
+        except Exception:
+            pass
+
+    for action in toolbar.actions():
+        widget = toolbar.widgetForAction(action)
+        if isinstance(widget, QToolButton):
+            try:
+                widget.setFixedSize(button_size)
+                widget.setStyleSheet(f"""
+                    QToolButton {{
+                        background: transparent;
+                        background-color: transparent;
+                        border: none;
+                        padding: 0px;
+                        margin: 0px;
+                        font-size: {MATPLOTLIB_TOOLBAR_EMOJI_SIZE}px;
+                        min-width: {button_size.width()}px;
+                        max-width: {button_size.width()}px;
+                        min-height: {button_size.height()}px;
+                        max-height: {button_size.height()}px;
+                    }}
+                """)
+            except Exception:
+                pass
 
 
 class FlexibleDoubleSpinBox(QDoubleSpinBox):
@@ -438,9 +521,7 @@ def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, s
             toolbar_icon_size = QSize(24, 24)
     except Exception:
         toolbar_icon_size = QSize(24, 24)
-    toolbar_button_size = QSize(32, 32)
-    save_button_size = QSize(MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8, MATPLOTLIB_TOOLBAR_MAX_HEIGHT + 8)
-    save_icon_size = QSize(30, 30)
+    toolbar_button_size = MATPLOTLIB_TOOLBAR_BUTTON_SIZE
 
     try:
         toolbar.setIconSize(toolbar_icon_size)
@@ -479,11 +560,17 @@ def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, s
             text = action.text().lower()
         except Exception:
             text = ""
-        if action.isSeparator() or text in ["save", "save the figure", "save image only"]:
+        if (
+            action.isSeparator()
+            or text in ["save", "save the figure", "save image only"]
+            or "subplots" in text
+        ):
             try:
                 toolbar.removeAction(action)
             except Exception:
                 pass
+
+    emojiize_matplotlib_toolbar(toolbar, toolbar_button_size)
 
     for action in toolbar.actions():
         widget = toolbar.widgetForAction(action)
@@ -507,10 +594,9 @@ def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, s
     save_button = None
     if save_callback is not None:
         save_button = QToolButton(parent)
-        save_button.setIcon(parent.style().standardIcon(QStyle.SP_DialogSaveButton))
+        save_button.setText("💾")
         save_button.setToolTip(save_tooltip)
-        save_button.setFixedSize(save_button_size)
-        save_button.setIconSize(save_icon_size)
+        save_button.setFixedSize(toolbar_button_size)
         try:
             save_button.clicked.connect(save_callback)
         except Exception:
@@ -522,6 +608,11 @@ def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, s
                 border: none;
                 padding: 0px;
                 margin: 0px;
+                font-size: 28px;
+                min-width: 32px;
+                max-width: 32px;
+                min-height: 32px;
+                max-height: 32px;
             }
         """)
         toolbar_extra_layout.addWidget(save_button, stretch=0, alignment=Qt.AlignVCenter)

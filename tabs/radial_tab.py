@@ -59,6 +59,7 @@ from .ui_style import (
     clear_plot_canvas,
     constrain_image_axes,
     finalize_plot_canvas,
+    emojiize_matplotlib_toolbar,
     install_selectable_legend,
     make_plot_legend,
     make_matplotlib_toolbar_block,
@@ -1163,7 +1164,7 @@ class PyFAIRadialTestDialog(QDialog):
         top_layout.addLayout(sector_box, row, 5)
 
         button_layout = QHBoxLayout()
-        self.save_button = QPushButton("Save tested curve .dat")
+        self.save_button = QPushButton("💾 Save tested curve .dat")
         self.save_button.clicked.connect(self.save_current_curve)
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.close)
@@ -1174,6 +1175,7 @@ class PyFAIRadialTestDialog(QDialog):
 
         self.canvas = PlotCanvas()
         self.toolbar = NavigationToolbar(self.canvas, self)
+        emojiize_matplotlib_toolbar(self.toolbar)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas, stretch=1)
 
@@ -1516,8 +1518,8 @@ class PlotCanvas(FigureCanvas):
 
     def wheelEvent(self, event):
         """
-        Trackpad behavior on the radial graph:
-        - two-finger scroll/pan moves the graph,
+        Trackpad behavior on the radial plot:
+        - two-finger scroll/pan moves the plot,
         - Ctrl/Command + wheel or pinch-like wheel zooms around the cursor.
         """
         modifiers = event.modifiers()
@@ -2424,7 +2426,7 @@ class RadialTab(QWidget):
         self.fit_button.clicked.connect(self.open_power_law_fit_dialog)
         toolbar_box, self.toolbar_extra_layout, self.save_graph_button = make_matplotlib_toolbar_block(
             self,
-            "I(q) graph",
+            "I(q) plot",
             self.toolbar,
             option_widgets=[
                 self.fit_button,
@@ -2432,7 +2434,7 @@ class RadialTab(QWidget):
                 self.show_legend,
             ],
             save_callback=self.save_results,
-            save_tooltip="Save graph (.dat, .png or .tiff)",
+            save_tooltip="Save plot (.dat, .png or .tiff)",
             toolbar_width=320,
         )
         graph_layout.addWidget(toolbar_box, alignment=Qt.AlignTop)
@@ -3757,6 +3759,7 @@ class RadialTab(QWidget):
         fit_ax = fig.add_subplot(111)
         fit_toolbar = NavigationToolbar(fit_canvas, dialog)
         fit_toolbar.coordinates = False
+        emojiize_matplotlib_toolbar(fit_toolbar)
         layout.addWidget(fit_toolbar)
         layout.addWidget(fit_canvas, stretch=1)
         layout.addWidget(coordinate_label)

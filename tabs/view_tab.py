@@ -8,7 +8,7 @@ import hdf5plugin
 import numpy as np
 import matplotlib.pyplot as plt
 
-from PySide6.QtCore import Qt, QEvent, QSettings, Signal, QSize
+from PySide6.QtCore import Qt, QEvent, QSettings, Signal, QSize, QTimer
 
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMessageBox
@@ -30,13 +30,15 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QGroupBox,
     QSpinBox,
-    QStyle,
     QDialog,
     QDialogButtonBox,
     QSizePolicy,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
+    QComboBox,
+    QAbstractItemView,
+    QListWidgetItem,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -81,8 +83,7 @@ class ImageOnlyToolbar(NavigationToolbar):
     def __init__(self, canvas, parent):
         super().__init__(canvas, parent)
         self.view_tab = parent
-        save_icon = parent.style().standardIcon(QStyle.SP_DialogSaveButton)
-        save_image_action = QAction(save_icon, "Save image only", self)
+        save_image_action = QAction("💾", self)
         save_image_action.setToolTip("Save image only")
         save_image_action.triggered.connect(parent.save_png_image_only)
 
@@ -883,6 +884,1087 @@ class PlaneAnnotationDialog(QDialog):
             f"x = {x_index + 1} | y = {y_index + 1} | q = {q_text} | I = {value_text}"
         )
 
+class CompositeImageDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.view_tab = parent
+        self.settings = parent.settings
+        self.entries = []
+        self.multi_h5_path = None
+        self.multi_dataset_name = None
+        self.multi_shape = None
+        self.multi_frame_axis = None
+        self.multi_frame_count = 1
+        self.preview_images = []
+        self.preview_titles = []
+
+        self.setWindowTitle("Composite image")
+        self.resize(1100, 820)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        source_box = QGroupBox("Images")
+        source_layout = QVBoxLayout(source_box)
+        source_layout.setContentsMargins(10, 18, 10, 10)
+        source_layout.setSpacing(6)
+
+        browser_folder_layout = QHBoxLayout()
+        self.composite_folder_path = QLineEdit(str(self.view_tab.current_folder))
+        self.composite_folder_path.returnPressed.connect(self.refresh_source_files)
+        self.composite_browse_button = QPushButton("Browse")
+        self.composite_browse_button.clicked.connect(self.choose_source_folder)
+        browser_folder_layout.addWidget(self.composite_folder_path, 1)
+        browser_folder_layout.addWidget(self.composite_browse_button)
+        source_layout.addLayout(browser_folder_layout)
+
+        browser_filters_layout = QHBoxLayout()
+        self.composite_name_filter = QLineEdit()
+        self.composite_name_filter.setPlaceholderText("Name filter")
+        self.composite_name_filter.textChanged.connect(self.refresh_source_files)
+        self.composite_extension_filter = QLineEdit("*.h5 *.hdf5")
+        self.composite_extension_filter.setPlaceholderText("Extensions")
+        self.composite_extension_filter.textChanged.connect(self.refresh_source_files)
+        self.composite_show_subfolders_checkbox = QCheckBox("Show subfolders")
+        self.composite_show_subfolders_checkbox.stateChanged.connect(self.refresh_source_files)
+        self.composite_refresh_button = QPushButton("Refresh")
+        self.composite_refresh_button.clicked.connect(self.refresh_source_files)
+        browser_filters_layout.addWidget(self.composite_name_filter)
+        browser_filters_layout.addWidget(self.composite_extension_filter)
+        browser_filters_layout.addWidget(self.composite_show_subfolders_checkbox)
+        browser_filters_layout.addWidget(self.composite_refresh_button)
+        source_layout.addLayout(browser_filters_layout)
+
+        self.browser_file_list = QListWidget()
+        self.browser_file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.browser_file_list.setMinimumHeight(150)
+        self.browser_file_list.itemDoubleClicked.connect(lambda _item: self.add_selected_h5_files())
+        source_layout.addWidget(self.browser_file_list)
+
+        source_buttons = QHBoxLayout()
+        self.add_h5_button = QPushButton("Add selected H5")
+        self.add_h5_button.clicked.connect(self.add_selected_h5_files)
+        self.choose_multi_h5_button = QPushButton("Use selected as multi H5")
+        self.choose_multi_h5_button.clicked.connect(self.choose_selected_multi_h5)
+        self.clear_button = QPushButton("Clear")
+        self.clear_button.clicked.connect(self.clear_entries)
+        source_buttons.addWidget(self.add_h5_button)
+        source_buttons.addWidget(self.choose_multi_h5_button)
+        source_buttons.addWidget(self.clear_button)
+        source_layout.addLayout(source_buttons)
+
+        self.file_list = QListWidget()
+        self.file_list.setMinimumHeight(90)
+        source_layout.addWidget(self.file_list)
+
+        range_layout = QHBoxLayout()
+        self.start_spin = QSpinBox()
+        self.start_spin.setRange(1, 1)
+        self.start_spin.setValue(1)
+        self.end_spin = QSpinBox()
+        self.end_spin.setRange(1, 1)
+        self.end_spin.setValue(1)
+        self.step_spin = QSpinBox()
+        self.step_spin.setRange(1, 9999)
+        self.step_spin.setValue(1)
+        self.build_range_button = QPushButton("Build range")
+        self.build_range_button.clicked.connect(self.build_multi_h5_range)
+        for label, widget in [
+            ("Start", self.start_spin),
+            ("End", self.end_spin),
+            ("Every", self.step_spin),
+        ]:
+            range_layout.addWidget(QLabel(label))
+            range_layout.addWidget(widget)
+        range_layout.addWidget(self.build_range_button)
+        range_layout.addStretch(1)
+        source_layout.addLayout(range_layout)
+        layout.addWidget(source_box)
+
+        controls_box = QGroupBox("Composite settings")
+        controls_layout = QGridLayout(controls_box)
+        controls_layout.setContentsMargins(10, 18, 10, 10)
+        controls_layout.setHorizontalSpacing(8)
+        controls_layout.setVerticalSpacing(6)
+
+        self.rows_spin = QSpinBox()
+        self.rows_spin.setRange(1, 20)
+        self.rows_spin.setValue(self.settings.value("view/composite_rows", 2, type=int))
+        self.cols_spin = QSpinBox()
+        self.cols_spin.setRange(1, 20)
+        self.cols_spin.setValue(self.settings.value("view/composite_cols", 3, type=int))
+
+        self.cmap_combo = QComboBox()
+        for label, cmap_name in getattr(parent, "colormap_options", [("Jet", "jet")]):
+            self.cmap_combo.addItem(label, cmap_name)
+        saved_cmap = self.settings.value("view/composite_colormap", parent.current_colormap(), type=str)
+        saved_cmap_index = self.cmap_combo.findData(saved_cmap)
+        self.cmap_combo.setCurrentIndex(max(saved_cmap_index, 0))
+
+        self.log_checkbox = QCheckBox("Log")
+        self.log_checkbox.setChecked(self.settings.value("view/composite_log", True, type=bool))
+        self.nan_to_zero_checkbox = QCheckBox("NaN=0")
+        self.nan_to_zero_checkbox.setChecked(self.settings.value("view/composite_nan_to_zero", True, type=bool))
+
+        self.vmin_spin = QDoubleSpinBox()
+        self.vmin_spin.setDecimals(4)
+        self.vmin_spin.setRange(-1e12, 1e12)
+        self.vmin_spin.setValue(self.settings.value("view/composite_vmin", 0.0, type=float))
+        self.vmax_spin = QDoubleSpinBox()
+        self.vmax_spin.setDecimals(4)
+        self.vmax_spin.setRange(-1e12, 1e12)
+        self.vmax_spin.setValue(self.settings.value("view/composite_vmax", 5.0, type=float))
+
+        self.auto_button = QPushButton("Auto intensity")
+        self.auto_button.clicked.connect(self.auto_intensity)
+        self.update_preview_button = QPushButton("Update preview")
+        self.update_preview_button.clicked.connect(self.update_preview)
+        self.save_button = QPushButton("💾 Save composite")
+        self.save_button.clicked.connect(self.save_composite)
+
+        controls_layout.addWidget(QLabel("Rows"), 0, 0)
+        controls_layout.addWidget(self.rows_spin, 0, 1)
+        controls_layout.addWidget(QLabel("Columns"), 0, 2)
+        controls_layout.addWidget(self.cols_spin, 0, 3)
+        controls_layout.addWidget(QLabel("Colormap"), 0, 4)
+        controls_layout.addWidget(self.cmap_combo, 0, 5)
+        controls_layout.addWidget(self.log_checkbox, 1, 0)
+        controls_layout.addWidget(self.nan_to_zero_checkbox, 1, 1)
+        controls_layout.addWidget(QLabel("Min"), 1, 2)
+        controls_layout.addWidget(self.vmin_spin, 1, 3)
+        controls_layout.addWidget(QLabel("Max"), 1, 4)
+        controls_layout.addWidget(self.vmax_spin, 1, 5)
+        controls_layout.addWidget(self.auto_button, 2, 0, 1, 2)
+        controls_layout.addWidget(self.update_preview_button, 2, 2, 1, 2)
+        controls_layout.addWidget(self.save_button, 2, 4, 1, 2)
+        layout.addWidget(controls_box)
+
+        self.fig = Figure()
+        self.canvas = FigureCanvas(self.fig)
+        layout.addWidget(self.canvas, 1)
+
+        self.status_label = QLabel("Choose separate H5 files or a range from one multi-frame H5.")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        for widget in [
+            self.rows_spin,
+            self.cols_spin,
+            self.cmap_combo,
+            self.log_checkbox,
+            self.nan_to_zero_checkbox,
+            self.vmin_spin,
+            self.vmax_spin,
+        ]:
+            if hasattr(widget, "valueChanged"):
+                widget.valueChanged.connect(self.update_preview)
+            elif hasattr(widget, "currentIndexChanged"):
+                widget.currentIndexChanged.connect(self.update_preview)
+            elif hasattr(widget, "stateChanged"):
+                widget.stateChanged.connect(self.update_preview)
+
+        self.refresh_source_files()
+        self.update_preview()
+
+    def preferred_h5_dataset(self, path):
+        candidates = []
+        with h5py.File(path, "r") as handle:
+            def visitor(name, obj):
+                if not isinstance(obj, h5py.Dataset) or obj.ndim not in (2, 3):
+                    return
+                if not np.issubdtype(obj.dtype, np.number):
+                    return
+                frame_axis, n_frames, image_shape = self.view_tab.h5_dataset_image_info(obj.shape)
+                score = self.view_tab.h5_dataset_image_score(name, obj, frame_axis, n_frames, image_shape)
+                candidates.append((score, name, tuple(obj.shape), frame_axis, n_frames, image_shape))
+
+            handle.visititems(visitor)
+
+        if not candidates:
+            raise ValueError("No 2D or 3D image dataset found.")
+        return max(candidates, key=lambda item: item[0])
+
+    def read_h5_frame(self, path, dataset_name, frame_axis, frame_index):
+        with h5py.File(path, "r") as handle:
+            dataset = handle[dataset_name]
+            if dataset.ndim == 2:
+                return np.asarray(dataset[:, :], dtype=float)
+            if frame_axis == 0:
+                return np.asarray(dataset[frame_index, :, :], dtype=float)
+            if frame_axis == 1:
+                return np.asarray(dataset[:, frame_index, :], dtype=float)
+            return np.asarray(dataset[:, :, frame_index], dtype=float)
+
+    def choose_source_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Choose folder",
+            self.composite_folder_path.text() or str(Path.home()),
+        )
+        if folder:
+            self.composite_folder_path.setText(folder)
+            self.refresh_source_files()
+
+    def extension_patterns(self):
+        text = self.composite_extension_filter.text().strip()
+        if not text:
+            return ["*.h5", "*.hdf5"]
+        return [part.strip() for part in re.split(r"[;,\s]+", text) if part.strip()]
+
+    def refresh_source_files(self):
+        if not hasattr(self, "browser_file_list"):
+            return
+
+        folder = Path(self.composite_folder_path.text()).expanduser()
+        self.browser_file_list.clear()
+        if not folder.exists():
+            return
+
+        name_filter = self.composite_name_filter.text().strip().lower()
+        patterns = self.extension_patterns()
+        iterator = folder.rglob("*") if self.composite_show_subfolders_checkbox.isChecked() else folder.glob("*")
+
+        paths = []
+        for path in iterator:
+            if not path.is_file():
+                continue
+            if patterns and not any(fnmatch.fnmatch(path.name.lower(), pattern.lower()) for pattern in patterns):
+                continue
+            if name_filter and name_filter not in path.name.lower():
+                continue
+            paths.append(path)
+
+        for path in sorted(paths, key=lambda item: str(item).lower()):
+            display_name = str(path.relative_to(folder))
+            item = QListWidgetItem(display_name)
+            item.setData(Qt.UserRole, str(path))
+            self.browser_file_list.addItem(item)
+
+    def selected_browser_paths(self):
+        paths = []
+        for item in self.browser_file_list.selectedItems():
+            stored_path = item.data(Qt.UserRole)
+            if stored_path:
+                paths.append(stored_path)
+        return paths
+
+    def add_selected_h5_files(self):
+        paths = self.selected_browser_paths()
+        if not paths:
+            QMessageBox.information(self, "Composite H5", "Select one or more H5 files in the list first.")
+            return
+
+        errors = []
+        for path in paths:
+            try:
+                _score, dataset_name, shape, frame_axis, _n_frames, _image_shape = self.preferred_h5_dataset(path)
+                self.entries.append({
+                    "path": path,
+                    "dataset": dataset_name,
+                    "frame_axis": frame_axis,
+                    "frame": 0,
+                    "title": Path(path).stem,
+                })
+                self.file_list.addItem(f"{Path(path).name}  {dataset_name}  {shape}")
+            except Exception as error:
+                errors.append(f"{Path(path).name}: {error}")
+
+        if errors:
+            QMessageBox.warning(self, "Composite H5", "\n".join(errors))
+        self.load_preview_images()
+
+    def choose_selected_multi_h5(self):
+        paths = self.selected_browser_paths()
+        if not paths:
+            QMessageBox.information(self, "Composite H5", "Select one multi-frame H5 file in the list first.")
+            return
+        path = paths[0]
+
+        try:
+            _score, dataset_name, shape, frame_axis, n_frames, _image_shape = self.preferred_h5_dataset(path)
+        except Exception as error:
+            QMessageBox.warning(self, "Composite H5", f"Unable to read this H5 file:\n{error}")
+            return
+
+        self.multi_h5_path = path
+        self.multi_dataset_name = dataset_name
+        self.multi_shape = shape
+        self.multi_frame_axis = frame_axis
+        self.multi_frame_count = n_frames
+        self.start_spin.setRange(1, n_frames)
+        self.end_spin.setRange(1, n_frames)
+        self.start_spin.setValue(1)
+        self.end_spin.setValue(n_frames)
+        self.status_label.setText(f"Multi H5 ready: {Path(path).name}, dataset {dataset_name}, {n_frames} frame(s).")
+
+    def build_multi_h5_range(self):
+        if not self.multi_h5_path:
+            QMessageBox.information(self, "Composite H5", "Choose a multi H5 file first.")
+            return
+
+        start = min(self.start_spin.value(), self.end_spin.value())
+        end = max(self.start_spin.value(), self.end_spin.value())
+        step = max(1, self.step_spin.value())
+        self.entries = []
+        self.file_list.clear()
+
+        for frame_number in range(start, end + 1, step):
+            self.entries.append({
+                "path": self.multi_h5_path,
+                "dataset": self.multi_dataset_name,
+                "frame_axis": self.multi_frame_axis,
+                "frame": frame_number - 1,
+                "title": f"{Path(self.multi_h5_path).stem} #{frame_number}",
+            })
+            self.file_list.addItem(
+                f"{Path(self.multi_h5_path).name}  frame {frame_number}  {self.multi_dataset_name}  {self.multi_shape}"
+            )
+
+        self.load_preview_images()
+
+    def clear_entries(self):
+        self.entries = []
+        self.preview_images = []
+        self.preview_titles = []
+        self.file_list.clear()
+        self.update_preview()
+
+    def transformed_image(self, image):
+        display = np.asarray(image, dtype=float).copy()
+        display[display > 4e9] = np.nan
+        if self.log_checkbox.isChecked():
+            display = np.log10(np.clip(display, 0, None) + 1)
+        if self.nan_to_zero_checkbox.isChecked():
+            display = np.nan_to_num(display, nan=0.0, copy=False)
+        return display
+
+    def load_preview_images(self):
+        images = []
+        titles = []
+        errors = []
+        max_images = self.rows_spin.value() * self.cols_spin.value()
+
+        for entry in self.entries[:max_images]:
+            try:
+                images.append(self.read_h5_frame(entry["path"], entry["dataset"], entry["frame_axis"], entry["frame"]))
+                titles.append(entry["title"])
+            except Exception as error:
+                errors.append(f"{entry['title']}: {error}")
+
+        self.preview_images = images
+        self.preview_titles = titles
+        if errors:
+            QMessageBox.warning(self, "Composite H5", "\n".join(errors))
+        self.auto_intensity()
+
+    def auto_intensity(self):
+        values = []
+        for image in self.preview_images:
+            display = self.transformed_image(image)
+            finite = display[np.isfinite(display)]
+            if finite.size:
+                values.append(finite)
+
+        if values:
+            merged = np.concatenate(values)
+            vmin = float(np.nanpercentile(merged, 1))
+            vmax = float(np.nanpercentile(merged, 99))
+            if vmax <= vmin:
+                vmax = vmin + 1.0
+            self.vmin_spin.blockSignals(True)
+            self.vmax_spin.blockSignals(True)
+            self.vmin_spin.setValue(vmin)
+            self.vmax_spin.setValue(vmax)
+            self.vmin_spin.blockSignals(False)
+            self.vmax_spin.blockSignals(False)
+
+        self.update_preview()
+
+    def render_composite(self):
+        rows = self.rows_spin.value()
+        cols = self.cols_spin.value()
+        max_images = rows * cols
+        images = self.preview_images[:max_images]
+
+        self.fig.clear()
+        if images:
+            ny, nx = images[0].shape
+            self.fig.set_size_inches(max(cols * nx / 300.0, 1.0), max(rows * ny / 300.0, 1.0), forward=True)
+        axes = self.fig.subplots(rows, cols, squeeze=False)
+        cmap = self.cmap_combo.currentData() or "jet"
+        vmin = self.vmin_spin.value()
+        vmax = self.vmax_spin.value()
+
+        for index, ax in enumerate(axes.flat):
+            ax.set_axis_off()
+            if index >= len(images):
+                continue
+            ax.imshow(
+                self.transformed_image(images[index]),
+                cmap=cmap,
+                origin="upper",
+                vmin=vmin,
+                vmax=vmax,
+                aspect="equal",
+            )
+            ny, nx = images[index].shape
+            ax.set_xlim(-0.5, nx - 0.5)
+            ax.set_ylim(ny - 0.5, -0.5)
+
+        self.fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0, hspace=0)
+        return len(images), max_images
+
+    def update_preview(self, *args):
+        needed = min(len(self.entries), self.rows_spin.value() * self.cols_spin.value())
+        if len(self.preview_images) != needed:
+            self.load_preview_images()
+            return
+        count, max_images = self.render_composite()
+        self.canvas.draw_idle()
+        self.status_label.setText(f"Composite preview: {count} / {len(self.entries)} selected image(s), grid capacity {max_images}.")
+
+    def save_settings(self):
+        self.settings.setValue("view/composite_rows", self.rows_spin.value())
+        self.settings.setValue("view/composite_cols", self.cols_spin.value())
+        self.settings.setValue("view/composite_colormap", self.cmap_combo.currentData() or "jet")
+        self.settings.setValue("view/composite_log", self.log_checkbox.isChecked())
+        self.settings.setValue("view/composite_nan_to_zero", self.nan_to_zero_checkbox.isChecked())
+        self.settings.setValue("view/composite_vmin", self.vmin_spin.value())
+        self.settings.setValue("view/composite_vmax", self.vmax_spin.value())
+
+    def save_composite(self):
+        if not self.preview_images:
+            QMessageBox.information(self, "Composite H5", "No composite image to save.")
+            return
+
+        start_folder = str(self.view_tab.current_file.parent) if self.view_tab.current_file is not None else str(Path.home())
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save composite",
+            str(Path(start_folder) / "composite.png"),
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;TIFF image (*.tif *.tiff);;All files (*)",
+        )
+        if not path:
+            return
+
+        lower_path = path.lower()
+        if "JPEG" in selected_filter and not lower_path.endswith((".jpg", ".jpeg")):
+            path += ".jpg"
+        elif "TIFF" in selected_filter and not lower_path.endswith((".tif", ".tiff")):
+            path += ".tif"
+        elif not lower_path.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
+            path += ".png"
+
+        try:
+            self.render_composite()
+            save_kwargs = {
+                "dpi": 300,
+                "bbox_inches": "tight",
+                "pad_inches": 0.02,
+                "facecolor": "white",
+            }
+            if path.lower().endswith((".jpg", ".jpeg")):
+                save_kwargs["pil_kwargs"] = {"quality": 95}
+            self.fig.savefig(path, **save_kwargs)
+            self.save_settings()
+            self.status_label.setText(f"Composite saved: {path}")
+        except Exception as error:
+            QMessageBox.warning(self, "Composite save error", f"Unable to save composite:\n{error}")
+
+
+class FilmDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.view_tab = parent
+        self.settings = parent.settings
+        self.frames = []
+        self.frame_labels = []
+        self.current_frame_index = 0
+        self.play_timer = QTimer(self)
+        self.play_timer.timeout.connect(self.next_frame)
+
+        self.setWindowTitle("Film")
+        self.resize(1050, 780)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        source_box = QGroupBox("Frames")
+        source_layout = QVBoxLayout(source_box)
+        source_layout.setContentsMargins(10, 18, 10, 10)
+        source_layout.setSpacing(6)
+
+        source_buttons = QHBoxLayout()
+        self.add_files_button = QPushButton("Add files")
+        self.add_files_button.clicked.connect(self.add_files)
+        self.clear_button = QPushButton("Clear")
+        self.clear_button.clicked.connect(self.clear_frames)
+        source_buttons.addWidget(self.add_files_button)
+        source_buttons.addWidget(self.clear_button)
+        source_layout.addLayout(source_buttons)
+
+        self.file_list = QListWidget()
+        self.file_list.setMinimumHeight(90)
+        source_layout.addWidget(self.file_list)
+        layout.addWidget(source_box)
+
+        controls_box = QGroupBox("Film settings")
+        controls_layout = QGridLayout(controls_box)
+        controls_layout.setContentsMargins(10, 18, 10, 10)
+        controls_layout.setHorizontalSpacing(8)
+        controls_layout.setVerticalSpacing(6)
+
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(1, 60)
+        self.fps_spin.setValue(self.settings.value("view/film_fps", 12, type=int))
+        self.fps_spin.valueChanged.connect(self.update_timer_interval)
+        self.cmap_combo = QComboBox()
+        for label, cmap_name in getattr(parent, "colormap_options", [("Jet", "jet")]):
+            self.cmap_combo.addItem(label, cmap_name)
+        saved_cmap = self.settings.value("view/film_colormap", parent.current_colormap(), type=str)
+        saved_cmap_index = self.cmap_combo.findData(saved_cmap)
+        self.cmap_combo.setCurrentIndex(max(saved_cmap_index, 0))
+        self.cmap_combo.currentIndexChanged.connect(self.update_preview)
+        self.log_checkbox = QCheckBox("Log")
+        self.log_checkbox.setChecked(self.settings.value("view/film_log", True, type=bool))
+        self.log_checkbox.stateChanged.connect(self.update_after_display_change)
+        self.nan_to_zero_checkbox = QCheckBox("NaN=0")
+        self.nan_to_zero_checkbox.setChecked(self.settings.value("view/film_nan_to_zero", True, type=bool))
+        self.nan_to_zero_checkbox.stateChanged.connect(self.update_after_display_change)
+
+        self.vmin_spin = QDoubleSpinBox()
+        self.vmin_spin.setDecimals(4)
+        self.vmin_spin.setRange(-1e12, 1e12)
+        self.vmax_spin = QDoubleSpinBox()
+        self.vmax_spin.setDecimals(4)
+        self.vmax_spin.setRange(-1e12, 1e12)
+        self.vmin_spin.valueChanged.connect(self.update_preview)
+        self.vmax_spin.valueChanged.connect(self.update_preview)
+
+        self.play_button = QPushButton("Play")
+        self.play_button.clicked.connect(self.play)
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.clicked.connect(self.stop)
+        self.auto_button = QPushButton("Auto intensity")
+        self.auto_button.clicked.connect(self.auto_intensity)
+        self.save_button = QPushButton("💾 Save GIF/video")
+        self.save_button.clicked.connect(self.save_film)
+
+        controls_layout.addWidget(QLabel("FPS"), 0, 0)
+        controls_layout.addWidget(self.fps_spin, 0, 1)
+        controls_layout.addWidget(QLabel("Colormap"), 0, 2)
+        controls_layout.addWidget(self.cmap_combo, 0, 3)
+        controls_layout.addWidget(self.log_checkbox, 0, 4)
+        controls_layout.addWidget(self.nan_to_zero_checkbox, 0, 5)
+        controls_layout.addWidget(QLabel("Min"), 1, 0)
+        controls_layout.addWidget(self.vmin_spin, 1, 1)
+        controls_layout.addWidget(QLabel("Max"), 1, 2)
+        controls_layout.addWidget(self.vmax_spin, 1, 3)
+        controls_layout.addWidget(self.auto_button, 1, 4)
+        controls_layout.addWidget(self.play_button, 2, 0, 1, 2)
+        controls_layout.addWidget(self.stop_button, 2, 2, 1, 2)
+        controls_layout.addWidget(self.save_button, 2, 4, 1, 2)
+        layout.addWidget(controls_box)
+
+        self.fig = Figure()
+        self.fig.patch.set_alpha(0)
+        self.canvas = FigureCanvas(self.fig)
+        self.canvas.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.canvas.setStyleSheet("background: transparent;")
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor("none")
+        self.ax.set_axis_off()
+        layout.addWidget(self.canvas, 1)
+
+        self.status_label = QLabel("Add EDF or H5 files to build a film.")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        self.update_timer_interval()
+        self.update_buttons()
+
+    def preferred_h5_dataset(self, path):
+        candidates = []
+        with h5py.File(path, "r") as handle:
+            def visitor(name, obj):
+                if not isinstance(obj, h5py.Dataset) or obj.ndim not in (2, 3):
+                    return
+                if not np.issubdtype(obj.dtype, np.number):
+                    return
+                frame_axis, n_frames, image_shape = self.view_tab.h5_dataset_image_info(obj.shape)
+                score = self.view_tab.h5_dataset_image_score(name, obj, frame_axis, n_frames, image_shape)
+                candidates.append((score, name, frame_axis, n_frames))
+
+            handle.visititems(visitor)
+        if not candidates:
+            raise ValueError("No 2D or 3D image dataset found.")
+        return max(candidates, key=lambda item: item[0])
+
+    def read_h5_frames(self, path):
+        _score, dataset_name, frame_axis, n_frames = self.preferred_h5_dataset(path)
+        frames = []
+        with h5py.File(path, "r") as handle:
+            dataset = handle[dataset_name]
+            if dataset.ndim == 2:
+                frames.append(np.asarray(dataset[:, :], dtype=float))
+            elif frame_axis == 0:
+                for index in range(n_frames):
+                    frames.append(np.asarray(dataset[index, :, :], dtype=float))
+            elif frame_axis == 1:
+                for index in range(n_frames):
+                    frames.append(np.asarray(dataset[:, index, :], dtype=float))
+            else:
+                for index in range(n_frames):
+                    frames.append(np.asarray(dataset[:, :, index], dtype=float))
+        return frames
+
+    def read_edf_frames(self, path):
+        try:
+            import fabio
+        except ImportError:
+            raise ImportError("fabio is required to read EDF files.")
+
+        edf = fabio.open(str(path))
+        try:
+            nframes = int(getattr(edf, "nframes", 1) or 1)
+            if nframes <= 1:
+                return [np.asarray(edf.data, dtype=float)]
+            return [np.asarray(edf.getframe(index).data, dtype=float) for index in range(nframes)]
+        finally:
+            try:
+                edf.close()
+            except Exception:
+                pass
+
+    def add_files(self):
+        start_folder = self.view_tab.current_file.parent if self.view_tab.current_file is not None else Path.home()
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Choose film files",
+            str(start_folder),
+            "Image data (*.edf *.h5 *.hdf5);;EDF files (*.edf);;HDF5 files (*.h5 *.hdf5);;All files (*)",
+        )
+        if not paths:
+            return
+
+        errors = []
+        for path_text in paths:
+            path = Path(path_text).expanduser()
+            try:
+                suffix = path.suffix.lower()
+                if suffix == ".edf":
+                    new_frames = self.read_edf_frames(path)
+                elif suffix in {".h5", ".hdf5"}:
+                    new_frames = self.read_h5_frames(path)
+                else:
+                    raise ValueError("Unsupported file format.")
+                start_index = len(self.frames)
+                self.frames.extend(new_frames)
+                for offset, _frame in enumerate(new_frames):
+                    self.frame_labels.append(f"{path.name} #{offset + 1}")
+                self.file_list.addItem(f"{path.name}  {len(new_frames)} frame(s)  total {start_index + len(new_frames)}")
+            except Exception as error:
+                errors.append(f"{path.name}: {error}")
+
+        if errors:
+            QMessageBox.warning(self, "Film", "\n".join(errors))
+        if self.frames:
+            self.current_frame_index = min(self.current_frame_index, len(self.frames) - 1)
+            self.auto_intensity()
+        self.update_buttons()
+
+    def clear_frames(self):
+        self.stop()
+        self.frames = []
+        self.frame_labels = []
+        self.current_frame_index = 0
+        self.file_list.clear()
+        self.ax.clear()
+        self.ax.set_axis_off()
+        self.canvas.draw_idle()
+        self.status_label.setText("Add EDF or H5 files to build a film.")
+        self.update_buttons()
+
+    def transformed_image(self, image):
+        display = np.asarray(image, dtype=float).copy()
+        display[display > 4e9] = np.nan
+        if self.log_checkbox.isChecked():
+            display = np.log10(np.clip(display, 0, None) + 1)
+        if self.nan_to_zero_checkbox.isChecked():
+            display = np.nan_to_num(display, nan=0.0, copy=False)
+        return display
+
+    def update_after_display_change(self):
+        self.auto_intensity()
+        self.update_preview()
+
+    def auto_intensity(self):
+        values = []
+        for frame in self.frames:
+            display = self.transformed_image(frame)
+            finite = display[np.isfinite(display)]
+            if finite.size:
+                values.append(finite)
+        if not values:
+            return
+        merged = np.concatenate(values)
+        vmin = float(np.nanpercentile(merged, 1))
+        vmax = float(np.nanpercentile(merged, 99))
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        self.vmin_spin.blockSignals(True)
+        self.vmax_spin.blockSignals(True)
+        self.vmin_spin.setValue(vmin)
+        self.vmax_spin.setValue(vmax)
+        self.vmin_spin.blockSignals(False)
+        self.vmax_spin.blockSignals(False)
+        self.update_preview()
+
+    def update_timer_interval(self):
+        self.play_timer.setInterval(max(1, int(1000 / max(1, self.fps_spin.value()))))
+        self.settings.setValue("view/film_fps", self.fps_spin.value())
+
+    def update_buttons(self):
+        has_frames = bool(self.frames)
+        self.play_button.setEnabled(has_frames and not self.play_timer.isActive())
+        self.stop_button.setEnabled(self.play_timer.isActive())
+        self.save_button.setEnabled(has_frames)
+
+    def play(self):
+        if not self.frames:
+            return
+        self.play_timer.start()
+        self.update_buttons()
+
+    def stop(self):
+        self.play_timer.stop()
+        self.update_buttons()
+
+    def next_frame(self):
+        if not self.frames:
+            self.stop()
+            return
+        self.current_frame_index = (self.current_frame_index + 1) % len(self.frames)
+        self.update_preview()
+
+    def update_preview(self, *args):
+        if not self.frames:
+            return
+        self.current_frame_index = self.current_frame_index % len(self.frames)
+        image = self.transformed_image(self.frames[self.current_frame_index])
+        self.ax.clear()
+        self.ax.set_facecolor("none")
+        self.ax.set_axis_off()
+        self.ax.imshow(
+            image,
+            cmap=self.cmap_combo.currentData() or "jet",
+            origin="upper",
+            vmin=self.vmin_spin.value(),
+            vmax=self.vmax_spin.value(),
+            aspect="equal",
+        )
+        ny, nx = image.shape
+        self.ax.set_xlim(-0.5, nx - 0.5)
+        self.ax.set_ylim(ny - 0.5, -0.5)
+        self.fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        self.canvas.draw_idle()
+        self.status_label.setText(
+            f"Frame {self.current_frame_index + 1} / {len(self.frames)}"
+            f"  {self.frame_labels[self.current_frame_index]}"
+        )
+        self.settings.setValue("view/film_colormap", self.cmap_combo.currentData() or "jet")
+        self.settings.setValue("view/film_log", self.log_checkbox.isChecked())
+        self.settings.setValue("view/film_nan_to_zero", self.nan_to_zero_checkbox.isChecked())
+
+    def frame_to_rgb(self, frame):
+        image = self.transformed_image(frame)
+        vmin = self.vmin_spin.value()
+        vmax = self.vmax_spin.value()
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        normalized = np.clip((image - vmin) / (vmax - vmin), 0, 1)
+        normalized[~np.isfinite(normalized)] = 0
+        rgba = plt.get_cmap(self.cmap_combo.currentData() or "jet")(normalized)
+        return (rgba[:, :, :3] * 255).astype(np.uint8)
+
+    def save_film(self):
+        if not self.frames:
+            return
+        start_folder = self.view_tab.current_file.parent if self.view_tab.current_file is not None else Path.home()
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save film",
+            str(Path(start_folder) / "film.gif"),
+            "GIF animation (*.gif);;MP4 video (*.mp4);;All files (*)",
+        )
+        if not path:
+            return
+        lower_path = path.lower()
+        if "MP4" in selected_filter and not lower_path.endswith(".mp4"):
+            path += ".mp4"
+        elif not lower_path.endswith((".gif", ".mp4")):
+            path += ".gif"
+
+        try:
+            rgb_frames = [self.frame_to_rgb(frame) for frame in self.frames]
+            if path.lower().endswith(".gif"):
+                from PIL import Image
+                images = [Image.fromarray(frame) for frame in rgb_frames]
+                duration_ms = max(1, int(1000 / max(1, self.fps_spin.value())))
+                images[0].save(
+                    path,
+                    save_all=True,
+                    append_images=images[1:],
+                    duration=duration_ms,
+                    loop=0,
+                )
+            else:
+                import imageio.v2 as imageio
+                imageio.mimsave(path, rgb_frames, fps=self.fps_spin.value())
+            self.status_label.setText(f"Film saved: {path}")
+        except ImportError as error:
+            QMessageBox.warning(self, "Film save error", f"Missing dependency:\n{error}")
+        except Exception as error:
+            QMessageBox.warning(self, "Film save error", f"Unable to save film:\n{error}")
+
+
+class AllColormapPreviewDialog(QDialog):
+    def __init__(self, parent, image, colormap_options, vmin, vmax, source_file=None, frame_index=0, total_frames=1):
+        super().__init__(parent)
+        self.setWindowTitle("All colors preview")
+        self.resize(1150, 820)
+        self.image = np.asarray(image, dtype=float)
+        self.colormap_options = list(colormap_options)[:12]
+        self.source_file = Path(source_file) if source_file is not None else None
+        self.frame_index = int(frame_index)
+        self.total_frames = int(total_frames)
+        self.artists = []
+        self._syncing_controls = False
+
+        finite = self.image[np.isfinite(self.image)]
+        if finite.size:
+            self.data_min = float(np.nanmin(finite))
+            self.data_max = float(np.nanmax(finite))
+        else:
+            self.data_min = 0.0
+            self.data_max = 1.0
+        if self.data_max <= self.data_min:
+            self.data_max = self.data_min + 1.0
+
+        if vmax <= vmin:
+            vmin, vmax = self.data_min, self.data_max
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        controls = QGridLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setHorizontalSpacing(8)
+        controls.setVerticalSpacing(4)
+
+        self.vmin_spin = QDoubleSpinBox()
+        self.vmin_spin.setDecimals(4)
+        self.vmin_spin.setRange(-1e12, 1e12)
+        self.vmin_spin.setValue(vmin)
+        self.vmax_spin = QDoubleSpinBox()
+        self.vmax_spin.setDecimals(4)
+        self.vmax_spin.setRange(-1e12, 1e12)
+        self.vmax_spin.setValue(vmax)
+
+        self.min_slider = QSlider(Qt.Horizontal)
+        self.min_slider.setRange(0, 1000)
+        self.max_slider = QSlider(Qt.Horizontal)
+        self.max_slider.setRange(0, 1000)
+        self.auto_button = QPushButton("Auto intensity")
+        self.auto_button.clicked.connect(self.auto_intensity)
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["PNG", "JPEG", "TIFF"])
+        self.save_all_button = QPushButton("💾 Save all")
+        self.save_all_button.clicked.connect(self.save_all_images)
+
+        controls.addWidget(QLabel("Min"), 0, 0)
+        controls.addWidget(self.vmin_spin, 0, 1)
+        controls.addWidget(self.min_slider, 0, 2)
+        controls.addWidget(QLabel("Max"), 1, 0)
+        controls.addWidget(self.vmax_spin, 1, 1)
+        controls.addWidget(self.max_slider, 1, 2)
+        controls.addWidget(self.auto_button, 0, 3, 2, 1)
+        controls.addWidget(QLabel("Format"), 0, 4)
+        controls.addWidget(self.format_combo, 0, 5)
+        controls.addWidget(self.save_all_button, 1, 4, 1, 2)
+        controls.setColumnStretch(2, 1)
+        layout.addLayout(controls)
+
+        self.fig = Figure()
+        self.canvas = FigureCanvas(self.fig)
+        layout.addWidget(self.canvas, 1)
+        self.hover_label = QLabel(" ")
+        self.hover_label.setAlignment(Qt.AlignCenter)
+        self.hover_label.setMinimumHeight(22)
+        layout.addWidget(self.hover_label)
+
+        self.vmin_spin.valueChanged.connect(self.spin_intensity_changed)
+        self.vmax_spin.valueChanged.connect(self.spin_intensity_changed)
+        self.min_slider.valueChanged.connect(self.slider_intensity_changed)
+        self.max_slider.valueChanged.connect(self.slider_intensity_changed)
+        self.canvas.mpl_connect("motion_notify_event", self.on_hover)
+        self.canvas.mpl_connect("figure_leave_event", self.on_leave)
+
+        self.sync_sliders_from_spins()
+        self.draw_preview()
+
+    def value_to_slider(self, value):
+        if self.data_max <= self.data_min:
+            return 0
+        slider_value = int(1000 * (value - self.data_min) / (self.data_max - self.data_min))
+        return max(0, min(1000, slider_value))
+
+    def slider_to_value(self, value):
+        return self.data_min + (value / 1000.0) * (self.data_max - self.data_min)
+
+    def sync_sliders_from_spins(self):
+        self._syncing_controls = True
+        self.min_slider.setValue(self.value_to_slider(self.vmin_spin.value()))
+        self.max_slider.setValue(self.value_to_slider(self.vmax_spin.value()))
+        self._syncing_controls = False
+
+    def spin_intensity_changed(self):
+        if self._syncing_controls:
+            return
+        if self.vmax_spin.value() <= self.vmin_spin.value():
+            return
+        self.sync_sliders_from_spins()
+        self.update_intensity()
+
+    def slider_intensity_changed(self):
+        if self._syncing_controls:
+            return
+        vmin = self.slider_to_value(self.min_slider.value())
+        vmax = self.slider_to_value(self.max_slider.value())
+        if vmax <= vmin:
+            return
+        self._syncing_controls = True
+        self.vmin_spin.setValue(vmin)
+        self.vmax_spin.setValue(vmax)
+        self._syncing_controls = False
+        self.update_intensity()
+
+    def auto_intensity(self):
+        finite = self.image[np.isfinite(self.image)]
+        if finite.size == 0:
+            return
+        vmin = float(np.nanpercentile(finite, 1))
+        vmax = float(np.nanpercentile(finite, 99))
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        self._syncing_controls = True
+        self.vmin_spin.setValue(vmin)
+        self.vmax_spin.setValue(vmax)
+        self._syncing_controls = False
+        self.sync_sliders_from_spins()
+        self.update_intensity()
+
+    def draw_preview(self):
+        self.fig.clear()
+        self.artists = []
+        axes = self.fig.subplots(3, 4)
+        vmin = self.vmin_spin.value()
+        vmax = self.vmax_spin.value()
+
+        for ax, (label, cmap_name) in zip(np.ravel(axes), self.colormap_options):
+            ax._lrphoton_colormap_label = label
+            artist = ax.imshow(
+                self.image,
+                cmap=cmap_name,
+                origin="upper",
+                vmin=vmin,
+                vmax=vmax,
+                aspect="equal",
+            )
+            ax.set_axis_off()
+            self.artists.append(artist)
+
+        for ax in np.ravel(axes)[len(self.colormap_options):]:
+            ax.set_axis_off()
+
+        self.fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0, hspace=0)
+        self.canvas.draw_idle()
+
+    def on_hover(self, event):
+        label = getattr(event.inaxes, "_lrphoton_colormap_label", "") if event.inaxes is not None else ""
+        self.hover_label.setText(label or " ")
+
+    def on_leave(self, _event):
+        self.hover_label.setText(" ")
+
+    def save_all_images(self):
+        start_folder = self.source_file.parent if self.source_file is not None else Path.home()
+        output_folder = QFileDialog.getExistingDirectory(
+            self,
+            "Save all preview colors",
+            str(start_folder),
+        )
+        if not output_folder:
+            return
+
+        selected_format = self.format_combo.currentText()
+        extension = {
+            "PNG": ".png",
+            "JPEG": ".jpg",
+            "TIFF": ".tif",
+        }.get(selected_format, ".png")
+
+        base_name = self.source_file.stem if self.source_file is not None else "preview_colors"
+        if self.total_frames > 1:
+            base_name = f"{base_name}_frame{self.frame_index + 1:04d}"
+
+        vmin = self.vmin_spin.value()
+        vmax = self.vmax_spin.value()
+        if vmax <= vmin:
+            return
+
+        try:
+            saved_count = 0
+            for label, cmap_name in self.colormap_options:
+                slug = re.sub(r"[^A-Za-z0-9_-]+", "_", label.strip()).strip("_").lower()
+                path = Path(output_folder) / f"{base_name}_{slug}{extension}"
+                save_kwargs = {}
+                if extension == ".jpg":
+                    save_kwargs["pil_kwargs"] = {"quality": 95}
+                plt.imsave(
+                    path,
+                    self.image,
+                    cmap=cmap_name,
+                    vmin=vmin,
+                    vmax=vmax,
+                    origin="upper",
+                    **save_kwargs,
+                )
+                saved_count += 1
+
+            QMessageBox.information(
+                self,
+                "Save all preview colors",
+                f"Saved {saved_count} image(s) in:\n{output_folder}",
+            )
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Save all preview colors error",
+                f"Unable to save all preview images:\n{error}",
+            )
+
+    def update_intensity(self):
+        vmin = self.vmin_spin.value()
+        vmax = self.vmax_spin.value()
+        if vmax <= vmin:
+            return
+        for artist in self.artists:
+            artist.set_clim(vmin, vmax)
+        self.canvas.draw_idle()
+
 
 class ViewTab(QWidget):
     folder_changed = Signal(Path)
@@ -1055,6 +2137,46 @@ class ViewTab(QWidget):
         self.log_checkbox.setChecked(True)
         self.log_checkbox.stateChanged.connect(self.update_image)
 
+        self.nan_to_zero_checkbox = QCheckBox("NaN=0")
+        self.nan_to_zero_checkbox.setToolTip("Display NaN pixels as 0 instead of leaving them blank")
+        self.nan_to_zero_checkbox.setChecked(
+            self.settings.value("view/nan_to_zero", True, type=bool)
+        )
+        self.nan_to_zero_checkbox.stateChanged.connect(self.change_nan_to_zero)
+
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.setToolTip("Colormap")
+        self.colormap_combo.setFixedWidth(125)
+        self.colormap_options = [
+            ("Gray", "gray"),
+            ("Reversed Gray", "gray_r"),
+            ("Red", "Reds"),
+            ("Green", "Greens"),
+            ("Blue", "Blues"),
+            ("Viridis", "viridis"),
+            ("Cividis", "cividis"),
+            ("Magma", "magma"),
+            ("Inferno", "inferno"),
+            ("Plasma", "plasma"),
+            ("Temperature", "turbo"),
+            ("Jet", "jet"),
+            ("Hsv", "hsv"),
+        ]
+        for label, cmap_name in self.colormap_options:
+            self.colormap_combo.addItem(label, cmap_name)
+        saved_colormap = self.settings.value("view/colormap", "jet", type=str)
+        saved_index = self.colormap_combo.findData(saved_colormap)
+        if saved_index < 0:
+            saved_index = self.colormap_combo.findData("jet")
+        self.colormap_combo.setCurrentIndex(max(saved_index, 0))
+        self.colormap_combo.currentIndexChanged.connect(self.change_colormap)
+
+        self.save_all_colors_button = QPushButton("Preview colors")
+        self.save_all_colors_button.setToolTip("Preview 12 colormaps with a shared intensity scale")
+        self.save_all_colors_button.setFixedWidth(125)
+        self.save_all_colors_button.setFixedHeight(22)
+        self.save_all_colors_button.clicked.connect(self.show_all_colormap_preview)
+
         self.keep_ratio_checkbox = QCheckBox("Keep ratio")
         self.keep_ratio_checkbox.setChecked(True)
         self.keep_ratio_checkbox.stateChanged.connect(self.update_image)
@@ -1074,6 +2196,7 @@ class ViewTab(QWidget):
             toolbar=self.toolbar,
             option_widgets=[
                 self.log_checkbox,
+                self.colormap_combo,
                 self.keep_ratio_checkbox,
                 self.keep_zoom_checkbox,
                 self.save_colorbar_checkbox,
@@ -1293,9 +2416,16 @@ class ViewTab(QWidget):
         self.set_q_geometry_mode("XENOCS")
         info_box_layout.addLayout(q_buttons_layout)
         info_box_layout.addWidget(self.info_text)
+        annotation_buttons_layout = QHBoxLayout()
+        annotation_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        annotation_buttons_layout.setSpacing(6)
         self.open_annotation_button = QPushButton("✏️ Annotate image")
         self.open_annotation_button.clicked.connect(self.open_annotation_window)
-        info_box_layout.addWidget(self.open_annotation_button)
+        self.open_composite_button = QPushButton("🎞️ Composite")
+        self.open_composite_button.clicked.connect(self.open_composite_window)
+        annotation_buttons_layout.addWidget(self.open_annotation_button)
+        annotation_buttons_layout.addWidget(self.open_composite_button)
+        info_box_layout.addLayout(annotation_buttons_layout)
         right_layout.addWidget(info_box)
 
         content_layout.addWidget(right_panel, stretch=0)
@@ -1310,6 +2440,9 @@ class ViewTab(QWidget):
     def set_toolbar_options_enabled(self, enabled):
         for widget in [
             getattr(self, "log_checkbox", None),
+            getattr(self, "nan_to_zero_checkbox", None),
+            getattr(self, "colormap_combo", None),
+            getattr(self, "save_all_colors_button", None),
             getattr(self, "keep_ratio_checkbox", None),
             getattr(self, "keep_zoom_checkbox", None),
             getattr(self, "save_colorbar_checkbox", None),
@@ -1335,6 +2468,27 @@ class ViewTab(QWidget):
         if keep_colorbar:
             self.settings.setValue("view/vmin", self.vmin_spin.value())
             self.settings.setValue("view/vmax", self.vmax_spin.value())
+
+    def change_nan_to_zero(self, *args):
+        self.settings.setValue("view/nan_to_zero", self.nan_to_zero_checkbox.isChecked())
+        self.update_image()
+
+    def current_colormap(self):
+        combo = getattr(self, "colormap_combo", None)
+        if combo is None:
+            return "jet"
+        cmap_name = combo.currentData()
+        return cmap_name or "jet"
+
+    def change_colormap(self, *args):
+        cmap_name = self.current_colormap()
+        self.settings.setValue("view/colormap", cmap_name)
+
+        if self.image_artist is not None:
+            self.image_artist.set_cmap(cmap_name)
+            if self.colorbar is not None:
+                self.colorbar.update_normal(self.image_artist)
+            self.canvas.draw_idle()
 
     def set_q_geometry_source_tab(self, tab):
         self.q_geometry_source_tab = tab
@@ -2333,6 +3487,9 @@ class ViewTab(QWidget):
         if self.log_checkbox.isChecked():
             img = np.log10(np.clip(img, 0, None) + 1)
 
+        if getattr(self, "nan_to_zero_checkbox", None) is not None and self.nan_to_zero_checkbox.isChecked():
+            img = np.nan_to_num(img, nan=0.0, copy=False)
+
         return img
 
     def get_center_from_header(self):
@@ -2738,7 +3895,7 @@ class ViewTab(QWidget):
         if self.image_artist is None:
             self.image_artist = self.ax.imshow(
                 self.display_img,
-                cmap="jet",
+                cmap=self.current_colormap(),
                 origin="upper",
                 vmin=self.vmin_spin.value(),
                 vmax=self.vmax_spin.value(),
@@ -3004,6 +4161,24 @@ class ViewTab(QWidget):
         self.annotation_dialog = dialog
         dialog.show()
 
+    def open_composite_window(self):
+        dialog = getattr(self, "composite_dialog", None)
+        if dialog is None or not dialog.isVisible():
+            dialog = CompositeImageDialog(self)
+            self.composite_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def open_film_window(self):
+        dialog = getattr(self, "film_dialog", None)
+        if dialog is None or not dialog.isVisible():
+            dialog = FilmDialog(self)
+            self.film_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def annotation_storage_key(self):
         if self.current_file is None:
             return None
@@ -3071,7 +4246,7 @@ class ViewTab(QWidget):
                 plt.imsave(
                     path,
                     self.display_img,
-                    cmap="jet",
+                    cmap=self.current_colormap(),
                     vmin=vmin,
                     vmax=vmax,
                     origin="upper"
@@ -3082,6 +4257,36 @@ class ViewTab(QWidget):
                 self,
                 "Save error",
                 f"Unable to save image:\n{e}"
+            )
+
+    def show_all_colormap_preview(self):
+        if self.display_img is None or self.current_file is None:
+            QMessageBox.information(
+                self,
+                "No image",
+                "No image is currently loaded."
+            )
+            return
+
+        try:
+            image = self.current_display_image_for_save()
+            vmin, vmax = self.display_limits_for_save(image)
+            dialog = AllColormapPreviewDialog(
+                self,
+                image,
+                self.colormap_options,
+                vmin,
+                vmax,
+                source_file=self.current_file,
+                frame_index=self.current_index,
+                total_frames=self.total_frame_count(),
+            )
+            dialog.exec()
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Preview colors error",
+                f"Unable to preview color images:\n{error}"
             )
 
     def display_limits_for_save(self, image):
@@ -3132,7 +4337,7 @@ class ViewTab(QWidget):
         ax.set_axis_off()
         ax.imshow(
             image,
-            cmap="jet",
+            cmap=self.current_colormap(),
             origin="upper",
             vmin=vmin,
             vmax=vmax,

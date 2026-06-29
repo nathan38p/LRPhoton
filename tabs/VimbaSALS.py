@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QComboBox,
     QSpinBox,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -32,10 +33,46 @@ from PySide6.QtWidgets import (
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 
 from tabs.line_geometry import LRP_SALS_DEFAULT_NAME, LineGeometrySelector, default_center_text
-from tabs.ui_style import BLOCK_SPACING, FILE_BROWSER_WIDTH, GROUP_BOX_MARGINS, GROUP_BOX_STYLE, PAGE_MARGINS
+from tabs.ui_style import (
+    BLOCK_SPACING,
+    FILE_BROWSER_WIDTH,
+    GROUP_BOX_MARGINS,
+    GROUP_BOX_STYLE,
+    PAGE_MARGINS,
+    PANEL_MARGINS,
+    make_matplotlib_toolbar_block,
+)
+
+
+class SALSPreviewToolbar(NavigationToolbar):
+    def __init__(self, canvas, parent):
+        super().__init__(canvas, parent)
+        self.sals_widget = parent
+
+    def home(self, *args):
+        self.sals_widget.reset_preview_zoom()
+        self.push_current()
+        self.set_history_buttons()
+
+    def release_pan(self, event):
+        super().release_pan(event)
+        self.sals_widget.sync_preview_limits_from_axes()
+
+    def release_zoom(self, event):
+        super().release_zoom(event)
+        self.sals_widget.sync_preview_limits_from_axes()
+
+    def back(self, *args):
+        super().back(*args)
+        self.sals_widget.sync_preview_limits_from_axes()
+
+    def forward(self, *args):
+        super().forward(*args)
+        self.sals_widget.sync_preview_limits_from_axes()
 
 
 class VimbaSALSWidget(QWidget):
@@ -61,6 +98,7 @@ class VimbaSALSWidget(QWidget):
     DEFAULT_PREVIEW_FPS = 26
     DEFAULT_ACQUISITION_FRAME_RATE = 26.36992
     DEFAULT_REVERSE_Y = False
+    DEFAULT_CAMERA_IP = "169.254.242.220"
     DEFAULT_DISTANCE_M = "0,00477"
     DEFAULT_PIXEL_SIZE_M = "5,5e-6"
     DEFAULT_WAVELENGTH_M = "632,8e-9"
@@ -168,9 +206,18 @@ class VimbaSALSWidget(QWidget):
         self.is_grabbing_frame = False
         self.preview_xlim = None
         self.preview_ylim = None
+        self.preview_hover_pixel = None
+        self.is_recording_frames = False
+        self.recording_started_at = None
+        self.recording_frame_count = 0
+        self.recording_output_folder = None
 
         self.live_timer = QTimer(self)
         self.live_timer.timeout.connect(self.grab_live_frame)
+        self.record_timer = QTimer(self)
+        self.record_timer.timeout.connect(self.record_current_frame)
+        self.record_title_timer = QTimer(self)
+        self.record_title_timer.timeout.connect(self.update_recording_title)
 
         app = QApplication.instance()
         if app is not None:
@@ -259,6 +306,10 @@ class VimbaSALSWidget(QWidget):
         self.fps_spinbox.setValue(self.DEFAULT_PREVIEW_FPS)
         self.reverse_y_checkbox = QCheckBox("Reverse Y")
         self.reverse_y_checkbox.setChecked(self.DEFAULT_REVERSE_Y)
+        self.camera_ip_edit = QLineEdit(self.DEFAULT_CAMERA_IP)
+        self.camera_ip_edit.setToolTip(
+            "Direct GigE camera IP. Useful on macOS when Wi-Fi prevents automatic Ethernet discovery."
+        )
         self.style_acquisition_fields()
 
         camera_box = QGroupBox("Camera settings")
@@ -268,6 +319,7 @@ class VimbaSALSWidget(QWidget):
         camera_layout.setSpacing(self.FIELD_SPACING)
         controls_layout.addWidget(camera_box)
 
+        camera_layout.addLayout(self.camera_field_row("Camera IP", self.camera_ip_edit))
         camera_layout.addLayout(self.camera_field_row("Exposure (µs)", self.exposure_edit))
         camera_layout.addLayout(
             self.camera_double_field_row("Width", self.width_spinbox, "Offset X", self.offset_x_spinbox)
@@ -311,7 +363,7 @@ class VimbaSALSWidget(QWidget):
         file_layout.addWidget(self.section_label("Output folder"))
         file_layout.addLayout(output_layout)
 
-        self.save_button = QPushButton("Save current EDF")
+        self.save_button = QPushButton("💾 Save current EDF")
         self.save_button.setFixedHeight(self.FIELD_HEIGHT)
         self.save_button.clicked.connect(self.save_current_edf)
         file_layout.addWidget(self.save_button)
@@ -357,31 +409,100 @@ class VimbaSALSWidget(QWidget):
 
         controls_layout.addStretch(1)
 
-        preview_box = QGroupBox("Live EDF preview")
-        preview_box.setStyleSheet(GROUP_BOX_STYLE)
+        preview_box = QWidget()
         preview_layout = QVBoxLayout(preview_box)
-        preview_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        preview_layout.setContentsMargins(*PANEL_MARGINS)
         preview_layout.setSpacing(BLOCK_SPACING)
         body_layout.addWidget(preview_box, 1)
 
         self.figure = Figure(figsize=(6, 5))
+        self.figure.patch.set_alpha(0)
         self.canvas = FigureCanvas(self.figure)
+        self.canvas.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.canvas.setStyleSheet("background: transparent;")
         self.canvas.setFocusPolicy(Qt.StrongFocus)
+        self.canvas.setMouseTracking(True)
         self.canvas.grabGesture(Qt.PinchGesture)
         self.canvas.installEventFilter(self)
+        self.canvas.mpl_connect("motion_notify_event", self.update_preview_coordinates)
+        self.canvas.mpl_connect("figure_leave_event", self.clear_preview_coordinates)
         self.ax = self.figure.add_subplot(111)
+        self.ax.set_facecolor("none")
+        self.ax.set_axis_off()
+        self.figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
         self.image_artist = None
-        preview_layout.addWidget(self.canvas, 1)
-        self.canvas.setVisible(False)
-
+        self.toolbar = SALSPreviewToolbar(self.canvas, self)
+        self.record_play_button = QToolButton(self)
+        self.record_play_button.setText("▶️")
+        self.record_play_button.setFixedSize(32, 32)
+        self.record_play_button.setStyleSheet("""
+            QToolButton {
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+                font-size: 28px;
+            }
+        """)
+        self.record_play_button.setToolTip("Start saving EDF frames at the selected preview fps")
+        self.record_play_button.clicked.connect(self.start_recording_frames)
+        self.record_stop_button = QToolButton(self)
+        self.record_stop_button.setText("⏹️")
+        self.record_stop_button.setFixedSize(32, 32)
+        self.record_stop_button.setStyleSheet("""
+            QToolButton {
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+                font-size: 28px;
+            }
+        """)
+        self.record_stop_button.setToolTip("Stop saving EDF frames")
+        self.record_stop_button.clicked.connect(self.stop_recording_frames)
         self.status_label = QLabel("Vimba is not connected.")
-        self.status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.status_label.setMinimumWidth(280)
         self.status_label.setMinimumHeight(22)
-        self.status_label.setWordWrap(True)
-        preview_layout.addWidget(self.status_label, 0)
+        self.status_label.setWordWrap(False)
+        self.status_label.setStyleSheet("""
+            QLabel {
+                background: transparent;
+                color: #111111;
+                padding: 0px 6px;
+            }
+        """)
+        toolbar_box, _, self.preview_save_button = make_matplotlib_toolbar_block(
+            self,
+            "Live EDF preview",
+            self.toolbar,
+            option_widgets=[self.status_label, self.record_play_button, self.record_stop_button],
+            save_callback=self.save_current_edf,
+            save_tooltip="Save current EDF",
+            toolbar_width=340,
+        )
+        self.preview_toolbar_box = toolbar_box
+        preview_layout.addWidget(toolbar_box, 0)
+        preview_layout.addWidget(self.canvas, 1)
+
+        self.preview_coordinate_label = QLabel("x = - | y = - | q = - | angle = - | I = -")
+        self.preview_coordinate_label.setAlignment(Qt.AlignCenter)
+        self.preview_coordinate_label.setFixedHeight(26)
+        self.preview_coordinate_label.setStyleSheet("""
+            QLabel {
+                background: #f3f3f3;
+                border: none;
+                border-radius: 8px;
+                padding: 3px 8px;
+                color: #111111;
+                font-family: Menlo, Consolas, monospace;
+            }
+        """)
+        preview_layout.addWidget(self.preview_coordinate_label, 0)
 
     def style_acquisition_fields(self):
         for widget in [
+            self.camera_ip_edit,
             self.exposure_edit,
             self.width_spinbox,
             self.height_spinbox,
@@ -463,6 +584,12 @@ class VimbaSALSWidget(QWidget):
         self.stop_button.setEnabled(self.live_timer.isActive())
         self.apply_camera_button.setEnabled(connected)
         self.save_button.setEnabled(self.current_frame is not None)
+        if hasattr(self, "preview_save_button"):
+            self.preview_save_button.setEnabled(self.current_frame is not None)
+        if hasattr(self, "record_play_button"):
+            self.record_play_button.setEnabled(not self.is_recording_frames)
+        if hasattr(self, "record_stop_button"):
+            self.record_stop_button.setEnabled(self.is_recording_frames)
 
     def request_back(self):
         if self.live_timer.isActive():
@@ -479,11 +606,15 @@ class VimbaSALSWidget(QWidget):
         try:
             self.vmb = VmbSystem.get_instance()
             self.vmb.__enter__()
-            cameras = self.discover_vimba_cameras()
-            if not cameras:
+            self.camera = self.connect_direct_vimba_camera()
+            cameras = []
+            if self.camera is None:
+                cameras = self.discover_vimba_cameras()
+            if self.camera is None and not cameras:
                 raise RuntimeError(self.no_vimba_camera_message())
 
-            self.camera = self.select_mako_camera(cameras)
+            if self.camera is None:
+                self.camera = self.select_mako_camera(cameras)
             self.camera.__enter__()
             self.apply_camera_settings()
             self.sync_fields_from_camera()
@@ -492,6 +623,33 @@ class VimbaSALSWidget(QWidget):
         except Exception as exc:
             self.disconnect_camera()
             self.status_label.setText(f"Camera connection failed: {exc}")
+
+    def direct_camera_identifiers(self):
+        identifiers = []
+        ip_text = getattr(self, "camera_ip_edit", None)
+        if ip_text is not None:
+            value = ip_text.text().strip()
+            if value:
+                identifiers.append(value)
+        identifiers.append(self.CAMERA_ID)
+        return list(dict.fromkeys(identifiers))
+
+    def connect_direct_vimba_camera(self):
+        if self.vmb is None:
+            return None
+
+        last_error = None
+        for identifier in self.direct_camera_identifiers():
+            try:
+                camera = self.vmb.get_camera_by_id(identifier)
+                self.status_label.setText(f"Direct Vimba lookup succeeded: {identifier}")
+                return camera
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
+            self.status_label.setText(f"Direct Vimba lookup failed: {last_error}")
+        return None
 
     def discover_vimba_cameras(self):
         if self.vmb is None:
@@ -513,7 +671,9 @@ class VimbaSALSWidget(QWidget):
         message = (
             "No Vimba camera detected. Quit Vimba X Viewer, unplug/replug the camera, "
             "then retry. On macOS with a GigE camera, allow LRPhoton/Python in "
-            "System Settings > Privacy & Security > Local Network."
+            "System Settings > Privacy & Security > Local Network. If Wi-Fi interferes "
+            "with GigE discovery, keep the Camera IP field set to the Force IP address "
+            "shown in Vimba X Viewer."
         )
         if transport_layers:
             message += f" Transport layers loaded: {transport_layers}."
@@ -1194,6 +1354,8 @@ class VimbaSALSWidget(QWidget):
         self.update_connection_state(True)
 
     def stop_live(self, update_status=True):
+        if self.is_recording_frames:
+            self.stop_recording_frames(update_status=False)
         self.live_timer.stop()
         if update_status and not self.is_closing:
             self.status_label.setText("Live acquisition stopped.")
@@ -1220,6 +1382,8 @@ class VimbaSALSWidget(QWidget):
             self.frame_index += 1
             self.update_preview()
             self.save_button.setEnabled(True)
+            if hasattr(self, "preview_save_button"):
+                self.preview_save_button.setEnabled(True)
         except Exception as exc:
             if not self.is_closing:
                 self.status_label.setText(f"Frame grab failed: {exc}")
@@ -1263,6 +1427,8 @@ class VimbaSALSWidget(QWidget):
         image = np.asarray(self.current_frame, dtype=float)
         display_image, vmin, vmax = self.preview_display_image(image)
         self.ax.clear()
+        self.figure.patch.set_alpha(0)
+        self.ax.set_facecolor("none")
         self.ax.imshow(display_image, cmap="jet", origin="upper", vmin=vmin, vmax=vmax)
         center_x = self.optional_float(self.center_x_edit.text())
         center_y = self.optional_float(self.center_y_edit.text())
@@ -1274,11 +1440,27 @@ class VimbaSALSWidget(QWidget):
         self.ax.axhline(center_y, color="white", linewidth=0.8, alpha=0.9)
         self.ax.set_axis_off()
         self.apply_preview_zoom(image.shape)
-        self.figure.tight_layout()
+        self.figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        self.refresh_preview_coordinate_label()
         self.canvas.draw_idle()
 
     def eventFilter(self, obj, event):
         if obj is self.canvas and self.current_frame is not None:
+            if event.type() == QEvent.NativeGesture:
+                try:
+                    gesture_type = event.gestureType()
+                    value = event.value()
+                    if gesture_type == Qt.ZoomNativeGesture and value != 0:
+                        scale = 1.0 / (1.0 + value) if value > -0.95 else 1.25
+                        self.zoom_preview_at(event.position(), scale)
+                        event.accept()
+                        return True
+                    if gesture_type == Qt.SmartZoomNativeGesture:
+                        self.reset_preview_zoom()
+                        event.accept()
+                        return True
+                except Exception:
+                    pass
             if event.type() == QEvent.Gesture:
                 gesture = event.gesture(Qt.PinchGesture)
                 if gesture is not None:
@@ -1299,7 +1481,12 @@ class VimbaSALSWidget(QWidget):
                     delta_x = delta.x()
                     delta_y = delta.y()
                 if delta_x or delta_y:
-                    self.pan_preview_by(delta_x, delta_y)
+                    if event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+                        if delta_y:
+                            scale = 0.88 if delta_y > 0 else 1.14
+                            self.zoom_preview_at(event.position(), scale)
+                    else:
+                        self.pan_preview_by(delta_x, delta_y)
                     return True
         return super().eventFilter(obj, event)
 
@@ -1371,6 +1558,92 @@ class VimbaSALSWidget(QWidget):
         y = self.canvas.height() - qt_position.y()
         return self.ax.transData.inverted().transform((x, y))
 
+    def update_preview_coordinates(self, event):
+        if self.current_frame is None or event.inaxes is not self.ax or event.xdata is None or event.ydata is None:
+            self.clear_preview_coordinates()
+            return
+        image = np.asarray(self.current_frame)
+        if image.ndim < 2:
+            self.clear_preview_coordinates()
+            return
+        height, width = image.shape[:2]
+        x_index = int(round(event.xdata))
+        y_index = int(round(event.ydata))
+        if x_index < 0 or x_index >= width or y_index < 0 or y_index >= height:
+            self.clear_preview_coordinates()
+            return
+        self.preview_hover_pixel = (x_index, y_index)
+        self.refresh_preview_coordinate_label()
+
+    def clear_preview_coordinates(self, event=None):
+        self.preview_hover_pixel = None
+        if hasattr(self, "preview_coordinate_label"):
+            self.preview_coordinate_label.setText("x = - | y = - | q = - | angle = - | I = -")
+
+    def refresh_preview_coordinate_label(self):
+        if self.current_frame is None or self.preview_hover_pixel is None or not hasattr(self, "preview_coordinate_label"):
+            return
+        image = np.asarray(self.current_frame)
+        if image.ndim < 2:
+            self.clear_preview_coordinates()
+            return
+        height, width = image.shape[:2]
+        x_index, y_index = self.preview_hover_pixel
+        if x_index < 0 or x_index >= width or y_index < 0 or y_index >= height:
+            self.clear_preview_coordinates()
+            return
+
+        value = np.asarray(image[y_index, x_index]).squeeze()
+        if value.size == 1:
+            intensity = float(value)
+        else:
+            intensity = float(np.nanmean(value))
+        intensity_text = self.format_preview_value(intensity)
+        q_value, angle_value = self.calculate_preview_q_angle(x_index, y_index, image.shape)
+        q_text = "-" if q_value is None else f"{q_value:.5g} nm⁻¹"
+        angle_text = "-" if angle_value is None else f"{angle_value:.2f}°"
+        self.preview_coordinate_label.setText(
+            f"x = {x_index + 1} | y = {y_index + 1} | q = {q_text} | angle = {angle_text} | I = {intensity_text}"
+        )
+
+    def calculate_preview_q_angle(self, x_index, y_index, image_shape):
+        height, width = image_shape[:2]
+        center_x = self.optional_float(self.center_x_edit.text())
+        center_y = self.optional_float(self.center_y_edit.text())
+        if center_x is None:
+            center_x = (width - 1.0) / 2.0
+        if center_y is None:
+            center_y = (height - 1.0) / 2.0
+
+        dx_pixels = x_index - center_x
+        dy_pixels = y_index - center_y
+        angle = (np.degrees(np.arctan2(dy_pixels, dx_pixels)) + 360.0) % 360.0
+
+        distance_m = self.optional_float(self.distance_edit.text())
+        pixel_x_m = self.optional_float(self.pixel_x_edit.text())
+        pixel_y_m = self.optional_float(self.pixel_y_edit.text())
+        wavelength_m = self.optional_float(self.wavelength_edit.text())
+        if (
+            distance_m is None or distance_m <= 0
+            or pixel_x_m is None or pixel_x_m <= 0
+            or pixel_y_m is None or pixel_y_m <= 0
+            or wavelength_m is None or wavelength_m <= 0
+        ):
+            return None, angle
+
+        radius_m = np.hypot(dx_pixels * pixel_x_m, dy_pixels * pixel_y_m)
+        two_theta = np.arctan2(radius_m, distance_m)
+        wavelength_nm = wavelength_m * 1e9
+        q_nm = (4.0 * np.pi / wavelength_nm) * np.sin(two_theta / 2.0)
+        return q_nm, angle
+
+    def format_preview_value(self, value):
+        if not np.isfinite(value):
+            return "-"
+        if abs(value - round(value)) < 1e-9:
+            return str(int(round(value)))
+        return f"{value:.6g}"
+
     def pinch_gesture_position(self, gesture):
         try:
             return gesture.centerPoint()
@@ -1393,6 +1666,12 @@ class VimbaSALSWidget(QWidget):
             ylim = self.preview_ylim
         self.ax.set_xlim(*xlim)
         self.ax.set_ylim(*ylim)
+
+    def sync_preview_limits_from_axes(self):
+        if self.current_frame is None:
+            return
+        self.preview_xlim = tuple(self.ax.get_xlim())
+        self.preview_ylim = tuple(self.ax.get_ylim())
 
     def reset_preview_zoom(self, draw=True):
         self.preview_xlim = None
@@ -1432,22 +1711,119 @@ class VimbaSALSWidget(QWidget):
             self.output_folder = Path(folder)
             self.output_edit.setText(str(self.output_folder))
 
+    def start_recording_frames(self):
+        if self.is_recording_frames:
+            return
+        if self.camera is None:
+            self.connect_camera()
+        if self.camera is None:
+            return
+        if not self.live_timer.isActive():
+            self.start_live()
+        if self.camera is None:
+            return
+
+        self.is_recording_frames = True
+        self.recording_started_at = datetime.now()
+        self.recording_frame_count = 0
+        self.recording_output_folder = self.create_recording_output_folder(self.recording_started_at)
+        interval_ms = max(1, int(1000 / max(1, self.fps_spinbox.value())))
+        self.record_timer.start(interval_ms)
+        self.record_title_timer.start(250)
+        self.update_recording_title()
+        self.update_connection_state(True)
+        self.status_label.setText(
+            f"Recording EDF frames at {self.fps_spinbox.value()} fps in {self.recording_output_folder.name}."
+        )
+        if self.current_frame is not None:
+            self.record_current_frame()
+
+    def stop_recording_frames(self, update_status=True):
+        if not self.is_recording_frames and not self.record_timer.isActive():
+            return
+        self.record_timer.stop()
+        self.record_title_timer.stop()
+        self.is_recording_frames = False
+        saved_count = self.recording_frame_count
+        output_folder = self.recording_output_folder
+        self.recording_started_at = None
+        self.recording_output_folder = None
+        self.update_recording_title()
+        self.update_connection_state(self.camera is not None)
+        if update_status and not self.is_closing:
+            folder_text = f" in {output_folder}" if output_folder is not None else ""
+            self.status_label.setText(f"Recording stopped. Saved {saved_count} EDF frame(s){folder_text}.")
+
+    def update_recording_title(self):
+        if not hasattr(self, "preview_toolbar_box"):
+            return
+        if not self.is_recording_frames or self.recording_started_at is None:
+            self.preview_toolbar_box.setTitle("Live EDF preview")
+            return
+        elapsed = datetime.now() - self.recording_started_at
+        total_seconds = max(0, int(elapsed.total_seconds()))
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        self.preview_toolbar_box.setTitle(
+            f"Live EDF preview - REC {hours:02d}:{minutes:02d}:{seconds:02d}"
+        )
+
+    def record_current_frame(self):
+        if not self.is_recording_frames or self.current_frame is None:
+            return
+        try:
+            self.recording_frame_count += 1
+            output_path = self.write_current_edf_file(record_index=self.recording_frame_count)
+            self.status_label.setText(
+                f"Recording EDF: {self.recording_frame_count} frame(s) saved - {output_path.name}"
+            )
+        except Exception as exc:
+            self.stop_recording_frames(update_status=False)
+            self.status_label.setText(f"Recording stopped: {exc}")
+
+    def create_recording_output_folder(self, started_at):
+        base_folder = Path(self.output_edit.text()).expanduser()
+        sample_name = self.sample_name_edit.text().strip() or "sals"
+        prefix = self.filename_prefix_from_sample_name(sample_name)
+        timestamp = started_at.strftime("%Y%m%d_%H%M%S")
+        folder = base_folder / f"{prefix}_recording_{timestamp}"
+        suffix = 2
+        while folder.exists():
+            folder = base_folder / f"{prefix}_recording_{timestamp}_{suffix}"
+            suffix += 1
+        folder.mkdir(parents=True, exist_ok=False)
+        return folder
+
     def save_current_edf(self):
         if self.current_frame is None:
             self.status_label.setText("No live frame to save.")
             return
         try:
-            from fabio.edfimage import EdfImage
+            output_path = self.write_current_edf_file()
         except ImportError:
             self.status_label.setText("fabio EDF support is not available.")
             return
+        except Exception as exc:
+            self.status_label.setText(f"Save EDF failed: {exc}")
+            return
+        self.status_label.setText(f"Saved EDF: {output_path.name}")
 
-        folder = Path(self.output_edit.text()).expanduser()
+    def write_current_edf_file(self, record_index=None):
+        try:
+            from fabio.edfimage import EdfImage
+        except ImportError:
+            raise
+
+        if record_index is not None and self.recording_output_folder is not None:
+            folder = self.recording_output_folder
+        else:
+            folder = Path(self.output_edit.text()).expanduser()
         folder.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         sample_name = self.sample_name_edit.text().strip() or "sals"
         prefix = self.filename_prefix_from_sample_name(sample_name)
-        output_path = folder / f"{prefix}_{timestamp}.edf"
+        record_suffix = f"_rec{record_index:06d}" if record_index is not None else ""
+        output_path = folder / f"{prefix}_{timestamp}{record_suffix}.edf"
 
         image = np.asarray(self.current_frame)
         header = self.edf_header(image, timestamp)
@@ -1458,7 +1834,7 @@ class VimbaSALSWidget(QWidget):
             edf = EdfImage(data=image)
             edf.header.update(header)
             edf.write(str(output_path))
-        self.status_label.setText(f"Saved EDF: {output_path.name}")
+        return output_path
 
     def edf_header(self, image, timestamp):
         ny, nx = image.shape[:2]
@@ -1556,6 +1932,8 @@ class VimbaSALSWidget(QWidget):
     def disconnect_camera(self, closing=False):
         if closing:
             self.is_closing = True
+        if self.is_recording_frames:
+            self.stop_recording_frames(update_status=False)
         self.live_timer.stop()
         if closing:
             QApplication.processEvents()

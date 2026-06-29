@@ -55,6 +55,7 @@ from .ui_style import (
     apply_plot_display_style,
     clear_plot_canvas,
     constrain_image_axes,
+    emojiize_matplotlib_toolbar,
     finalize_plot_canvas,
     make_plot_legend,
     make_matplotlib_toolbar_block,
@@ -760,7 +761,7 @@ class PyFAIAzimuthalTestDialog(QDialog):
         display_layout.addRow("I scale:", self.intensity_scale_spin)
         controls_layout.addWidget(display_box)
 
-        self.save_button = QPushButton("Save tested I(ψ) .dat")
+        self.save_button = QPushButton("💾 Save tested I(ψ) .dat")
         self.save_button.clicked.connect(self.save_current_curve)
         controls_layout.addWidget(self.save_button)
         controls_layout.addStretch(1)
@@ -777,6 +778,7 @@ class PyFAIAzimuthalTestDialog(QDialog):
 
         self.canvas = PlotCanvas()
         self.toolbar = NavigationToolbar(self.canvas, self)
+        emojiize_matplotlib_toolbar(self.toolbar)
         right_layout.addWidget(self.toolbar)
         right_layout.addWidget(self.canvas, stretch=1)
 
@@ -1731,7 +1733,7 @@ class AzimuthalTab(QWidget):
         self.toolbar = NavigationToolbar(self.canvas, self)
         toolbar_box, self.toolbar_extra_layout, self.save_graph_button = make_matplotlib_toolbar_block(
             self,
-            "I(ψ) graph",
+            "I(ψ) plot",
             self.toolbar,
             option_widgets=[
                 self.show_legend,

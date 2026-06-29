@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QSlider,
     QSizePolicy,
     QSplitter,
-    QStyle,
 )
 
 from .cave_tab import (
@@ -347,8 +346,7 @@ class AverageTab(QWidget):
         self.run_button.setStyleSheet(average_button_style)
         self.run_button.clicked.connect(self.run_average)
 
-        self.save_button = QPushButton("Save Average")
-        self.save_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+        self.save_button = QPushButton("💾 Save Average")
         self.save_button.setStyleSheet(average_button_style)
         self.save_button.clicked.connect(self.save_average)
 

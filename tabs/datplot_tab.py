@@ -61,6 +61,7 @@ from .ui_style import (
     apply_plot_display_style,
     clear_plot_canvas,
     finalize_plot_canvas,
+    emojiize_matplotlib_toolbar,
     install_selectable_legend,
     make_matplotlib_toolbar_block,
     make_plot_legend,
@@ -898,7 +899,7 @@ class DatPlotTab(QWidget):
         file_layout.addWidget(self.browse_button)
 
         filters_layout = QGridLayout()
-        self.extensions_filter = QLineEdit("*.dat *_ave.h5")
+        self.extensions_filter = QLineEdit("*.dat")
         self.name_filter = QLineEdit("**")
         self.extensions_filter.textChanged.connect(self.refresh_files)
         self.name_filter.textChanged.connect(self.refresh_files)
@@ -1773,7 +1774,7 @@ class DatPlotTab(QWidget):
 
         patterns = self.extensions_filter.text().split()
         if not patterns:
-            patterns = ["*.dat", "*_ave.h5"]
+            patterns = ["*.dat"]
 
         name_filter = self.name_filter.text().strip()
         if not name_filter:
@@ -1791,6 +1792,7 @@ class DatPlotTab(QWidget):
             file for file in files
             if file.is_file()
             and not should_hide_file_in_browser(file)
+            and not file.name.lower().endswith("_ave.h5")
             and fnmatch(file.name, name_filter)
         ]
         if self.only_thumbs_up_checkbox.isChecked():
@@ -2352,6 +2354,7 @@ class DatPlotTab(QWidget):
         fit_ax = fig.add_subplot(111)
         fit_toolbar = NavigationToolbar(fit_canvas, dialog)
         fit_toolbar.coordinates = False
+        emojiize_matplotlib_toolbar(fit_toolbar)
         layout.addWidget(fit_toolbar)
         layout.addWidget(fit_canvas, stretch=1)
         layout.addWidget(coordinate_label)

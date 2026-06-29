@@ -1601,7 +1601,7 @@ class HermansTab(QWidget):
         self.canvas.mpl_connect("motion_notify_event", self.update_graph_coordinates)
         self.canvas.mpl_connect("button_press_event", self.on_graph_button_press)
         self.canvas.mpl_connect("axes_leave_event", self.clear_graph_coordinates)
-        # (anisotropy_graph_controls block removed)
+        # (anisotropy_plot_controls block removed)
         self.image_canvas = ImageCanvas()
         self.image_canvas.setMinimumWidth(0)
         self.image_canvas.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)

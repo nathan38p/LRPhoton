@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSizePolicy,
     QSplitter,
-    QStyle,
+    QMenu,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -65,6 +65,7 @@ from .ui_style import (
     PAGE_MARGINS,
     PANEL_MARGINS,
     constrain_image_axes,
+    emojiize_matplotlib_toolbar,
     make_matplotlib_toolbar_block,
     normalize_decimal_text,
     style_q_geometry_buttons,
@@ -149,6 +150,16 @@ def edf_dtype_to_numpy(data_type: str):
 def read_edf_file(filename: str):
     image, header, raw_header_text, byte_order, _n_frames = read_edf_frame(filename, 0)
     return image, header, raw_header_text, byte_order
+
+
+def read_edf_header_only(filename: str):
+    filename = Path(filename)
+    with open(filename, "rb") as file:
+        first = file.read(8192).decode("latin-1", errors="ignore")
+        header_size = infer_edf_header_size(first)
+        file.seek(0)
+        raw_header_text = file.read(header_size).decode("latin-1", errors="ignore")
+    return parse_edf_header(raw_header_text)
 
 
 def read_edf_frame(filename: str, frame_index: int = 0):
@@ -310,7 +321,7 @@ def add_matching_edf_center(header: dict, filename: str):
         return header
 
     try:
-        _, edf_header, *_ = read_edf_file(edf_path)
+        edf_header = read_edf_header_only(edf_path)
     except Exception:
         return header
 
@@ -617,7 +628,7 @@ def inspect_h5_image_dataset(filename: str):
     return dataset_name, shape, frame_axis, n_frames, header
 
 
-def read_h5_frame(filename: str, dataset_name: str, frame_index: int = 0):
+def read_h5_frame(filename: str, dataset_name: str, frame_index: int = 0, add_matching_center=True):
     filename = Path(filename)
 
     with h5py.File(filename, "r") as h5:
@@ -632,7 +643,8 @@ def read_h5_frame(filename: str, dataset_name: str, frame_index: int = 0):
         for key, value in dataset.attrs.items():
             header[key] = str(value)
 
-        add_matching_edf_center(header, filename)
+        if add_matching_center:
+            add_matching_edf_center(header, filename)
 
         if dataset.ndim == 2:
             image = np.asarray(dataset[...], dtype=np.float64)
@@ -783,15 +795,21 @@ def apply_central_symmetry_cave(
     filled[cave_mask] = np.nan
 
     missing_y, missing_x = np.where(cave_mask)
-
-    for y, x in zip(missing_y, missing_x):
-        xs = int(round(2 * xc - x))
-        ys = int(round(2 * yc - y))
-
-        if 0 <= xs < nx and 0 <= ys < ny:
-            value = source[ys, xs]
-            if np.isfinite(value):
-                filled[y, x] = value
+    if missing_y.size:
+        symmetric_x = np.rint(2 * float(xc) - missing_x).astype(int)
+        symmetric_y = np.rint(2 * float(yc) - missing_y).astype(int)
+        valid = (
+            (symmetric_x >= 0)
+            & (symmetric_x < nx)
+            & (symmetric_y >= 0)
+            & (symmetric_y < ny)
+        )
+        if np.any(valid):
+            target_y = missing_y[valid]
+            target_x = missing_x[valid]
+            source_values = source[symmetric_y[valid], symmetric_x[valid]]
+            finite = np.isfinite(source_values)
+            filled[target_y[finite], target_x[finite]] = source_values[finite]
 
     final_threshold_mask = np.zeros(filled.shape, dtype=bool)
     if nan_operator == ">=":
@@ -1470,6 +1488,623 @@ class ManualCaveCanvas(FigureCanvas):
         )
 
 
+def connected_nan_region(nan_mask, x, y):
+    nan_mask = np.asarray(nan_mask, dtype=bool)
+    ny, nx = nan_mask.shape
+    x = int(round(x))
+    y = int(round(y))
+    if not (0 <= x < nx and 0 <= y < ny) or not nan_mask[y, x]:
+        return np.zeros_like(nan_mask, dtype=bool)
+
+    region = np.zeros_like(nan_mask, dtype=bool)
+    stack = [(y, x)]
+    region[y, x] = True
+
+    while stack:
+        cy, cx = stack.pop()
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nyi = cy + dy
+            nxi = cx + dx
+            if 0 <= nyi < ny and 0 <= nxi < nx and nan_mask[nyi, nxi] and not region[nyi, nxi]:
+                region[nyi, nxi] = True
+                stack.append((nyi, nxi))
+
+    return region
+
+
+def visual_blank_mask(image):
+    image = np.asarray(image, dtype=np.float64)
+    return (~np.isfinite(image)) | (image < 0)
+
+
+def fill_region_by_symmetry(image, source_image, region_mask, mode, xc, yc):
+    output = np.asarray(image, dtype=np.float64).copy()
+    source = np.asarray(source_image, dtype=np.float64)
+    region_mask = np.asarray(region_mask, dtype=bool)
+    ny, nx = output.shape
+    ys, xs = np.where(region_mask)
+    if ys.size == 0:
+        return output
+
+    if mode == "central":
+        sx = np.rint(2 * float(xc) - xs).astype(int)
+        sy = np.rint(2 * float(yc) - ys).astype(int)
+    elif mode == "horizontal":
+        sx = xs
+        sy = np.rint(2 * float(yc) - ys).astype(int)
+    elif mode == "vertical":
+        sx = np.rint(2 * float(xc) - xs).astype(int)
+        sy = ys
+    else:
+        return output
+
+    valid = (sx >= 0) & (sx < nx) & (sy >= 0) & (sy < ny)
+    if np.any(valid):
+        source_values = source[sy[valid], sx[valid]]
+        finite = np.isfinite(source_values)
+        output[ys[valid][finite], xs[valid][finite]] = source_values[finite]
+
+    return output
+
+
+class CustomCaveCanvas(FigureCanvas):
+    def __init__(self, dialog, role):
+        self.dialog = dialog
+        self.role = role
+        self.image = None
+        self.fig = Figure()
+        self.ax = self.fig.add_subplot(111)
+        super().__init__(self.fig)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")
+        self.fig.patch.set_alpha(0)
+        self.ax.set_facecolor("none")
+        self.ax.set_axis_off()
+        self.fig.subplots_adjust(left=0.005, right=0.995, top=0.995, bottom=0.005)
+        self.coordinate_label = None
+        self._selection_start = None
+        try:
+            self.grabGesture(Qt.PinchGesture)
+        except Exception:
+            pass
+        self.mpl_connect("button_press_event", self.on_press)
+        self.mpl_connect("button_release_event", self.on_release)
+        self.mpl_connect("motion_notify_event", self.on_motion)
+        self.mpl_connect("scroll_event", self.on_scroll)
+        self.mpl_connect("figure_leave_event", lambda event: self.update_coordinate_label(None))
+
+    def set_coordinate_label(self, label):
+        self.coordinate_label = label
+        self.update_coordinate_label(None)
+
+    def update_coordinate_label(self, event):
+        if self.coordinate_label is None:
+            return
+        if event is None or event.inaxes != self.ax or event.xdata is None or event.ydata is None or self.image is None:
+            self.coordinate_label.setText("x = - | y = - | q = - | I = -")
+            return
+
+        x = int(round(event.xdata + 1))
+        y = int(round(event.ydata + 1))
+        intensity_text = "I = -"
+        q_text = "q = -"
+        ny, nx = self.image.shape
+        if 1 <= x <= nx and 1 <= y <= ny:
+            value = self.image[y - 1, x - 1]
+            intensity_text = f"I = {value:.6g}" if np.isfinite(value) else "I = NaN"
+            parent = self.dialog.parent()
+            if parent is not None and hasattr(parent, "calculate_q_at_pixel"):
+                q_value = parent.calculate_q_at_pixel(x, y)
+                if q_value is not None:
+                    q_text = f"q = {q_value:.6g} nm⁻¹"
+        self.coordinate_label.setText(f"x = {x} | y = {y} | {q_text} | {intensity_text}")
+
+    def event_data_position(self, event):
+        if self.image is None:
+            return None
+
+        if event.xdata is not None and event.ydata is not None:
+            xdata, ydata = event.xdata, event.ydata
+        else:
+            try:
+                xdata, ydata = self.ax.transData.inverted().transform((event.x, event.y))
+            except Exception:
+                return None
+
+        ny, nx = self.image.shape
+        xdata = min(max(float(xdata), -0.5), nx - 0.5)
+        ydata = min(max(float(ydata), -0.5), ny - 0.5)
+        return xdata, ydata
+
+    def show_image(self, image, vmin=None, vmax=None, region_mask=None, xc=None, yc=None, reference_angle_deg=0.0):
+        self.image = image
+        self.ax.clear()
+        self.ax.set_axis_off()
+        self.fig.patch.set_alpha(0)
+        self.ax.set_facecolor("none")
+
+        if image is not None:
+            display = np.asarray(image, dtype=np.float64).copy()
+            display[~np.isfinite(display)] = np.nan
+            display[display < 0] = np.nan
+            with np.errstate(invalid="ignore", divide="ignore"):
+                display = np.log10(display + 1)
+            self.ax.imshow(display, origin="upper", cmap="jet", interpolation="nearest", vmin=vmin, vmax=vmax)
+            if region_mask is not None and np.any(region_mask):
+                overlay = np.zeros((*region_mask.shape, 4), dtype=float)
+                overlay[region_mask] = (0.0, 1.0, 1.0, 0.35)
+                self.ax.imshow(overlay, origin="upper", interpolation="nearest")
+            if xc is not None and yc is not None:
+                draw_reference_axes(self.ax, image.shape, xc, yc, reference_angle_deg)
+
+        self.ax.set_aspect("equal")
+        if self.dialog.synced_xlim is not None and self.dialog.synced_ylim is not None and self.image is not None:
+            self.ax.set_xlim(self.dialog.synced_xlim)
+            self.ax.set_ylim(self.dialog.synced_ylim)
+            constrain_image_axes(self.ax, self.image.shape)
+        self.draw_idle()
+        self.dialog.apply_synced_view(source=self)
+
+    def on_press(self, event):
+        if self.role not in ("original", "result") or event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+        if event.button == 1:
+            self._selection_start = (event.xdata, event.ydata)
+        elif event.button == 3:
+            self.dialog.open_symmetry_menu(event, self.image)
+
+    def on_motion(self, event):
+        self.update_coordinate_label(event)
+        if self.role not in ("original", "result") or self._selection_start is None:
+            return
+        position = self.event_data_position(event)
+        if position is None:
+            return
+        xdata, ydata = position
+        self.dialog.refresh_images()
+        x0, y0 = self._selection_start
+        patch = MplRectangle(
+            (min(x0, xdata), min(y0, ydata)),
+            abs(xdata - x0),
+            abs(ydata - y0),
+            facecolor="none",
+            edgecolor="#00ffff",
+            linewidth=1.5,
+            linestyle="--",
+        )
+        self.ax.add_patch(patch)
+        self.draw_idle()
+
+    def on_release(self, event):
+        if self.role not in ("original", "result") or self._selection_start is None:
+            self._selection_start = None
+            return
+        position = self.event_data_position(event)
+        if position is not None:
+            self.dialog.select_nan_rectangle(self._selection_start, position, self.image)
+        self._selection_start = None
+
+    def on_scroll(self, event):
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+
+        scale = 0.85 if event.button == "up" else 1.18
+        self.zoom_at(event.xdata, event.ydata, scale)
+
+    def event(self, event):
+        if self.image is not None:
+            try:
+                if event.type() == QEvent.NativeGesture:
+                    gesture_type = event.gestureType()
+                    value = event.value()
+                    if gesture_type == Qt.ZoomNativeGesture and value != 0:
+                        scale = 1.0 / (1.0 + value) if value > -0.95 else 1.25
+                        xdata, ydata = self.qt_pos_to_data(self.event_center_point(event))
+                        if xdata is not None and ydata is not None:
+                            self.zoom_at(xdata, ydata, scale)
+                            event.accept()
+                            return True
+
+                    if gesture_type == Qt.SmartZoomNativeGesture:
+                        self.dialog.reset_synced_view()
+                        event.accept()
+                        return True
+
+                if event.type() == QEvent.Gesture:
+                    pinch = event.gesture(Qt.PinchGesture)
+                    if pinch is not None:
+                        factor = pinch.scaleFactor()
+                        if factor and factor > 0:
+                            xdata, ydata = self.qt_pos_to_data(self.event_center_point(event))
+                            if xdata is not None and ydata is not None:
+                                self.zoom_at(xdata, ydata, 1.0 / factor)
+                                event.accept()
+                                return True
+            except Exception:
+                pass
+
+        return super().event(event)
+
+    def wheelEvent(self, event):
+        if self.image is None:
+            return super().wheelEvent(event)
+
+        delta = event.pixelDelta()
+        if delta.isNull():
+            delta = event.angleDelta()
+            dx = delta.x() / 120.0
+            dy = delta.y() / 120.0
+        else:
+            dx = delta.x() / 80.0
+            dy = delta.y() / 80.0
+
+        if event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+            if dy != 0:
+                xdata, ydata = self.qt_pos_to_data(event.position())
+                if xdata is not None and ydata is not None:
+                    scale = 0.88 if dy > 0 else 1.14
+                    self.zoom_at(xdata, ydata, scale)
+        else:
+            x0, x1 = self.ax.get_xlim()
+            y0, y1 = self.ax.get_ylim()
+            xspan = x1 - x0
+            yspan = y1 - y0
+            shift_x = -dx * xspan * 0.08
+            shift_y = dy * yspan * 0.08
+            self.dialog.set_synced_limits((x0 + shift_x, x1 + shift_x), (y0 + shift_y, y1 + shift_y))
+
+        event.accept()
+
+    def event_center_point(self, event):
+        try:
+            position = event.position()
+            if position is not None:
+                return position
+        except Exception:
+            pass
+        return self.rect().center()
+
+    def qt_pos_to_data(self, qpoint):
+        try:
+            display_x = float(qpoint.x())
+            display_y = self.height() - float(qpoint.y())
+            return self.ax.transData.inverted().transform((display_x, display_y))
+        except Exception:
+            return None, None
+
+    def zoom_at(self, xdata, ydata, scale):
+        x0, x1 = self.ax.get_xlim()
+        y0, y1 = self.ax.get_ylim()
+        new_width = (x1 - x0) * scale
+        new_height = (y1 - y0) * scale
+        rel_x = (xdata - x0) / (x1 - x0) if x1 != x0 else 0.5
+        rel_y = (ydata - y0) / (y1 - y0) if y1 != y0 else 0.5
+        self.dialog.set_synced_limits(
+            (xdata - new_width * rel_x, xdata + new_width * (1 - rel_x)),
+            (ydata - new_height * rel_y, ydata + new_height * (1 - rel_y)),
+        )
+
+
+class CustomCaveDialog(QDialog):
+    def __init__(self, parent, source_image, caved_image, display_limits):
+        super().__init__(parent)
+        self.setWindowTitle("Custom cave")
+        self.resize(1400, 640)
+        self.source_image = np.asarray(source_image, dtype=np.float64)
+        self.caved_image = np.asarray(caved_image, dtype=np.float64)
+        self.final_image = self.caved_image.copy()
+        self.display_limits = display_limits
+        self.display_data_min, self.display_data_max = self.compute_display_range()
+        self.selected_region = None
+        self._syncing_view = False
+        self.synced_xlim = None
+        self.synced_ylim = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        self.save_button = QPushButton("💾 Save cave+")
+        self.save_button.clicked.connect(self.save_cave_plus)
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.clicked.connect(self.reset_custom_fills)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.accept)
+        toolbar.addStretch(1)
+        toolbar.addWidget(self.reset_button)
+        toolbar.addWidget(self.save_button)
+        toolbar.addWidget(self.close_button)
+        layout.addLayout(toolbar)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(6)
+        self.original_canvas = CustomCaveCanvas(self, "original")
+        self.result_canvas = CustomCaveCanvas(self, "result")
+        for canvas in [self.original_canvas, self.result_canvas]:
+            panel = QVBoxLayout()
+            panel.setContentsMargins(0, 0, 0, 0)
+            panel.setSpacing(2)
+            coord = QLabel("x = - | y = - | q = - | I = -")
+            coord.setMinimumHeight(28)
+            coord.setAlignment(Qt.AlignCenter)
+            coord.setStyleSheet("""
+                QLabel {
+                    background-color: #f4f4f4;
+                    border-radius: 8px;
+                    padding: 6px;
+                    font-family: Menlo, Monaco, monospace;
+                    font-size: 11px;
+                }
+            """)
+            canvas.set_coordinate_label(coord)
+            panel.addWidget(canvas, 1)
+            panel.addWidget(coord, 0)
+            body.addLayout(panel, 1)
+            if canvas is not self.result_canvas:
+                arrow = QLabel("→")
+                arrow.setAlignment(Qt.AlignCenter)
+                arrow.setFixedWidth(24)
+                arrow.setStyleSheet("font-size: 22px; font-weight: 700; color: #444444;")
+                body.addWidget(arrow, 0)
+
+        layout.addLayout(body, 1)
+
+        intensity_layout = QGridLayout()
+        intensity_layout.setContentsMargins(0, 0, 0, 0)
+        intensity_layout.setHorizontalSpacing(8)
+        intensity_layout.setVerticalSpacing(2)
+        self.min_label = QLabel()
+        self.max_label = QLabel()
+        self.min_slider = QSlider(Qt.Horizontal)
+        self.max_slider = QSlider(Qt.Horizontal)
+        self.min_slider.setRange(0, 1000)
+        self.max_slider.setRange(0, 1000)
+        self.auto_button = QPushButton("Auto")
+        intensity_layout.addWidget(self.min_label, 0, 0)
+        intensity_layout.addWidget(self.min_slider, 0, 1)
+        intensity_layout.addWidget(self.max_label, 1, 0)
+        intensity_layout.addWidget(self.max_slider, 1, 1)
+        intensity_layout.addWidget(self.auto_button, 0, 2, 2, 1)
+        layout.addLayout(intensity_layout)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        self.min_slider.valueChanged.connect(self.update_display_limits_from_sliders)
+        self.max_slider.valueChanged.connect(self.update_display_limits_from_sliders)
+        self.auto_button.clicked.connect(self.auto_display_limits)
+        self.set_display_sliders_from_limits()
+        self.refresh_images()
+
+    def image_canvases(self):
+        return [
+            getattr(self, "original_canvas", None),
+            getattr(self, "result_canvas", None),
+        ]
+
+    def reset_synced_view(self):
+        self.synced_xlim = None
+        self.synced_ylim = None
+        self.refresh_images()
+
+    def set_synced_limits(self, xlim, ylim):
+        self.synced_xlim = tuple(xlim)
+        self.synced_ylim = tuple(ylim)
+        for canvas in self.image_canvases():
+            if canvas is None or canvas.image is None:
+                continue
+            canvas.ax.set_xlim(self.synced_xlim)
+            canvas.ax.set_ylim(self.synced_ylim)
+            constrain_image_axes(canvas.ax, canvas.image.shape)
+            canvas.draw_idle()
+
+    def apply_synced_view(self, source=None):
+        if self._syncing_view or self.synced_xlim is None or self.synced_ylim is None:
+            return
+
+        self._syncing_view = True
+        try:
+            for canvas in self.image_canvases():
+                if canvas is None or canvas is source or canvas.image is None:
+                    continue
+                canvas.ax.set_xlim(self.synced_xlim)
+                canvas.ax.set_ylim(self.synced_ylim)
+                constrain_image_axes(canvas.ax, canvas.image.shape)
+                canvas.draw_idle()
+        finally:
+            self._syncing_view = False
+
+    def remaining_nan_mask(self):
+        return visual_blank_mask(self.final_image)
+
+    def compute_display_range(self):
+        values = []
+        for image in (self.source_image, self.caved_image):
+            display = np.asarray(image, dtype=np.float64).copy()
+            display[~np.isfinite(display)] = np.nan
+            display[display < 0] = np.nan
+            with np.errstate(invalid="ignore", divide="ignore"):
+                display = np.log10(display + 1)
+            finite = display[np.isfinite(display)]
+            if finite.size:
+                values.append(finite)
+
+        if not values:
+            return 0.0, 1.0
+
+        merged = np.concatenate(values)
+        data_min = float(np.nanmin(merged))
+        data_max = float(np.nanmax(merged))
+        if data_max <= data_min:
+            data_max = data_min + 1.0
+        return data_min, data_max
+
+    def set_display_sliders_from_limits(self):
+        data_min, data_max = self.display_data_min, self.display_data_max
+        span = max(data_max - data_min, 1e-12)
+        vmin, vmax = self.display_limits
+        min_value = int(np.clip((vmin - data_min) / span * 1000.0, 0, 1000))
+        max_value = int(np.clip((vmax - data_min) / span * 1000.0, 0, 1000))
+        if max_value <= min_value:
+            max_value = min(1000, min_value + 1)
+        self.min_slider.blockSignals(True)
+        self.max_slider.blockSignals(True)
+        self.min_slider.setValue(min_value)
+        self.max_slider.setValue(max_value)
+        self.min_slider.blockSignals(False)
+        self.max_slider.blockSignals(False)
+        self.update_intensity_labels()
+
+    def update_intensity_labels(self):
+        vmin, vmax = self.display_limits
+        self.min_label.setText(f"Min: {vmin:.3g}")
+        self.max_label.setText(f"Max: {vmax:.3g}")
+
+    def update_display_limits_from_sliders(self):
+        min_value = self.min_slider.value()
+        max_value = self.max_slider.value()
+        if max_value <= min_value:
+            max_value = min(1000, min_value + 1)
+            self.max_slider.blockSignals(True)
+            self.max_slider.setValue(max_value)
+            self.max_slider.blockSignals(False)
+
+        data_min, data_max = self.display_data_min, self.display_data_max
+        span = max(data_max - data_min, 1e-12)
+        self.display_limits = (
+            data_min + span * min_value / 1000.0,
+            data_min + span * max_value / 1000.0,
+        )
+        self.update_intensity_labels()
+        self.refresh_images()
+
+    def auto_display_limits(self):
+        self.display_limits = self.parent().current_display_limits()
+        self.set_display_sliders_from_limits()
+        self.refresh_images()
+
+    def select_nan_rectangle(self, start, end, mask_source_image=None):
+        x0, y0 = start
+        x1, y1 = end
+        ny, nx = self.final_image.shape
+        xmin = max(0, int(np.floor(min(x0, x1))))
+        xmax = min(nx, int(np.ceil(max(x0, x1))) + 1)
+        ymin = max(0, int(np.floor(min(y0, y1))))
+        ymax = min(ny, int(np.ceil(max(y0, y1))) + 1)
+        region = np.zeros(self.final_image.shape, dtype=bool)
+        source_mask = visual_blank_mask(mask_source_image) if mask_source_image is not None else self.remaining_nan_mask()
+        if xmin < xmax and ymin < ymax:
+            region[ymin:ymax, xmin:xmax] = source_mask[ymin:ymax, xmin:xmax]
+
+        if np.any(region):
+            self.selected_region = region
+            count = int(np.count_nonzero(region))
+            self.status_label.setText(f"Selected {count} white/NaN pixel(s). Right-click the selection to choose a symmetry.")
+        else:
+            self.selected_region = None
+            self.status_label.setText("No white/NaN pixels in this selection.")
+        self.refresh_images()
+
+    def open_symmetry_menu(self, event, mask_source_image=None):
+        x = int(round(event.xdata))
+        y = int(round(event.ydata))
+        nan_mask = visual_blank_mask(mask_source_image) if mask_source_image is not None else self.remaining_nan_mask()
+        clicked_nan = 0 <= y < nan_mask.shape[0] and 0 <= x < nan_mask.shape[1] and nan_mask[y, x]
+
+        if self.selected_region is None or not np.any(self.selected_region):
+            if not clicked_nan:
+                self.status_label.setText("No white/NaN zone at this position.")
+                return
+            self.selected_region = connected_nan_region(nan_mask, x, y)
+            self.refresh_images()
+        elif not (0 <= y < self.selected_region.shape[0] and 0 <= x < self.selected_region.shape[1] and self.selected_region[y, x]):
+            if not clicked_nan:
+                self.status_label.setText("Right-click inside the selected zone, or directly on another white/NaN zone.")
+                return
+            self.selected_region = connected_nan_region(nan_mask, x, y)
+            self.refresh_images()
+
+        menu = QMenu(self)
+        central_action = menu.addAction("Central symmetry")
+        horizontal_action = menu.addAction("Horizontal axial symmetry")
+        vertical_action = menu.addAction("Vertical axial symmetry")
+        chosen = menu.exec(event.guiEvent.globalPos() if event.guiEvent is not None else self.mapToGlobal(self.rect().center()))
+        if chosen is central_action:
+            self.apply_symmetry_to_selected_region("central")
+        elif chosen is horizontal_action:
+            self.apply_symmetry_to_selected_region("horizontal")
+        elif chosen is vertical_action:
+            self.apply_symmetry_to_selected_region("vertical")
+
+    def apply_symmetry_to_selected_region(self, mode):
+        if self.selected_region is None or not np.any(self.selected_region):
+            return
+        parent = self.parent()
+        self.final_image = fill_region_by_symmetry(
+            self.final_image,
+            self.final_image,
+            self.selected_region,
+            mode,
+            parent.xc_spin.value(),
+            parent.yc_spin.value(),
+        )
+        remaining = int(np.count_nonzero(~np.isfinite(self.final_image)))
+        self.status_label.setText(f"Applied {mode} symmetry. Remaining NaN pixels: {remaining}.")
+        self.selected_region = None
+        self.refresh_images()
+
+    def reset_custom_fills(self):
+        self.final_image = self.caved_image.copy()
+        self.selected_region = None
+        self.refresh_images()
+
+    def refresh_images(self):
+        vmin, vmax = self.display_limits
+        parent = self.parent()
+        xc = parent.xc_spin.value()
+        yc = parent.yc_spin.value()
+        angle = parent.cave_angle_spin.value()
+        original_nan_view = self.source_image.copy()
+        original_nan_view[~np.isfinite(self.caved_image)] = np.nan
+        self.original_canvas.show_image(original_nan_view, vmin=vmin, vmax=vmax, region_mask=self.selected_region, xc=xc, yc=yc, reference_angle_deg=angle)
+        self.result_canvas.show_image(self.final_image, vmin=vmin, vmax=vmax, region_mask=self.selected_region, xc=xc, yc=yc, reference_angle_deg=angle)
+
+    def save_cave_plus(self):
+        parent = self.parent()
+        if parent.current_file is None:
+            return
+        try:
+            frame_suffix = f"_frame{parent.frame_spin.value():04d}" if getattr(parent, "h5_n_frames", 1) > 1 else ""
+            if parent.file_type == "EDF":
+                output_path = parent.current_file.parent / f"{parent.current_file.stem}{frame_suffix}_cave+.edf"
+                write_edf_file(output_path, sanitize_cave_output_image(self.final_image), parent.raw_header_text, parent.byte_order)
+            else:
+                output_path = parent.current_file.parent / f"{parent.current_file.stem}{frame_suffix}_cave+.h5"
+                write_h5_frame_file(
+                    output_path,
+                    self.final_image,
+                    parent.current_file,
+                    parent.h5_dataset_name or "data",
+                    parent.frame_spin.value() - 1,
+                )
+            parent.image_filled = self.final_image.copy()
+            parent.canvas_cave.show_image(
+                parent.image_filled,
+                parent.xc_spin.value(),
+                parent.yc_spin.value(),
+                vmin=self.display_limits[0],
+                vmax=self.display_limits[1],
+                reference_angle_deg=parent.cave_angle_spin.value(),
+            )
+            parent.status.append(f"\nSaved cave+:\n{output_path}")
+            self.status_label.setText(f"Saved cave+: {output_path}")
+        except Exception as error:
+            QMessageBox.critical(self, "Save cave+ error", str(error))
+
+
 class ManualCaveDialog(QDialog):
     def __init__(self, parent, image, filled_image, shapes, exclusion_shapes, pre_nan_shapes, display_limits):
         super().__init__(parent)
@@ -1518,7 +2153,7 @@ class ManualCaveDialog(QDialog):
         self.pre_nan_mode_button.setToolTip("Draw zones forced to NaN before cave filling")
         self.clear_button = QPushButton("Clear")
         self.load_mask_button = QPushButton("Load mask")
-        self.save_mask_button = QPushButton("Save mask")
+        self.save_mask_button = QPushButton("💾 Save mask")
         self.apply_button = QPushButton("Apply")
         self.multicave_button = QPushButton("MultiCave")
         self.multicave_button.setToolTip(
@@ -1568,8 +2203,9 @@ class ManualCaveDialog(QDialog):
         toolbar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         for action in list(toolbar.actions()):
             text = action.text().lower()
-            if "save" in text or "subplots" in text or "customize" in text:
+            if "save" in text or "subplots" in text:
                 toolbar.removeAction(action)
+        emojiize_matplotlib_toolbar(toolbar)
 
         if hasattr(toolbar, "locLabel"):
             toolbar.locLabel.hide()
@@ -1789,7 +2425,7 @@ class ManualCaveDialog(QDialog):
 
         try:
             for frame_index in range(total_frames):
-                image, _ = read_h5_frame(parent.current_file, parent.h5_dataset_name, frame_index)
+                image, _ = read_h5_frame(parent.current_file, parent.h5_dataset_name, frame_index, add_matching_center=False)
                 manual_mask = self.combined_manual_mask_for_shape(image.shape, "include")
                 exclusion_mask = self.combined_manual_mask_for_shape(image.shape, "exclude")
                 pre_nan_mask = self.combined_manual_mask_for_shape(image.shape, "pre_nan")
@@ -2787,7 +3423,8 @@ class CaveTab(QWidget):
             "Expands the NaN mask by 2 pixels before central symmetry filling."
         )
 
-        self.manual_mask_button = QPushButton("Manual cave mask")
+        self.manual_mask_button = QPushButton("Manual mask")
+        self.custom_cave_button = QPushButton("Custom cave")
         self.manual_mask_status_label = QLabel("Manual mask: none")
         self.manual_mask_status_label.setWordWrap(True)
         self.manual_mask_status_label.setStyleSheet("""
@@ -2808,6 +3445,12 @@ class CaveTab(QWidget):
         self.manual_mask_button.setVisible(True)
         self.manual_mask_button.setEnabled(True)
         self.manual_mask_button.clicked.connect(self.open_manual_cave_dialog)
+        self.custom_cave_button.setStyleSheet(cave_action_button_style)
+        self.custom_cave_button.setFixedHeight(cave_action_button_height)
+        self.custom_cave_button.setCursor(Qt.PointingHandCursor)
+        self.custom_cave_button.setVisible(True)
+        self.custom_cave_button.setEnabled(True)
+        self.custom_cave_button.clicked.connect(self.open_custom_cave_dialog)
         self.update_manual_mask_button_state()
 
         self.save_checkbox = QCheckBox("Save output after Run Cave")
@@ -2816,7 +3459,12 @@ class CaveTab(QWidget):
         controls_layout.addLayout(nan_layout)
         controls_layout.addWidget(self.id13_beamstop_checkbox)
         controls_layout.addWidget(self.expand_nan_neighbors_checkbox)
-        controls_layout.addWidget(self.manual_mask_button)
+        mask_button_layout = QHBoxLayout()
+        mask_button_layout.setContentsMargins(0, 0, 0, 0)
+        mask_button_layout.setSpacing(4)
+        mask_button_layout.addWidget(self.manual_mask_button)
+        mask_button_layout.addWidget(self.custom_cave_button)
+        controls_layout.addLayout(mask_button_layout)
         controls_layout.addWidget(self.manual_mask_status_label)
         controls_layout.addWidget(QLabel("Apply cave to:"))
         controls_layout.addWidget(self.cave_scope_combo)
@@ -2881,10 +3529,9 @@ class CaveTab(QWidget):
         self.run_button.setStyleSheet(cave_action_button_style)
         self.run_button.clicked.connect(self.run_cave)
 
-        self.save_button = QPushButton("Save Cave")
+        self.save_button = QPushButton("💾 Save Cave")
         self.batch_cave_button = QPushButton("Cave selected")
         self.batch_cave_button.setToolTip("Apply the current cave settings to all selected files")
-        self.save_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
         self.save_button.setFixedHeight(cave_action_button_height)
         self.save_button.setStyleSheet(cave_action_button_style)
         self.save_button.clicked.connect(self.save_cave)
@@ -3023,10 +3670,14 @@ class CaveTab(QWidget):
         if not hasattr(self, "manual_mask_button"):
             return
 
-        self.manual_mask_button.setText("Manual cave mask")
+        self.manual_mask_button.setText("Manual mask")
         self.manual_mask_button.setVisible(True)
         self.manual_mask_button.setEnabled(True)
         self.manual_mask_button.setToolTip("Open the manual cave mask.")
+        if hasattr(self, "custom_cave_button"):
+            self.custom_cave_button.setVisible(True)
+            self.custom_cave_button.setEnabled(True)
+            self.custom_cave_button.setToolTip("Open the custom cave+ editor.")
         
     def update_extra_nan_condition(self, refresh=True):
         self.commit_nan_threshold_edits()
@@ -3275,6 +3926,31 @@ class CaveTab(QWidget):
 
         except Exception as error:
             QMessageBox.critical(self, "Manual cave mask error", str(error))
+
+    def open_custom_cave_dialog(self):
+        try:
+            if self.image is None:
+                QMessageBox.information(
+                    self,
+                    "Custom cave",
+                    "Load an EDF or H5 image before opening the custom cave editor."
+                )
+                return
+
+            self.refresh_preview()
+            image = self.image_clean if self.image_clean is not None else self.image
+            filled_image = self.image_filled if self.image_filled is not None else image
+            dialog = CustomCaveDialog(
+                self,
+                image,
+                filled_image,
+                self.current_display_limits(),
+            )
+            dialog.exec()
+            self.refresh_preview()
+
+        except Exception as error:
+            QMessageBox.critical(self, "Custom cave error", str(error))
 
     def auto_set_display_limits(self):
         if self.image is None:
@@ -3778,7 +4454,8 @@ class CaveTab(QWidget):
                 self.configure_frame_navigation(self.h5_n_frames)
             elif suffix in [".h5", ".hdf5"]:
                 dataset_name, dataset_shape, frame_axis, n_frames, header = inspect_h5_image_dataset(file_path)
-                image, header = read_h5_frame(file_path, dataset_name, 0)
+                image, frame_header = read_h5_frame(file_path, dataset_name, 0, add_matching_center=False)
+                header.update(frame_header)
                 self.file_type = "H5"
                 self.raw_header_text = ""
                 self.byte_order = "LowByteFirst"
@@ -3859,7 +4536,10 @@ class CaveTab(QWidget):
         frame_index = self.frame_spin.value() - 1
 
         try:
-            image, header = read_h5_frame(self.current_file, self.h5_dataset_name, frame_index)
+            image, header = read_h5_frame(self.current_file, self.h5_dataset_name, frame_index, add_matching_center=False)
+            for key in ["Center_1", "Center_2", "center_1", "center_2", "Center source"]:
+                if key in self.header and key not in header:
+                    header[key] = self.header[key]
             self.header = header
             self.image = image.astype(np.float64)
             self.image_clean = None
@@ -3932,7 +4612,7 @@ class CaveTab(QWidget):
         return filled
 
     def write_cave_h5_stack(self, path, dataset_name, frame_axis, n_frames, output_path, progress_callback=None):
-        first_image, _header = read_h5_frame(path, dataset_name, 0)
+        first_image, _header = read_h5_frame(path, dataset_name, 0, add_matching_center=False)
         output_h5, output_dataset = create_h5_cave_stack_file(
             output_path,
             first_image.shape,
@@ -3943,7 +4623,7 @@ class CaveTab(QWidget):
         )
         try:
             for frame_index in range(int(n_frames)):
-                image = first_image if frame_index == 0 else read_h5_frame(path, dataset_name, frame_index)[0]
+                image = first_image if frame_index == 0 else read_h5_frame(path, dataset_name, frame_index, add_matching_center=False)[0]
                 filled = self.cave_filled_image_for(image)
                 write_h5_stack_frame(output_dataset, frame_axis, frame_index, filled)
                 if progress_callback is not None:
@@ -4103,14 +4783,14 @@ class CaveTab(QWidget):
             if self.cave_scope_is_all():
                 frames = []
                 for frame_number in range(1, int(n_frames) + 1):
-                    image, _header = read_h5_frame(path, dataset_name, frame_number - 1)
+                    image, _header = read_h5_frame(path, dataset_name, frame_number - 1, add_matching_center=False)
                     frames.append((frame_number, image))
                 return frames
 
             current_frame = 0
             if self.current_file is not None and Path(self.current_file).resolve() == path.resolve() and self.file_type == "H5":
                 current_frame = max(0, min(self.frame_spin.value() - 1, int(n_frames) - 1))
-            image, _header = read_h5_frame(path, dataset_name, current_frame)
+            image, _header = read_h5_frame(path, dataset_name, current_frame, add_matching_center=False)
             return [(current_frame + 1, image)]
 
         raise ValueError(f"Unsupported file format: {path.suffix}")
