@@ -51,8 +51,15 @@ from tabs.ui_style import (
 
 
 class SMC100Device:
-    DEFAULT_PORT = "COM1" if sys.platform.startswith("win") else "/dev/cu.usbserial-130"
+    DEFAULT_PORT = "" if sys.platform.startswith("win") else "/dev/cu.usbserial-130"
     BAUDRATE = 57600
+    USB_SERIAL_IDS = ((0x067B, 0x2303), (0x0403, 0x6001))
+    ARDUINO_VIDS = (0x2341, 0x2A03)
+    SMC_NAME_KEYWORD_GROUPS = (
+        ("prolific", "pl2303"),
+        ("usb-to-serial", "usb serial", "usb-serial", "serial comm port"),
+        ("ft232", "ftdi"),
+    )
     STATUS_LABELS = {
         "0A": "not referenced after reset",
         "0B": "not referenced after homing",
@@ -77,6 +84,30 @@ class SMC100Device:
         self.ser = None
 
     @staticmethod
+    def available_port_descriptions():
+        try:
+            from serial.tools import list_ports
+        except ImportError:
+            return []
+
+        descriptions = []
+        for port in list_ports.comports():
+            vid_pid = ""
+            if port.vid is not None and port.pid is not None:
+                vid_pid = f" VID:PID={port.vid:04X}:{port.pid:04X}"
+            descriptions.append(f"{port.device} ({port.description}{vid_pid})")
+        return descriptions
+
+    @staticmethod
+    def port_search_text(port):
+        return f"{port.device} {port.name} {port.description} {port.hwid} {port.manufacturer}".lower()
+
+    @staticmethod
+    def is_arduino_port(port):
+        text = SMC100Device.port_search_text(port)
+        return port.vid in SMC100Device.ARDUINO_VIDS or "arduino" in text or "usbmodem" in text
+
+    @staticmethod
     def detect_port():
         try:
             from serial.tools import list_ports
@@ -86,22 +117,19 @@ class SMC100Device:
         if list_ports is not None:
             ports = list(list_ports.comports())
             for port in ports:
-                if (port.vid, port.pid) in ((0x067B, 0x2303), (0x0403, 0x6001)):
+                if (port.vid, port.pid) in SMC100Device.USB_SERIAL_IDS and not SMC100Device.is_arduino_port(port):
                     return port.device
 
-            smc_ports = []
-            for port in ports:
-                text = f"{port.device} {port.description} {port.hwid}".lower()
-                if (
-                    "usbserial" in port.device.lower()
-                    or "usb-serial" in text
-                    or "prolific" in text
-                    or "ft232" in text
-                    or "ftdi" in text
-                ):
-                    smc_ports.append(port.device)
-            if smc_ports:
-                return sorted(smc_ports)[0]
+            for keyword_group in SMC100Device.SMC_NAME_KEYWORD_GROUPS:
+                smc_ports = []
+                for port in ports:
+                    if SMC100Device.is_arduino_port(port):
+                        continue
+                    text = SMC100Device.port_search_text(port)
+                    if any(keyword in text for keyword in keyword_group):
+                        smc_ports.append(port.device)
+                if smc_ports:
+                    return sorted(smc_ports)[0]
 
         if not sys.platform.startswith("win"):
             usbserial_ports = sorted(str(path) for path in Path("/dev").glob("cu.usbserial-*"))
@@ -122,6 +150,15 @@ class SMC100Device:
             and not Path(requested_port).exists()
         ):
             requested_port = self.detect_port()
+        if not requested_port:
+            available_ports = self.available_port_descriptions()
+            suffix = ""
+            if available_ports:
+                suffix = " Available serial ports: " + "; ".join(available_ports)
+            raise RuntimeError(
+                "No SMC100 serial port detected. Select the SMC100 COM port manually "
+                "or check the USB-RS232 driver." + suffix
+            )
         self.port = requested_port
         self.ser = serial.Serial(
             self.port,
@@ -1219,10 +1256,14 @@ class VimbaSALSWidget(QWidget):
         self.back_requested.emit()
 
     def connect_camera(self):
+        self.status_label.setText("Connecting to Vimba camera...")
+        self.connect_button.setEnabled(False)
+        QApplication.processEvents()
         try:
             from vmbpy import VmbSystem
         except ImportError:
             self.status_label.setText("VmbPy is missing. Reinstall or update LRPhoton with the bundled camera support.")
+            self.update_connection_state(False)
             return
 
         try:
@@ -1244,6 +1285,7 @@ class VimbaSALSWidget(QWidget):
             self.update_connection_state(True)
         except Exception as exc:
             self.disconnect_camera()
+            self.update_connection_state(False)
             self.status_label.setText(f"Camera connection failed: {exc}")
 
     def direct_camera_identifiers(self):
