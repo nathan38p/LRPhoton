@@ -7,7 +7,7 @@ import time
 
 import numpy as np
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -297,6 +297,82 @@ class ArduinoPositionDevice:
         return self.send("1OR") or "sent"
 
 
+class VimbaCameraConnectionThread(QThread):
+    progress = Signal(str)
+    connected = Signal(object, object, str)
+    failed = Signal(str)
+
+    def __init__(self, identifiers, camera_id, parent=None):
+        super().__init__(parent)
+        self.identifiers = identifiers
+        self.camera_id = camera_id
+
+    def run(self):
+        vmb = None
+        camera = None
+        try:
+            from vmbpy import VmbSystem
+
+            self.progress.emit("Starting Vimba system...")
+            vmb = VmbSystem.get_instance()
+            vmb.__enter__()
+
+            self.progress.emit("Trying direct Vimba camera lookup...")
+            camera = self.direct_camera(vmb)
+            if camera is None:
+                self.progress.emit("Discovering Vimba cameras...")
+                cameras = self.discover_cameras(vmb)
+                if cameras:
+                    camera = self.select_camera(cameras)
+            if camera is None:
+                raise RuntimeError("No Vimba camera detected by VmbPy.")
+
+            self.progress.emit("Opening Vimba camera...")
+            camera.__enter__()
+            self.connected.emit(vmb, camera, self.camera_label(camera))
+        except Exception as exc:
+            if camera is not None:
+                try:
+                    camera.__exit__(None, None, None)
+                except Exception:
+                    pass
+            if vmb is not None:
+                try:
+                    vmb.__exit__(None, None, None)
+                except Exception:
+                    pass
+            self.failed.emit(str(exc))
+
+    def direct_camera(self, vmb):
+        for identifier in self.identifiers:
+            try:
+                return vmb.get_camera_by_id(identifier)
+            except Exception:
+                pass
+        return None
+
+    def discover_cameras(self, vmb):
+        try:
+            return list(vmb.get_all_cameras())
+        except Exception:
+            return []
+
+    def select_camera(self, cameras):
+        for camera in cameras:
+            if camera.get_id() == self.camera_id:
+                return camera
+            text = f"{camera.get_id()} {getattr(camera, 'get_name', lambda: '')()}".lower()
+            if "g419" in text or "mako" in text:
+                return camera
+        return cameras[0]
+
+    def camera_label(self, camera):
+        try:
+            return camera.get_id()
+        except Exception:
+            return "Vimba camera"
+
+
 class SALSPreviewToolbar(NavigationToolbar):
     def __init__(self, canvas, parent):
         super().__init__(canvas, parent)
@@ -448,6 +524,11 @@ class VimbaSALSWidget(QWidget):
         super().__init__()
         self.vmb = None
         self.camera = None
+        self.camera_connect_thread = None
+        self.camera_connect_timed_out = False
+        self.camera_connect_timeout_timer = QTimer(self)
+        self.camera_connect_timeout_timer.setSingleShot(True)
+        self.camera_connect_timeout_timer.timeout.connect(self.handle_camera_connect_timeout)
         self.current_frame = None
         self.frame_index = 0
         self.output_folder = Path.home() / "LRPhoton_SALS"
@@ -1256,45 +1337,79 @@ class VimbaSALSWidget(QWidget):
         self.back_requested.emit()
 
     def connect_camera(self):
+        if self.camera_connect_thread is not None and self.camera_connect_thread.isRunning():
+            self.status_label.setText("Camera connection already in progress...")
+            return
         self.status_label.setText("Connecting to Vimba camera...")
         self.connect_button.setEnabled(False)
         QApplication.processEvents()
         try:
-            from vmbpy import VmbSystem
+            import vmbpy  # noqa: F401
         except ImportError:
             self.status_label.setText("VmbPy is missing. Reinstall or update LRPhoton with the bundled camera support.")
             self.update_connection_state(False)
             return
 
-        try:
-            self.vmb = VmbSystem.get_instance()
-            self.vmb.__enter__()
-            self.status_label.setText("Trying direct Vimba camera lookup...")
-            QApplication.processEvents()
-            self.camera = self.connect_direct_vimba_camera()
-            cameras = []
-            if self.camera is None:
-                self.status_label.setText("Discovering Vimba cameras...")
-                QApplication.processEvents()
-                cameras = self.discover_vimba_cameras()
-                if cameras:
-                    self.camera = self.select_mako_camera(cameras)
-            if self.camera is None and not cameras:
-                raise RuntimeError(self.no_vimba_camera_message())
+        self.camera_connect_timed_out = False
+        self.camera_connect_thread = VimbaCameraConnectionThread(
+            self.direct_camera_identifiers(),
+            self.CAMERA_ID,
+            self,
+        )
+        self.camera_connect_thread.progress.connect(self.status_label.setText)
+        self.camera_connect_thread.connected.connect(self.handle_camera_connected)
+        self.camera_connect_thread.failed.connect(self.handle_camera_connect_failed)
+        self.camera_connect_thread.finished.connect(self.cleanup_camera_connect_thread)
+        self.camera_connect_timeout_timer.start(15000)
+        self.camera_connect_thread.start()
 
-            self.status_label.setText("Opening Vimba camera...")
-            QApplication.processEvents()
-            self.camera.__enter__()
+    def handle_camera_connected(self, vmb, camera, camera_id):
+        if self.camera_connect_timed_out:
+            try:
+                camera.__exit__(None, None, None)
+            except Exception:
+                pass
+            try:
+                vmb.__exit__(None, None, None)
+            except Exception:
+                pass
+            return
+
+        self.camera_connect_timeout_timer.stop()
+        self.vmb = vmb
+        self.camera = camera
+        try:
             self.status_label.setText("Applying camera settings...")
             QApplication.processEvents()
             self.apply_camera_settings()
             self.sync_fields_from_camera()
-            self.status_label.setText(f"Connected: {self.camera.get_id()}")
+            self.status_label.setText(f"Connected: {camera_id}")
             self.update_connection_state(True)
         except Exception as exc:
             self.disconnect_camera()
             self.update_connection_state(False)
             self.status_label.setText(f"Camera connection failed: {exc}")
+
+    def handle_camera_connect_failed(self, message):
+        if self.camera_connect_timed_out:
+            return
+        self.camera_connect_timeout_timer.stop()
+        self.disconnect_camera()
+        self.update_connection_state(False)
+        self.status_label.setText(f"Camera connection failed: {message} {self.no_vimba_camera_message()}")
+
+    def handle_camera_connect_timeout(self):
+        self.camera_connect_timed_out = True
+        self.update_connection_state(False)
+        self.status_label.setText(
+            "Camera connection timeout after 15 s. Close Vimba X Viewer, check that the "
+            "Camera IP is 169.254.242.220, then retry."
+        )
+
+    def cleanup_camera_connect_thread(self):
+        if self.camera_connect_thread is not None:
+            self.camera_connect_thread.deleteLater()
+            self.camera_connect_thread = None
 
     def direct_camera_identifiers(self):
         identifiers = []
