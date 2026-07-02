@@ -51,12 +51,63 @@ from tabs.ui_style import (
 
 
 class SMC100Device:
-    DEFAULT_PORT = "/dev/cu.usbserial-130"
+    DEFAULT_PORT = "COM1" if sys.platform.startswith("win") else "/dev/cu.usbserial-130"
     BAUDRATE = 57600
+    STATUS_LABELS = {
+        "0A": "not referenced after reset",
+        "0B": "not referenced after homing",
+        "0C": "not referenced after configuration",
+        "0D": "not referenced after disable",
+        "0E": "not referenced after ready",
+        "0F": "not referenced after moving",
+        "10": "configuration",
+        "11": "homing",
+        "14": "configuration",
+        "1E": "homing",
+        "28": "moving",
+        "32": "ready after homing",
+        "33": "ready after moving",
+        "34": "ready after disable",
+        "3C": "disabled after ready",
+        "3D": "disabled after moving",
+    }
 
     def __init__(self, port=None):
-        self.port = port or self.DEFAULT_PORT
+        self.port = port or self.detect_port()
         self.ser = None
+
+    @staticmethod
+    def detect_port():
+        try:
+            from serial.tools import list_ports
+        except ImportError:
+            list_ports = None
+
+        if list_ports is not None:
+            ports = list(list_ports.comports())
+            for port in ports:
+                if (port.vid, port.pid) in ((0x067B, 0x2303), (0x0403, 0x6001)):
+                    return port.device
+
+            smc_ports = []
+            for port in ports:
+                text = f"{port.device} {port.description} {port.hwid}".lower()
+                if (
+                    "usbserial" in port.device.lower()
+                    or "usb-serial" in text
+                    or "prolific" in text
+                    or "ft232" in text
+                    or "ftdi" in text
+                ):
+                    smc_ports.append(port.device)
+            if smc_ports:
+                return sorted(smc_ports)[0]
+
+        if not sys.platform.startswith("win"):
+            usbserial_ports = sorted(str(path) for path in Path("/dev").glob("cu.usbserial-*"))
+            if usbserial_ports:
+                return usbserial_ports[0]
+        return SMC100Device.DEFAULT_PORT
 
     def connect(self, port=None):
         try:
@@ -64,7 +115,14 @@ class SMC100Device:
         except ImportError as exc:
             raise RuntimeError("pyserial is missing. Install the 'pyserial' dependency.") from exc
 
-        self.port = port or self.port
+        requested_port = port or self.port or self.detect_port()
+        if (
+            requested_port == self.DEFAULT_PORT
+            and requested_port.startswith("/dev/")
+            and not Path(requested_port).exists()
+        ):
+            requested_port = self.detect_port()
+        self.port = requested_port
         self.ser = serial.Serial(
             self.port,
             self.BAUDRATE,
@@ -75,6 +133,14 @@ class SMC100Device:
         )
         self.ser.reset_input_buffer()
         self.ser.reset_output_buffer()
+        status = self.get_status()
+        if not status:
+            self.close()
+            raise RuntimeError(
+                f"No SMC100 reply on {self.port}. The USB serial adapter is detected, "
+                "but the controller is not answering. Check RS-232 level/pinout, cable, "
+                "power, and SMC100 serial connector."
+            )
 
     def close(self):
         if self.ser is not None and self.ser.is_open:
@@ -95,6 +161,12 @@ class SMC100Device:
     def get_error(self):
         return self.send("1TE?")
 
+    def get_status(self):
+        return self.send("1TS?")
+
+    def initialize(self):
+        return self.send("1OR")
+
     def stop(self):
         return self.send("1ST")
 
@@ -113,6 +185,7 @@ class SMC100Device:
 
 class ArduinoPositionDevice:
     DEFAULT_BAUDRATE = 57600
+    DEFAULT_PORT = "COM1" if sys.platform.startswith("win") else "/dev/cu.usbmodem"
 
     def __init__(self, port=None):
         self.port = port or self.detect_port()
@@ -123,13 +196,15 @@ class ArduinoPositionDevice:
         try:
             from serial.tools import list_ports
         except ImportError:
-            return "/dev/cu.usbmodem"
+            return ArduinoPositionDevice.DEFAULT_PORT
 
         for port in list_ports.comports():
+            if port.vid == 0x2341:
+                return port.device
             text = f"{port.device} {port.description} {port.hwid}".lower()
             if "arduino" in text or "uno wifi r4" in text or "usbmodem" in port.device.lower():
                 return port.device
-        return "/dev/cu.usbmodem"
+        return ArduinoPositionDevice.DEFAULT_PORT
 
     def connect(self, port=None):
         try:
@@ -709,7 +784,7 @@ class VimbaSALSWidget(QWidget):
         self.smc_position_label = QLabel()
         self.smc_position_label.setVisible(False)
 
-        self.smc_port_edit = QLineEdit(SMC100Device.DEFAULT_PORT)
+        self.smc_port_edit = QLineEdit(SMC100Device.detect_port())
         self.smc_port_edit.setFixedHeight(self.POSITION_CONTROL_FIELD_HEIGHT)
         smc_layout.addLayout(self.smc_field_row("Port", self.smc_port_edit))
 
@@ -785,6 +860,11 @@ class VimbaSALSWidget(QWidget):
         self.smc_set_origin_button = QPushButton("Set origin")
         self.smc_set_origin_button.setFixedHeight(self.POSITION_CONTROL_FIELD_HEIGHT)
         self.smc_set_origin_button.clicked.connect(self.set_smc_origin)
+        self.smc_initialize_button = QPushButton("Initialize / home")
+        self.smc_initialize_button.setFixedHeight(self.POSITION_CONTROL_FIELD_HEIGHT)
+        self.smc_initialize_button.clicked.connect(self.initialize_smc)
+        smc_layout.addWidget(self.section_label("Reference"))
+        smc_layout.addWidget(self.smc_initialize_button)
         origin_buttons_layout.addWidget(self.smc_set_origin_button)
         self.smc_go_origin_button = QPushButton("Go back to origin")
         self.smc_go_origin_button.setFixedHeight(self.POSITION_CONTROL_FIELD_HEIGHT)
@@ -874,10 +954,12 @@ class VimbaSALSWidget(QWidget):
             self.smc_step_edit,
             self.smc_step_minus_button,
             self.smc_step_plus_button,
+            self.smc_initialize_button,
             self.smc_set_origin_button,
             self.smc_stop_button,
         ]:
             widget.setEnabled(controller_selected and connected)
+        self.smc_initialize_button.setEnabled(self.is_smc_controller_selected() and connected)
         self.smc_go_origin_button.setEnabled(controller_selected and connected and self.smc_origin_position is not None)
 
     def is_smc_controller_selected(self):
@@ -900,7 +982,7 @@ class VimbaSALSWidget(QWidget):
         self.update_smc_controls(False)
         if self.is_smc_controller_selected():
             self.smc_absolute_label.setText("Absolute (0-25)")
-            self.smc_port_edit.setText(SMC100Device.DEFAULT_PORT)
+            self.smc_port_edit.setText(SMC100Device.detect_port())
             self.smc_status_label.setText("Disconnected")
             self.smc_position_label.setText("Absolute position: ---")
             self.smc_position_label.setVisible(True)
@@ -920,7 +1002,7 @@ class VimbaSALSWidget(QWidget):
             if self.is_arduino_controller_selected():
                 default_port = ArduinoPositionDevice.detect_port()
             else:
-                default_port = SMC100Device.DEFAULT_PORT
+                default_port = SMC100Device.detect_port()
             device.connect(self.smc_port_edit.text().strip() or default_port)
             self.update_smc_controls(True)
             self.smc_status_label.setText(f"Connected: {device.port}")
@@ -930,6 +1012,7 @@ class VimbaSALSWidget(QWidget):
             else:
                 self.smc_timer.start(1000)
                 self.refresh_smc_position()
+                self.smc_status_label.setText(self.smc_diagnostic_text(f"Connected: {device.port}"))
         except Exception as exc:
             self.smc_status_label.setText(f"Connection error: {exc}")
             self.update_smc_controls(False)
@@ -993,6 +1076,16 @@ class VimbaSALSWidget(QWidget):
             "Velocity",
             lambda: self.active_position_device().set_velocity(velocity),
             refresh=not self.is_arduino_controller_selected(),
+        )
+
+    def initialize_smc(self):
+        if not self.is_smc_controller_selected():
+            self.smc_status_label.setText("Initialize is only available for SMC100.")
+            return
+        self.run_smc_command(
+            "Initialize / home",
+            self.smc.initialize,
+            refresh=True,
         )
 
     def set_smc_origin(self):
@@ -1077,6 +1170,9 @@ class VimbaSALSWidget(QWidget):
         except Exception as exc:
             details.append(f"pos err {exc}")
         try:
+            if self.is_smc_controller_selected():
+                status = self.active_position_device().get_status()
+                details.append(self.smc_status_detail(status))
             error = self.active_position_device().get_error()
             if error:
                 status_label = "TS" if self.is_arduino_controller_selected() else "TE"
@@ -1084,6 +1180,14 @@ class VimbaSALSWidget(QWidget):
         except Exception:
             pass
         return f"{prefix} | {' | '.join(details)}"
+
+    def smc_status_detail(self, status):
+        status = (status or "").strip()
+        code = status[-2:] if len(status) >= 2 else ""
+        label = SMC100Device.STATUS_LABELS.get(code)
+        if label:
+            return f"TS {status} ({label})"
+        return f"TS {status or '---'}"
 
     def shutdown_smc(self):
         self.smc_timer.stop()
