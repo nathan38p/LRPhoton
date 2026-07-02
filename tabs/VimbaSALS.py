@@ -1269,16 +1269,24 @@ class VimbaSALSWidget(QWidget):
         try:
             self.vmb = VmbSystem.get_instance()
             self.vmb.__enter__()
+            self.status_label.setText("Trying direct Vimba camera lookup...")
+            QApplication.processEvents()
             self.camera = self.connect_direct_vimba_camera()
             cameras = []
             if self.camera is None:
+                self.status_label.setText("Discovering Vimba cameras...")
+                QApplication.processEvents()
                 cameras = self.discover_vimba_cameras()
+                if cameras:
+                    self.camera = self.select_mako_camera(cameras)
             if self.camera is None and not cameras:
                 raise RuntimeError(self.no_vimba_camera_message())
 
-            if self.camera is None:
-                self.camera = self.select_mako_camera(cameras)
+            self.status_label.setText("Opening Vimba camera...")
+            QApplication.processEvents()
             self.camera.__enter__()
+            self.status_label.setText("Applying camera settings...")
+            QApplication.processEvents()
             self.apply_camera_settings()
             self.sync_fields_from_camera()
             self.status_label.setText(f"Connected: {self.camera.get_id()}")
@@ -1318,12 +1326,6 @@ class VimbaSALSWidget(QWidget):
     def discover_vimba_cameras(self):
         if self.vmb is None:
             return []
-        try:
-            discover_cameras = getattr(self.vmb, "_Impl__discover_cameras", None)
-            if callable(discover_cameras):
-                discover_cameras()
-        except Exception:
-            pass
         try:
             return list(self.vmb.get_all_cameras())
         except Exception:
