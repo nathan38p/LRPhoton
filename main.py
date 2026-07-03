@@ -145,6 +145,7 @@ from PySide6.QtCore import Qt, QTimer, QSize, QByteArray, QBuffer, QIODevice, QC
 
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QLabel,
     QMessageBox,
     QFrame,
@@ -299,6 +300,9 @@ class ColoredTabBar(QTabBar):
         painter.setRenderHint(QPainter.Antialiasing)
 
         for index in range(self.count()):
+            if not self.isTabVisible(index):
+                continue
+
             rect = self.tabRect(index).adjusted(1, 1, -1, -1)
             pastel_color, selected_color = self.TAB_COLORS.get(index, ("#eeeeee", "#007aff"))
             selected = index == self.currentIndex()
@@ -332,6 +336,40 @@ class MainWindow(QMainWindow):
             USER_SETTINGS_FILE.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
         except OSError:
             pass
+
+    def lrp_mode_enabled(self):
+        return bool(self.load_user_settings().get("lrp_mode", False))
+
+    def set_lrp_mode_enabled(self, enabled):
+        data = self.load_user_settings()
+        data["lrp_mode"] = bool(enabled)
+        self.save_user_settings(data)
+        self.apply_lrp_mode()
+
+    def apply_lrp_mode(self):
+        if not hasattr(self, "tab_bar") or not hasattr(self, "capture_sals_tab_index"):
+            return
+
+        enabled = self.lrp_mode_enabled()
+        self.tab_bar.setTabVisible(self.capture_sals_tab_index, enabled)
+        self.tab_bar.setTabEnabled(self.capture_sals_tab_index, enabled)
+        if not enabled and self.tab_bar.currentIndex() == self.capture_sals_tab_index:
+            self.tab_bar.setCurrentIndex(0)
+        self.refresh_tab_bar_width()
+
+    def refresh_tab_bar_width(self):
+        if not hasattr(self, "tab_bar"):
+            return
+
+        visible_width = 0
+        for index in range(self.tab_bar.count()):
+            if self.tab_bar.isTabVisible(index):
+                visible_width += self.tab_bar.tabSizeHint(index).width()
+
+        if visible_width > 0:
+            self.tab_bar.setFixedWidth(visible_width + 8)
+        self.tab_bar.updateGeometry()
+        self.tab_bar.update()
 
     def get_or_create_install_id(self):
         data = self.load_user_settings()
@@ -615,6 +653,7 @@ class MainWindow(QMainWindow):
         self.tab_bar.setMovable(False)
         self.tab_bar.setUsesScrollButtons(True)
         self.tab_bar.setFixedHeight(34)
+        self.tab_bar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         self.tab_bar.addTab("🖼️ View 2D")
         self.tab_bar.addTab("📈 Plot 1D")
@@ -641,7 +680,7 @@ class MainWindow(QMainWindow):
         self.tab_bar.setTabVisible(self.centre_tab_index, False)
         self.tab_bar.setTabEnabled(self.centre_tab_index, False)
         self.tab_bar.setTabText(self.capture_sals_tab_index, "📷 Capture")
-        self.tab_bar.setTabEnabled(self.capture_sals_tab_index, True)
+        self.apply_lrp_mode()
         self.tab_bar.setTabText(self.sandbox_tab_index, "🧪 Sandbox")
         sandbox_available = self.is_development_copy()
         self.tab_bar.setTabVisible(self.distances_tab_index, sandbox_available)
@@ -649,6 +688,7 @@ class MainWindow(QMainWindow):
         self.tab_bar.setTabVisible(self.sandbox_tab_index, sandbox_available)
         self.tab_bar.setTabEnabled(self.sandbox_tab_index, sandbox_available)
         self.tab_bar.setTabVisible(self.unfold_tab_index, False)
+        self.refresh_tab_bar_width()
 
         header_layout.addStretch()
         header_layout.addWidget(self.tab_bar, 0, Qt.AlignRight)
@@ -1198,6 +1238,13 @@ class MainWindow(QMainWindow):
             close_button.setFixedHeight(30)
             close_button.setCursor(Qt.PointingHandCursor)
             layout.addWidget(close_button)
+
+        lrp_mode_checkbox = QCheckBox("LRP mode")
+        lrp_mode_checkbox.setChecked(self.lrp_mode_enabled())
+        lrp_mode_checkbox.setCursor(Qt.PointingHandCursor)
+        lrp_mode_checkbox.setToolTip("Show the Capture tab on startup.")
+        lrp_mode_checkbox.toggled.connect(self.set_lrp_mode_enabled)
+        layout.addWidget(lrp_mode_checkbox, 0, Qt.AlignCenter)
 
         dialog.exec()
 
