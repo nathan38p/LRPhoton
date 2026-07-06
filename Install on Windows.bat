@@ -114,7 +114,9 @@ fabio ^
 scipy ^
 pyFAI
 
-if exist "%DEST_FULL%\assets\wheels\vmbpy-1.0.4-py3-none-any.whl" (
+if exist "%DEST_FULL%\assets\wheels\vmbpy-1.2.1-py3-none-win_amd64.whl" (
+    %PYTHON_EXE% -m pip install --force-reinstall "%DEST_FULL%\assets\wheels\vmbpy-1.2.1-py3-none-win_amd64.whl"
+) else if exist "%DEST_FULL%\assets\wheels\vmbpy-1.0.4-py3-none-any.whl" (
     %PYTHON_EXE% -m pip install --upgrade "%DEST_FULL%\assets\wheels\vmbpy-1.0.4-py3-none-any.whl"
 )
 
