@@ -1579,6 +1579,10 @@ class VimbaSALSWidget(QWidget):
             self.camera_help_label.clear()
 
     def show_camera_error_help(self, message):
+        if self.is_invalid_vimbc_version_error(message):
+            self.show_vimbc_version_error_help(message)
+            return
+
         details = self.no_vimba_camera_message()
         full_message = f"Camera connection failed: {message} {details}".strip()
         self.status_label.setText("Camera connection failed. See details below the preview.")
@@ -1593,6 +1597,28 @@ class VimbaSALSWidget(QWidget):
             "• On Windows, allow LRPhoton/Python through Windows Firewall on private networks.<br>"
             "• Check that the Ethernet adapter is on the same subnet as the camera.<br>"
             "• If direct IP works on macOS but not Windows, leave the IP field empty or use Vimba automatic discovery instead of forcing the IP."
+        )
+        self.camera_help_label.setVisible(True)
+
+    def is_invalid_vimbc_version_error(self, message):
+        text = str(message).lower()
+        return "invalid vmbc version" in text or ("expected:" in text and "found:" in text and "vmbc" in text)
+
+    def show_vimbc_version_error_help(self, message):
+        self.status_label.setText("Vimba runtime version mismatch. See details below the preview.")
+        if not hasattr(self, "camera_help_label"):
+            return
+        self.camera_help_label.setText(
+            "<b>Vimba runtime version mismatch</b><br>"
+            f"{self.escape_html(message)}<br><br>"
+            "The camera is detected in Vimba X Viewer, so this is not a firewall or IP problem. "
+            "LRPhoton is loading a VmbPy runtime that expects another Vimba C / CTI version.<br><br>"
+            "<b>What to do on Windows</b><br>"
+            "• Install a VmbPy version matching your installed Vimba X version, or install the Vimba X version expected by the bundled VmbPy.<br>"
+            "• If LRPhoton was packaged with an old VmbPy, rebuild the Windows package after updating VmbPy.<br>"
+            "• Avoid mixing several camera SDKs in PATH / GENICAM_GENTL64_PATH. Keep Allied Vision Vimba X first and remove old Vimba/Basler paths if needed.<br>"
+            "• Restart LRPhoton after changing Vimba X, VmbPy, PATH, or GENICAM_GENTL64_PATH.<br><br>"
+            f"<b>Current GENICAM_GENTL64_PATH</b><br>{self.escape_html(self.vimba_gentl_paths_text() or 'empty')}"
         )
         self.camera_help_label.setVisible(True)
 
