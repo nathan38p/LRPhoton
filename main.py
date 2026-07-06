@@ -48,24 +48,41 @@ def bundled_file_path(*parts):
 
 
 def configure_bundled_vimbax_runtime():
-    if sys.platform != "darwin":
+    cti_paths = []
+    if sys.platform == "darwin":
+        frameworks_path = bundled_file_path("assets", "vimbax", "Frameworks")
+        if frameworks_path.exists():
+            os.environ.setdefault("VIMBA_X_HOME", str(frameworks_path))
+        cti_paths.extend([
+            Path("/Library/Application Support/Allied Vision/Vimba X/cti"),
+            bundled_file_path("assets", "vimbax", "cti"),
+        ])
+    elif sys.platform.startswith("win"):
+        vimba_home_text = os.environ.get("VIMBA_X_HOME", "").strip()
+        if vimba_home_text:
+            cti_paths.append(Path(vimba_home_text) / "cti")
+        cti_paths.append(Path("C:/Program Files/Allied Vision/Vimba X/cti"))
+
+    cti_paths = [path for path in cti_paths if path.exists()]
+    if not cti_paths:
         return
 
-    frameworks_path = bundled_file_path("assets", "vimbax", "Frameworks")
-    system_cti_path = Path("/Library/Application Support/Allied Vision/Vimba X/cti")
-    cti_path = bundled_file_path("assets", "vimbax", "cti")
-    if frameworks_path.exists():
-        os.environ.setdefault("VIMBA_X_HOME", str(frameworks_path))
-    cti_paths = [path for path in (system_cti_path, cti_path) if path.exists()]
-    if cti_paths:
-        for variable in ("GENICAM_GENTL64_PATH", "GENICAM_GENTL32_PATH"):
+    if sys.platform.startswith("win"):
+        os.environ.setdefault("VIMBA_X_HOME", str(cti_paths[0].parent))
+
+    for variable in ("GENICAM_GENTL64_PATH", "GENICAM_GENTL32_PATH"):
+        values = [
+            str(Path(path).expanduser().resolve())
+            for path in os.environ.get(variable, "").split(os.pathsep)
+            if path
+        ]
+        if sys.platform.startswith("win"):
             values = [
-                str(Path(path).expanduser().resolve())
-                for path in os.environ.get(variable, "").split(os.pathsep)
-                if path
+                value for value in values
+                if "basler" not in value.lower() and "pylon" not in value.lower()
             ]
-            values.extend(str(path.resolve()) for path in cti_paths)
-            os.environ[variable] = os.pathsep.join(dict.fromkeys(values))
+        preferred_values = [str(path.resolve()) for path in cti_paths]
+        os.environ[variable] = os.pathsep.join(dict.fromkeys(preferred_values + values))
 
 
 def ensure_local_python_wheels():
