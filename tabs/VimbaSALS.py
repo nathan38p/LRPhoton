@@ -842,13 +842,12 @@ class VimbaSALSWidget(QWidget):
 
         controls_layout.addStretch(1)
 
-        preview_box = QGroupBox("Live EDF preview")
-        preview_box.setStyleSheet(GROUP_BOX_STYLE)
-        self.preview_box = preview_box
-        preview_layout = QVBoxLayout(preview_box)
-        preview_layout.setContentsMargins(*GROUP_BOX_MARGINS)
-        preview_layout.setSpacing(BLOCK_SPACING)
-        body_layout.addWidget(preview_box, 1)
+        # --- Start new preview area layout ---
+        preview_column = QWidget()
+        preview_column_layout = QVBoxLayout(preview_column)
+        preview_column_layout.setContentsMargins(0, 0, 0, 0)
+        preview_column_layout.setSpacing(BLOCK_SPACING)
+        body_layout.addWidget(preview_column, 1)
 
         self.figure = Figure(figsize=(6, 5))
         self.figure.patch.set_alpha(0)
@@ -867,6 +866,7 @@ class VimbaSALSWidget(QWidget):
         self.figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
         self.image_artist = None
         self.toolbar = SALSPreviewToolbar(self.canvas, self)
+
         self.record_play_button = QToolButton(self)
         self.record_play_button.setText("▶️")
         self.record_play_button.setFixedSize(32, 32)
@@ -881,6 +881,7 @@ class VimbaSALSWidget(QWidget):
         """)
         self.record_play_button.setToolTip("Start saving EDF frames at the selected preview fps")
         self.record_play_button.clicked.connect(self.start_recording_frames)
+
         self.record_stop_button = QToolButton(self)
         self.record_stop_button.setText("⏹️")
         self.record_stop_button.setFixedSize(32, 32)
@@ -895,6 +896,7 @@ class VimbaSALSWidget(QWidget):
         """)
         self.record_stop_button.setToolTip("Stop saving EDF frames")
         self.record_stop_button.clicked.connect(self.stop_recording_frames)
+
         self.status_label = QLabel("Vimba is not connected.")
         self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.status_label.setMinimumWidth(280)
@@ -907,6 +909,7 @@ class VimbaSALSWidget(QWidget):
                 padding: 0px 6px;
             }
         """)
+
         toolbar_box, _, self.preview_save_button = make_matplotlib_toolbar_block(
             self,
             "",
@@ -918,8 +921,40 @@ class VimbaSALSWidget(QWidget):
             remove_customize=True,
         )
         self.preview_toolbar_box = toolbar_box
-        preview_layout.addWidget(toolbar_box, 0)
-        preview_layout.addWidget(self.canvas, 1)
+        toolbar_box.setTitle("Live EDF preview")
+        preview_column_layout.addWidget(toolbar_box, 0)
+
+        preview_box = QGroupBox("")
+        preview_box.setStyleSheet(GROUP_BOX_STYLE)
+        self.preview_box = preview_box
+        preview_layout = QVBoxLayout(preview_box)
+        preview_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        preview_layout.setSpacing(BLOCK_SPACING)
+        preview_column_layout.addWidget(preview_box, 1)
+
+        preview_canvas_box = QGroupBox("")
+        preview_canvas_box.setStyleSheet(GROUP_BOX_STYLE)
+        preview_canvas_layout = QVBoxLayout(preview_canvas_box)
+        preview_canvas_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        preview_canvas_layout.setSpacing(BLOCK_SPACING)
+        preview_layout.addWidget(preview_canvas_box, 1)
+
+        preview_canvas_layout.addWidget(self.canvas, 1)
+
+        self.camera_help_label = QLabel("")
+        self.camera_help_label.setWordWrap(True)
+        self.camera_help_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.camera_help_label.setVisible(False)
+        self.camera_help_label.setStyleSheet("""
+            QLabel {
+                background: #fff3f3;
+                border: 1px solid #d88a8a;
+                border-radius: 10px;
+                padding: 10px 12px;
+                color: #111111;
+            }
+        """)
+        preview_canvas_layout.addWidget(self.camera_help_label, 0)
 
         self.preview_coordinate_label = QLabel("x = - | y = - | q = - | angle = - | I = -")
         self.preview_coordinate_label.setAlignment(Qt.AlignCenter)
@@ -935,21 +970,7 @@ class VimbaSALSWidget(QWidget):
             }
         """)
         preview_layout.addWidget(self.preview_coordinate_label, 0)
-
-        self.camera_help_label = QLabel("")
-        self.camera_help_label.setWordWrap(True)
-        self.camera_help_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.camera_help_label.setVisible(False)
-        self.camera_help_label.setStyleSheet("""
-            QLabel {
-                background: #fff3f3;
-                border: 1px solid #d88a8a;
-                border-radius: 10px;
-                padding: 10px 12px;
-                color: #111111;
-            }
-        """)
-        preview_layout.addWidget(self.camera_help_label, 0)
+        # --- End new preview area layout ---
         self.build_smc_controls(body_layout)
 
     def style_acquisition_fields(self):
