@@ -34,6 +34,8 @@ LOCAL_PYTHON_WHEELS = [
 
 #test update2
 
+_VIMBAX_DLL_DIRECTORIES = []
+
 def bundled_file_path(*parts):
     bases = []
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -49,6 +51,7 @@ def bundled_file_path(*parts):
 
 def configure_bundled_vimbax_runtime():
     cti_paths = []
+    dll_paths = []
     if sys.platform == "darwin":
         frameworks_path = bundled_file_path("assets", "vimbax", "Frameworks")
         if frameworks_path.exists():
@@ -60,8 +63,15 @@ def configure_bundled_vimbax_runtime():
     elif sys.platform.startswith("win"):
         vimba_home_text = os.environ.get("VIMBA_X_HOME", "").strip()
         if vimba_home_text:
-            cti_paths.append(Path(vimba_home_text) / "cti")
-        cti_paths.append(Path("C:/Program Files/Allied Vision/Vimba X/cti"))
+            vimba_home = Path(vimba_home_text)
+        else:
+            vimba_home = Path("C:/Program Files/Allied Vision/Vimba X")
+        cti_paths.append(vimba_home / "cti")
+        dll_paths.extend([
+            vimba_home / "bin",
+            vimba_home / "bin" / "Win64",
+            vimba_home,
+        ])
 
     cti_paths = [path for path in cti_paths if path.exists()]
     if not cti_paths:
@@ -69,6 +79,15 @@ def configure_bundled_vimbax_runtime():
 
     if sys.platform.startswith("win"):
         os.environ.setdefault("VIMBA_X_HOME", str(cti_paths[0].parent))
+        existing_path_values = [path for path in os.environ.get("PATH", "").split(os.pathsep) if path]
+        preferred_path_values = [str(path.resolve()) for path in dll_paths if path.exists()]
+        os.environ["PATH"] = os.pathsep.join(dict.fromkeys(preferred_path_values + existing_path_values))
+        if hasattr(os, "add_dll_directory"):
+            for path_text in preferred_path_values:
+                try:
+                    _VIMBAX_DLL_DIRECTORIES.append(os.add_dll_directory(path_text))
+                except OSError:
+                    pass
 
     for variable in ("GENICAM_GENTL64_PATH", "GENICAM_GENTL32_PATH"):
         values = [

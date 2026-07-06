@@ -327,7 +327,8 @@ class VimbaCameraConnectionThread(QThread):
                     self.progress.emit(f"Found {len(cameras)} Vimba camera(s). Selecting camera...")
                     camera = self.select_camera(cameras)
             if camera is None:
-                raise RuntimeError("No Vimba camera detected by VmbPy.")
+                diagnostic = self.vimba_runtime_diagnostic(vmb)
+                raise RuntimeError(f"No Vimba camera detected by VmbPy.{diagnostic}")
 
             self.progress.emit("Opening Vimba camera...")
             camera.__enter__()
@@ -377,6 +378,31 @@ class VimbaCameraConnectionThread(QThread):
             return camera.get_id()
         except Exception:
             return "Vimba camera"
+
+    def vimba_runtime_diagnostic(self, vmb):
+        details = []
+        try:
+            layers = list(vmb.get_all_transport_layers())
+        except Exception:
+            layers = []
+        if layers:
+            layer_names = []
+            for layer in layers:
+                layer_id = self.safe_vimba_text(layer, "get_id") or self.safe_vimba_text(layer, "get_name")
+                if layer_id:
+                    layer_names.append(str(layer_id))
+            if layer_names:
+                details.append(" Transport layers loaded: " + ", ".join(layer_names) + ".")
+        gentl_path = os.environ.get("GENICAM_GENTL64_PATH", "")
+        if gentl_path:
+            details.append(f" GENICAM_GENTL64_PATH={gentl_path}.")
+        return "".join(details)
+
+    def safe_vimba_text(self, obj, method_name):
+        try:
+            return getattr(obj, method_name)()
+        except Exception:
+            return ""
 
 
 class SALSPreviewToolbar(NavigationToolbar):
