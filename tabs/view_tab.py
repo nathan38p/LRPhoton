@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from PySide6.QtCore import Qt, QEvent, QSettings, Signal, QSize, QTimer
 
 from PySide6.QtGui import QAction, QIcon, QPixmap, QPainter, QFont, QColor
+import platform
 from PySide6.QtWidgets import QMessageBox
 
 from PySide6.QtWidgets import (
@@ -106,6 +107,19 @@ class ImageOnlyToolbar(NavigationToolbar):
         save_image_action.triggered.connect(parent.save_png_image_only)
         try:
             self.addAction(save_image_action)
+        except Exception:
+            pass
+
+        # On Windows, force an emoji-capable font for toolbar buttons so emoji glyphs render
+        try:
+            if platform.system() == "Windows":
+                font = QFont("Segoe UI Emoji", 10)
+                self.setFont(font)
+                for tb in self.findChildren(QToolButton):
+                    try:
+                        tb.setFont(font)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
