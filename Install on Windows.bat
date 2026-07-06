@@ -114,10 +114,31 @@ fabio ^
 scipy ^
 pyFAI
 
+set "VMBPY_WHEEL="
+
 if exist "%DEST_FULL%\assets\wheels\vmbpy-1.2.1-py3-none-win_amd64.whl" (
-    %PYTHON_EXE% -m pip install --force-reinstall "%DEST_FULL%\assets\wheels\vmbpy-1.2.1-py3-none-win_amd64.whl"
-) else if exist "%DEST_FULL%\assets\wheels\vmbpy-1.0.4-py3-none-any.whl" (
-    %PYTHON_EXE% -m pip install --upgrade "%DEST_FULL%\assets\wheels\vmbpy-1.0.4-py3-none-any.whl"
+    set "VMBPY_WHEEL=%DEST_FULL%\assets\wheels\vmbpy-1.2.1-py3-none-win_amd64.whl"
+) else if exist "C:\Program Files\Allied Vision\Vimba X\api\python\vmbpy-1.2.1-py3-none-win_amd64.whl" (
+    set "VMBPY_WHEEL=C:\Program Files\Allied Vision\Vimba X\api\python\vmbpy-1.2.1-py3-none-win_amd64.whl"
+) else if exist "C:\Programmes\Allied Vision\Vimba X\api\python\vmbpy-1.2.1-py3-none-win_amd64.whl" (
+    set "VMBPY_WHEEL=C:\Programmes\Allied Vision\Vimba X\api\python\vmbpy-1.2.1-py3-none-win_amd64.whl"
+)
+
+if defined VMBPY_WHEEL (
+    echo Installing Windows VmbPy from:
+    echo %VMBPY_WHEEL%
+    %PYTHON_EXE% -m pip install --force-reinstall "%VMBPY_WHEEL%"
+) else (
+    echo.
+    echo WARNING: Windows VmbPy 1.2.1 was not found.
+    echo Camera support may fail with recent Vimba X versions.
+    echo To make camera support work on first launch, add this file to the project before installing:
+    echo assets\wheels\vmbpy-1.2.1-py3-none-win_amd64.whl
+    echo.
+    if exist "%DEST_FULL%\assets\wheels\vmbpy-1.0.4-py3-none-any.whl" (
+        echo Installing fallback VmbPy 1.0.4...
+        %PYTHON_EXE% -m pip install --upgrade "%DEST_FULL%\assets\wheels\vmbpy-1.0.4-py3-none-any.whl"
+    )
 )
 
 if errorlevel 1 (
@@ -163,3 +184,4 @@ echo LRPhoton
 echo.
 echo Press any key to close Install on Windows.bat...
 pause
+
