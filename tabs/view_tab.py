@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 from PySide6.QtCore import Qt, QEvent, QSettings, Signal, QSize, QTimer
 
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QIcon, QPixmap, QPainter, QFont, QColor
 from PySide6.QtWidgets import QMessageBox
 
 from PySide6.QtWidgets import (
@@ -80,14 +80,34 @@ from .ui_style import (
 ANNOTATIONS_FILE = Path.home() / ".lrphoton" / "annotations.json"
 
 
+def emoji_icon(emoji, size=16):
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    painter = QPainter(pix)
+    try:
+        font = QFont("Segoe UI Emoji", max(1, int(size * 0.8)))
+    except Exception:
+        font = QFont()
+    painter.setFont(font)
+    painter.setPen(QColor(0, 0, 0))
+    painter.drawText(pix.rect(), Qt.AlignCenter, emoji)
+    painter.end()
+    return QIcon(pix)
+
+
 class ImageOnlyToolbar(NavigationToolbar):
 
     def __init__(self, canvas, parent):
         super().__init__(canvas, parent)
         self.view_tab = parent
-        save_image_action = QAction("💾", self)
+        save_image_action = QAction(self)
+        save_image_action.setIcon(emoji_icon("💾", 14))
         save_image_action.setToolTip("Save image only")
         save_image_action.triggered.connect(parent.save_png_image_only)
+        try:
+            self.addAction(save_image_action)
+        except Exception:
+            pass
 
 
     def save_figure(self, *args):
@@ -1023,7 +1043,8 @@ class CompositeImageDialog(QDialog):
         self.auto_button.clicked.connect(self.auto_intensity)
         self.update_preview_button = QPushButton("Update preview")
         self.update_preview_button.clicked.connect(self.update_preview)
-        self.save_button = QPushButton("💾 Save composite")
+        self.save_button = QPushButton("Save composite")
+        self.save_button.setIcon(emoji_icon("💾", 14))
         self.save_button.clicked.connect(self.save_composite)
 
         controls_layout.addWidget(QLabel("Rows"), 0, 0)
@@ -1452,7 +1473,8 @@ class FilmDialog(QDialog):
         self.stop_button.clicked.connect(self.stop)
         self.auto_button = QPushButton("Auto intensity")
         self.auto_button.clicked.connect(self.auto_intensity)
-        self.save_button = QPushButton("💾 Save GIF/video")
+        self.save_button = QPushButton("Save GIF/video")
+        self.save_button.setIcon(emoji_icon("💾", 14))
         self.save_button.clicked.connect(self.save_film)
 
         controls_layout.addWidget(QLabel("FPS"), 0, 0)
@@ -1784,7 +1806,8 @@ class AllColormapPreviewDialog(QDialog):
         self.auto_button.clicked.connect(self.auto_intensity)
         self.format_combo = QComboBox()
         self.format_combo.addItems(["PNG", "JPEG", "TIFF"])
-        self.save_all_button = QPushButton("💾 Save all")
+        self.save_all_button = QPushButton("Save all")
+        self.save_all_button.setIcon(emoji_icon("💾", 14))
         self.save_all_button.clicked.connect(self.save_all_images)
 
         controls.addWidget(QLabel("Min"), 0, 0)
