@@ -313,6 +313,7 @@ class VimbaCameraConnectionThread(QThread):
         camera = None
         try:
             self.progress.emit("Loading VmbPy camera runtime...")
+            self.prepare_platform_vmbpy()
             from vmbpy import VmbSystem
 
             self.progress.emit("Starting Vimba system...")
@@ -344,6 +345,7 @@ class VimbaCameraConnectionThread(QThread):
                 "VmbPy is missing. Reinstall or update LRPhoton with the bundled camera support."
             )
         except Exception as exc:
+            diagnostic = self.vmbpy_diagnostic()
             if camera is not None:
                 try:
                     camera.__exit__(None, None, None)
@@ -354,7 +356,51 @@ class VimbaCameraConnectionThread(QThread):
                     vmb.__exit__(None, None, None)
                 except Exception:
                     pass
-            self.failed.emit(str(exc))
+            self.failed.emit(f"{exc}{diagnostic}")
+
+    def prepare_platform_vmbpy(self):
+        """Prefer a platform-specific bundled VmbPy when LRPhoton ships one.
+
+        This lets the Windows build use a Windows-compatible VmbPy without changing
+        the macOS Python environment. If no bundled package exists, Python keeps
+        using the normally installed vmbpy.
+        """
+        platform_folder = None
+        if sys.platform.startswith("win"):
+            platform_folder = "windows"
+        elif sys.platform == "darwin":
+            platform_folder = "macos"
+        elif sys.platform.startswith("linux"):
+            platform_folder = "linux"
+
+        if not platform_folder:
+            return
+
+        candidates = [
+            VimbaSALSWidget.APP_ROOT / "assets" / "vmbpy" / platform_folder,
+            VimbaSALSWidget.APP_ROOT / "assets" / "camera" / "vmbpy" / platform_folder,
+        ]
+        for path in candidates:
+            if path.exists():
+                path_text = str(path.resolve())
+                if path_text not in sys.path:
+                    sys.path.insert(0, path_text)
+                self.progress.emit(f"Using platform VmbPy folder: {path_text}")
+                return
+
+    def vmbpy_diagnostic(self):
+        try:
+            import vmbpy
+        except Exception as exc:
+            return f" Could not inspect VmbPy: {exc}."
+
+        parts = []
+        version = getattr(vmbpy, "__version__", "unknown")
+        parts.append(f"VmbPy version={version}")
+        package_file = getattr(vmbpy, "__file__", "")
+        if package_file:
+            parts.append(f"VmbPy path={package_file}")
+        return " " + "; ".join(parts) + "."
 
     def direct_camera(self, vmb):
         for identifier in self.identifiers:
@@ -1614,8 +1660,9 @@ class VimbaSALSWidget(QWidget):
             "The camera is detected in Vimba X Viewer, so this is not a firewall or IP problem. "
             "LRPhoton is loading a VmbPy runtime that expects another Vimba C / CTI version.<br><br>"
             "<b>What to do on Windows</b><br>"
-            "• Install a VmbPy version matching your installed Vimba X version, or install the Vimba X version expected by the bundled VmbPy.<br>"
-            "• If LRPhoton was packaged with an old VmbPy, rebuild the Windows package after updating VmbPy.<br>"
+            "• LRPhoton can use a Windows-only bundled VmbPy if it is placed in assets/vmbpy/windows, without changing the macOS setup.<br>"
+            "• Install or bundle a VmbPy version matching your installed Vimba X version, or install the Vimba X version expected by the bundled VmbPy.<br>"
+            "• If LRPhoton was packaged with an old VmbPy, rebuild the Windows package after updating/bundling the Windows VmbPy folder.<br>"
             "• Avoid mixing several camera SDKs in PATH / GENICAM_GENTL64_PATH. Keep Allied Vision Vimba X first and remove old Vimba/Basler paths if needed.<br>"
             "• Restart LRPhoton after changing Vimba X, VmbPy, PATH, or GENICAM_GENTL64_PATH.<br><br>"
             f"<b>Current GENICAM_GENTL64_PATH</b><br>{self.escape_html(self.vimba_gentl_paths_text() or 'empty')}"
