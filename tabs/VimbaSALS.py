@@ -302,10 +302,11 @@ class VimbaCameraConnectionThread(QThread):
     connected = Signal(object, object, str)
     failed = Signal(str)
 
-    def __init__(self, identifiers, camera_id, parent=None):
+    def __init__(self, identifiers, camera_id, path_configuration=None, parent=None):
         super().__init__(parent)
         self.identifiers = identifiers
         self.camera_id = camera_id
+        self.path_configuration = path_configuration or []
 
     def run(self):
         vmb = None
@@ -316,6 +317,9 @@ class VimbaCameraConnectionThread(QThread):
 
             self.progress.emit("Starting Vimba system...")
             vmb = VmbSystem.get_instance()
+            if self.path_configuration:
+                self.progress.emit(f"Using Vimba path configuration: {os.pathsep.join(self.path_configuration)}")
+                vmb.set_path_configuration(*self.path_configuration)
             vmb.__enter__()
 
             self.progress.emit(f"Trying direct Vimba camera lookup: {', '.join(self.identifiers)}")
@@ -323,6 +327,8 @@ class VimbaCameraConnectionThread(QThread):
             if camera is None:
                 self.progress.emit("Discovering Vimba cameras...")
                 cameras = self.discover_cameras(vmb)
+                if not cameras:
+                    cameras = self.poll_discover_cameras(vmb)
                 if cameras:
                     self.progress.emit(f"Found {len(cameras)} Vimba camera(s). Selecting camera...")
                     camera = self.select_camera(cameras)
@@ -333,7 +339,7 @@ class VimbaCameraConnectionThread(QThread):
             self.progress.emit("Opening Vimba camera...")
             camera.__enter__()
             self.connected.emit(vmb, camera, self.camera_label(camera))
-        except ImportError as exc:
+        except ImportError:
             self.failed.emit(
                 "VmbPy is missing. Reinstall or update LRPhoton with the bundled camera support."
             )
@@ -363,6 +369,18 @@ class VimbaCameraConnectionThread(QThread):
             return list(vmb.get_all_cameras())
         except Exception:
             return []
+
+    def poll_discover_cameras(self, vmb, attempts=12, delay_s=0.5):
+        for attempt in range(1, attempts + 1):
+            self.progress.emit(f"Waiting for GigE camera discovery... {attempt}/{attempts}")
+            time.sleep(delay_s)
+            camera = self.direct_camera(vmb)
+            if camera is not None:
+                return [camera]
+            cameras = self.discover_cameras(vmb)
+            if cameras:
+                return cameras
+        return []
 
     def select_camera(self, cameras):
         for camera in cameras:
@@ -1386,6 +1404,7 @@ class VimbaSALSWidget(QWidget):
         self.camera_connect_thread = VimbaCameraConnectionThread(
             self.direct_camera_identifiers(),
             self.CAMERA_ID,
+            self.vimba_path_configuration(),
             self,
         )
         self.camera_connect_thread.progress.connect(self.status_label.setText)
@@ -1462,6 +1481,24 @@ class VimbaSALSWidget(QWidget):
                 identifiers.append(value)
         identifiers.append(self.CAMERA_ID)
         return list(dict.fromkeys(identifiers))
+
+    def vimba_path_configuration(self):
+        configured = os.environ.get("LRPHOTON_VIMBA_PATH_CONFIGURATION", "").strip()
+        if configured:
+            return [value for value in configured.split(os.pathsep) if value]
+
+        paths = []
+        if sys.platform.startswith("win"):
+            vimba_home_text = os.environ.get("VIMBA_X_HOME", "").strip()
+            vimba_home = Path(vimba_home_text) if vimba_home_text else Path("C:/Program Files/Allied Vision/Vimba X")
+            paths.append(vimba_home / "cti")
+        elif sys.platform == "darwin":
+            paths.extend([
+                Path("/Library/Application Support/Allied Vision/Vimba X/cti"),
+                self.APP_ROOT / "assets" / "vimbax" / "cti",
+            ])
+
+        return [str(path.resolve()) for path in paths if path.exists()]
 
     def connect_direct_vimba_camera(self):
         if self.vmb is None:
