@@ -889,6 +889,21 @@ class VimbaSALSWidget(QWidget):
             }
         """)
         preview_layout.addWidget(self.preview_coordinate_label, 0)
+
+        self.camera_help_label = QLabel("")
+        self.camera_help_label.setWordWrap(True)
+        self.camera_help_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.camera_help_label.setVisible(False)
+        self.camera_help_label.setStyleSheet("""
+            QLabel {
+                background: #fff3f3;
+                border: 1px solid #d88a8a;
+                border-radius: 10px;
+                padding: 10px 12px;
+                color: #111111;
+            }
+        """)
+        preview_layout.addWidget(self.camera_help_label, 0)
         self.build_smc_controls(body_layout)
 
     def style_acquisition_fields(self):
@@ -1380,6 +1395,9 @@ class VimbaSALSWidget(QWidget):
             set_widget_enabled_with_opacity(self.record_play_button, has_frame and not self.is_recording_frames)
         if hasattr(self, "record_stop_button"):
             set_widget_enabled_with_opacity(self.record_stop_button, has_frame and self.is_recording_frames)
+        if hasattr(self, "camera_help_label") and connected:
+            self.camera_help_label.setVisible(False)
+            self.camera_help_label.clear()
 
     def request_back(self):
         if self.live_timer.isActive():
@@ -1434,7 +1452,7 @@ class VimbaSALSWidget(QWidget):
             QApplication.processEvents()
             self.apply_camera_settings()
             self.sync_fields_from_camera()
-            self.status_label.setText(f"Connected: {camera_id}")
+            self.set_camera_message(f"Connected: {camera_id}", clear_help=True)
             self.update_connection_state(True)
         except Exception as exc:
             self.disconnect_camera()
@@ -1447,7 +1465,7 @@ class VimbaSALSWidget(QWidget):
         self.camera_connect_timeout_timer.stop()
         self.disconnect_camera()
         self.update_connection_state(False)
-        self.status_label.setText(f"Camera connection failed: {message} {self.no_vimba_camera_message()}")
+        self.show_camera_error_help(message)
 
     def handle_camera_connect_timeout(self):
         self.camera_connect_timed_out = True
@@ -1462,7 +1480,7 @@ class VimbaSALSWidget(QWidget):
                 " On Windows, also check that Python/LRPhoton is allowed through Windows Firewall "
                 "and that the Ethernet adapter is on the same subnet as the camera."
             )
-        self.status_label.setText(
+        self.show_camera_error_help(
             f"Camera connection timeout after 15 s. Close Vimba X Viewer, check that Camera IP is {camera_ip}, "
             f"then retry.{windows_hint}"
         )
@@ -1535,8 +1553,10 @@ class VimbaSALSWidget(QWidget):
         message = "No Vimba camera detected. Quit Vimba X Viewer, unplug/replug the camera, then retry."
         if sys.platform.startswith("win"):
             message += (
-                f" On Windows, check that Camera IP is {camera_ip}, the Ethernet adapter is on the same subnet, "
-                "and Windows Firewall allows LRPhoton/Python private-network access."
+                f" On Windows, IP connection may fail depending on the Vimba/GigE network setup. "
+                f"Check that Camera IP is {camera_ip}, that the Ethernet adapter is on the same subnet, "
+                "and that Windows Firewall allows LRPhoton/Python private-network access. "
+                "If direct IP still fails, use automatic camera discovery from Vimba X Viewer / VmbPy instead of forcing the IP."
             )
         elif sys.platform == "darwin":
             message += (
@@ -1551,6 +1571,39 @@ class VimbaSALSWidget(QWidget):
         if gentl_paths:
             message += f" GENICAM_GENTL64_PATH={gentl_paths}."
         return message
+
+    def set_camera_message(self, message, clear_help=False):
+        self.status_label.setText(message)
+        if clear_help and hasattr(self, "camera_help_label"):
+            self.camera_help_label.setVisible(False)
+            self.camera_help_label.clear()
+
+    def show_camera_error_help(self, message):
+        details = self.no_vimba_camera_message()
+        full_message = f"Camera connection failed: {message} {details}".strip()
+        self.status_label.setText("Camera connection failed. See details below the preview.")
+        if not hasattr(self, "camera_help_label"):
+            return
+        self.camera_help_label.setText(
+            "<b>Vimba camera communication error</b><br>"
+            f"{self.escape_html(full_message)}<br><br>"
+            "<b>What to try</b><br>"
+            "• Close Vimba X Viewer, unplug/replug the camera, then retry.<br>"
+            "• Check camera power and the USB/GigE cable.<br>"
+            "• On Windows, allow LRPhoton/Python through Windows Firewall on private networks.<br>"
+            "• Check that the Ethernet adapter is on the same subnet as the camera.<br>"
+            "• If direct IP works on macOS but not Windows, leave the IP field empty or use Vimba automatic discovery instead of forcing the IP."
+        )
+        self.camera_help_label.setVisible(True)
+
+    def escape_html(self, text):
+        return (
+            str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
 
     def vimba_transport_layers_text(self):
         if self.vmb is None:
