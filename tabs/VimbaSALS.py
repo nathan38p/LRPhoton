@@ -716,7 +716,7 @@ class VimbaSALSWidget(QWidget):
         self.pixel_format_combo.setEditable(True)
         self.pixel_format_combo.setMaxVisibleItems(3)
         self.pixel_format_combo.addItems([
-            self.DEFAULT_PIXEL_FORMAT,
+            "Mono12Packed",
             "Mono12",
             "Mono12p",
             "Mono16",
@@ -2392,7 +2392,7 @@ class VimbaSALSWidget(QWidget):
             return self.convert_frame_to_numpy(frame, source_format)
 
         try:
-            return frame.as_numpy_ndarray()
+            return np.array(frame.as_numpy_ndarray(), copy=True)
         except Exception as error:
             if "PixelFormat" not in str(error):
                 raise
