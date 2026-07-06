@@ -140,7 +140,7 @@ class SMC100Device:
     def connect(self, port=None):
         try:
             import serial
-        except ImportError as exc:
+        except ImportError:
             raise RuntimeError("pyserial is missing. Install the 'pyserial' dependency.") from exc
 
         requested_port = port or self.port or self.detect_port()
@@ -246,7 +246,7 @@ class ArduinoPositionDevice:
     def connect(self, port=None):
         try:
             import serial
-        except ImportError as exc:
+        except ImportError:
             raise RuntimeError("pyserial is missing. Install the 'pyserial' dependency.") from exc
 
         self.port = port or self.port or self.detect_port()
@@ -311,18 +311,20 @@ class VimbaCameraConnectionThread(QThread):
         vmb = None
         camera = None
         try:
+            self.progress.emit("Loading VmbPy camera runtime...")
             from vmbpy import VmbSystem
 
             self.progress.emit("Starting Vimba system...")
             vmb = VmbSystem.get_instance()
             vmb.__enter__()
 
-            self.progress.emit("Trying direct Vimba camera lookup...")
+            self.progress.emit(f"Trying direct Vimba camera lookup: {', '.join(self.identifiers)}")
             camera = self.direct_camera(vmb)
             if camera is None:
                 self.progress.emit("Discovering Vimba cameras...")
                 cameras = self.discover_cameras(vmb)
                 if cameras:
+                    self.progress.emit(f"Found {len(cameras)} Vimba camera(s). Selecting camera...")
                     camera = self.select_camera(cameras)
             if camera is None:
                 raise RuntimeError("No Vimba camera detected by VmbPy.")
@@ -330,6 +332,10 @@ class VimbaCameraConnectionThread(QThread):
             self.progress.emit("Opening Vimba camera...")
             camera.__enter__()
             self.connected.emit(vmb, camera, self.camera_label(camera))
+        except ImportError as exc:
+            self.failed.emit(
+                "VmbPy is missing. Reinstall or update LRPhoton with the bundled camera support."
+            )
         except Exception as exc:
             if camera is not None:
                 try:
@@ -1338,17 +1344,17 @@ class VimbaSALSWidget(QWidget):
 
     def connect_camera(self):
         if self.camera_connect_thread is not None and self.camera_connect_thread.isRunning():
-            self.status_label.setText("Camera connection already in progress...")
+            if self.camera_connect_timed_out:
+                self.status_label.setText(
+                    "Previous Vimba connection is still waiting inside the camera runtime. "
+                    "Restart LRPhoton after closing Vimba X Viewer, then retry."
+                )
+            else:
+                self.status_label.setText("Camera connection already in progress...")
             return
         self.status_label.setText("Connecting to Vimba camera...")
         self.connect_button.setEnabled(False)
         QApplication.processEvents()
-        try:
-            import vmbpy  # noqa: F401
-        except ImportError:
-            self.status_label.setText("VmbPy is missing. Reinstall or update LRPhoton with the bundled camera support.")
-            self.update_connection_state(False)
-            return
 
         self.camera_connect_timed_out = False
         self.camera_connect_thread = VimbaCameraConnectionThread(
@@ -1401,9 +1407,19 @@ class VimbaSALSWidget(QWidget):
     def handle_camera_connect_timeout(self):
         self.camera_connect_timed_out = True
         self.update_connection_state(False)
+        camera_ip = ""
+        if getattr(self, "camera_ip_edit", None) is not None:
+            camera_ip = self.camera_ip_edit.text().strip()
+        camera_ip = camera_ip or self.DEFAULT_CAMERA_IP
+        windows_hint = ""
+        if sys.platform.startswith("win"):
+            windows_hint = (
+                " On Windows, also check that Python/LRPhoton is allowed through Windows Firewall "
+                "and that the Ethernet adapter is on the same subnet as the camera."
+            )
         self.status_label.setText(
-            "Camera connection timeout after 15 s. Close Vimba X Viewer, check that the "
-            "Camera IP is 169.254.242.220, then retry."
+            f"Camera connection timeout after 15 s. Close Vimba X Viewer, check that Camera IP is {camera_ip}, "
+            f"then retry.{windows_hint}"
         )
 
     def cleanup_camera_connect_thread(self):
@@ -1449,13 +1465,24 @@ class VimbaSALSWidget(QWidget):
     def no_vimba_camera_message(self):
         gentl_paths = self.vimba_gentl_paths_text()
         transport_layers = self.vimba_transport_layers_text()
-        message = (
-            "No Vimba camera detected. Quit Vimba X Viewer, unplug/replug the camera, "
-            "then retry. On macOS with a GigE camera, allow LRPhoton/Python in "
-            "System Settings > Privacy & Security > Local Network. If Wi-Fi interferes "
-            "with GigE discovery, keep the Camera IP field set to the Force IP address "
-            "shown in Vimba X Viewer."
-        )
+        camera_ip = ""
+        if getattr(self, "camera_ip_edit", None) is not None:
+            camera_ip = self.camera_ip_edit.text().strip()
+        camera_ip = camera_ip or self.DEFAULT_CAMERA_IP
+        message = "No Vimba camera detected. Quit Vimba X Viewer, unplug/replug the camera, then retry."
+        if sys.platform.startswith("win"):
+            message += (
+                f" On Windows, check that Camera IP is {camera_ip}, the Ethernet adapter is on the same subnet, "
+                "and Windows Firewall allows LRPhoton/Python private-network access."
+            )
+        elif sys.platform == "darwin":
+            message += (
+                " On macOS with a GigE camera, allow LRPhoton/Python in System Settings > Privacy & Security "
+                "> Local Network. If Wi-Fi interferes with GigE discovery, keep the Camera IP field set to the "
+                "Force IP address shown in Vimba X Viewer."
+            )
+        else:
+            message += f" Check that Camera IP is {camera_ip} and that the Ethernet adapter is on the same subnet."
         if transport_layers:
             message += f" Transport layers loaded: {transport_layers}."
         if gentl_paths:
