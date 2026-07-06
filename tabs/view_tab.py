@@ -96,6 +96,50 @@ def emoji_icon(emoji, size=16):
     return QIcon(pix)
 
 
+def apply_emoji_icons_to_toolbar(toolbar, size=14):
+    try:
+        # prefer an emoji-capable font on Windows
+        if platform.system() == "Windows":
+            font = QFont("Segoe UI Emoji", max(8, int(size * 0.8)))
+        else:
+            font = QFont()
+    except Exception:
+        font = QFont()
+
+    for tb in toolbar.findChildren(QToolButton):
+        try:
+            txt = tb.text() or ""
+            if txt and any(ord(c) > 127 for c in txt):
+                tb.setIcon(emoji_icon(txt.strip(), size))
+                tb.setText("")
+                try:
+                    tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
+                except Exception:
+                    pass
+                try:
+                    tb.setFont(font)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
+# Monkeypatch NavigationToolbar to apply emoji icons after initialization
+try:
+    _orig_nav_init = NavigationToolbar.__init__
+
+    def _nav_init_and_patch(self, canvas, parent):
+        _orig_nav_init(self, canvas, parent)
+        try:
+            apply_emoji_icons_to_toolbar(self)
+        except Exception:
+            pass
+
+    NavigationToolbar.__init__ = _nav_init_and_patch
+except Exception:
+    pass
+
+
 class ImageOnlyToolbar(NavigationToolbar):
 
     def __init__(self, canvas, parent):
