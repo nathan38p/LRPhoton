@@ -12,6 +12,7 @@ import importlib.util
 import locale
 import threading
 import uuid
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -35,6 +36,75 @@ LOCAL_PYTHON_WHEELS = [
 #test update2
 
 _VIMBAX_DLL_DIRECTORIES = []
+_STARTUP_ERROR_SHOWN = False
+
+
+def startup_log_path():
+    if sys.platform.startswith("win"):
+        base = os.getenv("LOCALAPPDATA") or os.getenv("TEMP") or str(Path.home())
+        return Path(base) / "LRPhoton" / "startup-error.log"
+    return Path.home() / ".lrphoton" / "startup-error.log"
+
+
+def write_startup_error(context, error):
+    try:
+        path = startup_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"{datetime.now().isoformat(timespec='seconds')} - {context}\n"
+            f"Python: {sys.executable}\n"
+            f"Working directory: {os.getcwd()}\n\n"
+            f"{''.join(traceback.format_exception(type(error), error, error.__traceback__))}",
+            encoding="utf-8",
+        )
+        return path
+    except Exception:
+        return None
+
+
+def show_startup_error(context, error):
+    global _STARTUP_ERROR_SHOWN
+    if _STARTUP_ERROR_SHOWN:
+        return
+    _STARTUP_ERROR_SHOWN = True
+
+    log_path = write_startup_error(context, error)
+    message = f"LRPhoton could not start.\n\n{error}"
+    if log_path is not None:
+        message += f"\n\nDetails were written to:\n{log_path}"
+
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, message, "LRPhoton startup error", 0x10)
+        except Exception:
+            pass
+
+
+def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
+    show_startup_error("uncaught exception", exc_value)
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+
+sys.excepthook = handle_uncaught_exception
+
+
+def subprocess_startup_kwargs():
+    if not sys.platform.startswith("win"):
+        return {}
+    try:
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    except AttributeError:
+        return {}
+
+
+def python_console_executable():
+    executable = Path(sys.executable)
+    if sys.platform.startswith("win") and executable.name.lower() == "pythonw.exe":
+        python_exe = executable.with_name("python.exe")
+        if python_exe.exists():
+            return str(python_exe)
+    return sys.executable
 
 def bundled_file_path(*parts):
     bases = []
@@ -121,13 +191,13 @@ def ensure_local_python_wheels():
             continue
         try:
             subprocess.check_call([
-                sys.executable,
+                python_console_executable(),
                 "-m",
                 "pip",
                 "install",
                 "--disable-pip-version-check",
                 str(wheel_path),
-            ])
+            ], **subprocess_startup_kwargs())
         except subprocess.CalledProcessError:
             pass
 
@@ -148,7 +218,7 @@ def ensure_required_python_modules():
         return
 
     pip_command = [
-        sys.executable,
+        python_console_executable(),
         "-m",
         "pip",
         "install",
@@ -157,22 +227,29 @@ def ensure_required_python_modules():
     ]
 
     try:
-        subprocess.check_call(pip_command)
+        subprocess.check_call(pip_command, **subprocess_startup_kwargs())
     except subprocess.CalledProcessError:
         try:
-            subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
-            subprocess.check_call(pip_command)
+            subprocess.check_call(
+                [python_console_executable(), "-m", "ensurepip", "--upgrade"],
+                **subprocess_startup_kwargs(),
+            )
+            subprocess.check_call(pip_command, **subprocess_startup_kwargs())
         except Exception as error:
             package_list = ", ".join(missing_packages)
             raise RuntimeError(
                 f"Impossible to install missing LRPhoton dependencies: {package_list}.\n"
-                f"Run manually: {sys.executable} -m pip install {' '.join(missing_packages)}"
+                f"Run manually: {python_console_executable()} -m pip install {' '.join(missing_packages)}"
             ) from error
 
 
-configure_bundled_vimbax_runtime()
-ensure_required_python_modules()
-ensure_local_python_wheels()
+try:
+    configure_bundled_vimbax_runtime()
+    ensure_required_python_modules()
+    ensure_local_python_wheels()
+except Exception as error:
+    show_startup_error("pre-Qt initialization", error)
+    raise
 
 
 import requests
@@ -1765,72 +1842,76 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    if sys.platform == "darwin":
-        QCoreApplication.setAttribute(Qt.AA_DontUseNativeMenuBar, False)
-    app = QApplication(sys.argv)
-    apply_light_theme(app)
-    app.setApplicationName(APP_NAME)
-    app.setApplicationDisplayName(APP_NAME)
-    app.setOrganizationName("LRP")
-    app.setWindowIcon(make_application_icon())
+    try:
+        if sys.platform == "darwin":
+            QCoreApplication.setAttribute(Qt.AA_DontUseNativeMenuBar, False)
+        app = QApplication(sys.argv)
+        apply_light_theme(app)
+        app.setApplicationName(APP_NAME)
+        app.setApplicationDisplayName(APP_NAME)
+        app.setOrganizationName("LRP")
+        app.setWindowIcon(make_application_icon())
 
-    app.setStyleSheet("""
-        QTabWidget::pane {
-            border: none;
-            background: transparent;
-        }
+        app.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background: transparent;
+            }
 
-        QLabel {
-            color: #111111;
-            background: transparent;
-        }
+            QLabel {
+                color: #111111;
+                background: transparent;
+            }
 
-        QTextEdit, QPlainTextEdit {
-            background-color: #ffffff;
-            color: #111111;
-            selection-background-color: #007aff;
-            selection-color: #ffffff;
-        }
+            QTextEdit, QPlainTextEdit {
+                background-color: #ffffff;
+                color: #111111;
+                selection-background-color: #007aff;
+                selection-color: #ffffff;
+            }
 
-        QTreeWidget, QTableWidget, QTableView {
-            background-color: #ffffff;
-            color: #111111;
-            selection-background-color: #007aff;
-            selection-color: #ffffff;
-        }
+            QTreeWidget, QTableWidget, QTableView {
+                background-color: #ffffff;
+                color: #111111;
+                selection-background-color: #007aff;
+                selection-color: #ffffff;
+            }
 
-        QListWidget {
-            background-color: transparent;
-            color: #111111;
-            border: none;
-            selection-background-color: #007aff;
-            selection-color: #ffffff;
-        }
+            QListWidget {
+                background-color: transparent;
+                color: #111111;
+                border: none;
+                selection-background-color: #007aff;
+                selection-color: #ffffff;
+            }
 
-        QListWidget::viewport {
-            background-color: transparent;
-        }
+            QListWidget::viewport {
+                background-color: transparent;
+            }
 
-        QMenu::item:selected {
-            background-color: #007aff;
-            color: #ffffff;
-        }
-    """)
+            QMenu::item:selected {
+                background-color: #007aff;
+                color: #ffffff;
+            }
+        """)
 
-    window = MainWindow()
-    QTimer.singleShot(2000, window.send_usage_ping)
-    if "--force-update-check" in sys.argv:
-        QTimer.singleShot(400, lambda: window.check_for_updates(silent=False))
-    elif window.can_check_for_updates():
-        QTimer.singleShot(1200, lambda: window.check_for_updates(silent=window.silent_update_test))
-    else:
-        window.version_label.setVisible(False)
-        window.version_label.setEnabled(False)
-        if hasattr(window, "update_status_label"):
-            window.update_status_label.setVisible(False)
-            window.update_status_label.setEnabled(False)
+        window = MainWindow()
+        QTimer.singleShot(2000, window.send_usage_ping)
+        if "--force-update-check" in sys.argv:
+            QTimer.singleShot(400, lambda: window.check_for_updates(silent=False))
+        elif window.can_check_for_updates():
+            QTimer.singleShot(1200, lambda: window.check_for_updates(silent=window.silent_update_test))
+        else:
+            window.version_label.setVisible(False)
+            window.version_label.setEnabled(False)
+            if hasattr(window, "update_status_label"):
+                window.update_status_label.setVisible(False)
+                window.update_status_label.setEnabled(False)
 
-    sys.exit(app.exec())
+        sys.exit(app.exec())
+    except Exception as error:
+        show_startup_error("Qt startup", error)
+        raise
 
 
 if __name__ == "__main__":
