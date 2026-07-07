@@ -2,7 +2,7 @@ import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QIcon, QValidator
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QValidator
 from PySide6.QtWidgets import QDoubleSpinBox, QGraphicsOpacityEffect, QGroupBox, QVBoxLayout, QHBoxLayout, QToolButton
 
 
@@ -120,6 +120,23 @@ MATPLOTLIB_TOOLBAR_BUTTON_SIZE = QSize(32, 32)
 MATPLOTLIB_TOOLBAR_EMOJI_SIZE = 28
 
 
+def emoji_icon(emoji, size=MATPLOTLIB_TOOLBAR_EMOJI_SIZE):
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    try:
+        font = QFont("Segoe UI Emoji", max(1, int(size * 0.82)))
+    except Exception:
+        font = QFont()
+    painter.setFont(font)
+    painter.setPen(QColor(0, 0, 0))
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, emoji)
+    painter.end()
+
+    return QIcon(pixmap)
+
+
 def normalize_decimal_text(text):
     text = str(text).strip().replace(" ", "")
     if "," in text and "." in text:
@@ -179,7 +196,7 @@ def toolbar_action_text(action):
 
 def emojiize_matplotlib_toolbar(toolbar, button_size=MATPLOTLIB_TOOLBAR_BUTTON_SIZE, remove_customize=False):
     try:
-        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
     except Exception:
         pass
 
@@ -199,8 +216,8 @@ def emojiize_matplotlib_toolbar(toolbar, button_size=MATPLOTLIB_TOOLBAR_BUTTON_S
             original_text = action.text()
             if not action.toolTip():
                 action.setToolTip(original_text)
-            action.setIcon(QIcon())
-            action.setText(emoji)
+            action.setIcon(emoji_icon(emoji))
+            action.setText("")
         except Exception:
             pass
 
@@ -208,6 +225,7 @@ def emojiize_matplotlib_toolbar(toolbar, button_size=MATPLOTLIB_TOOLBAR_BUTTON_S
         widget = toolbar.widgetForAction(action)
         if isinstance(widget, QToolButton):
             try:
+                widget.setIconSize(QSize(MATPLOTLIB_TOOLBAR_EMOJI_SIZE, MATPLOTLIB_TOOLBAR_EMOJI_SIZE))
                 widget.setFixedSize(button_size)
                 widget.setStyleSheet(f"""
                     QToolButton {{
@@ -216,7 +234,6 @@ def emojiize_matplotlib_toolbar(toolbar, button_size=MATPLOTLIB_TOOLBAR_BUTTON_S
                         border: none;
                         padding: 0px;
                         margin: 0px;
-                        font-size: {MATPLOTLIB_TOOLBAR_EMOJI_SIZE}px;
                         min-width: {button_size.width()}px;
                         max-width: {button_size.width()}px;
                         min-height: {button_size.height()}px;
@@ -616,7 +633,9 @@ def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, s
         if (
             action.isSeparator()
             or text in ["save", "save the figure", "save image only"]
-            or "subplots" in text
+            or "save image only" in label
+            or "save the figure" in label
+            or "subplots" in label
             or (remove_customize and ("customize" in label or "edit axis" in label))
         ):
             try:
@@ -631,7 +650,7 @@ def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, s
         if isinstance(widget, QToolButton):
             try:
                 widget.setFixedSize(toolbar_button_size)
-                widget.setIconSize(toolbar_icon_size)
+                widget.setIconSize(QSize(MATPLOTLIB_TOOLBAR_EMOJI_SIZE, MATPLOTLIB_TOOLBAR_EMOJI_SIZE))
             except Exception:
                 pass
 
@@ -648,9 +667,11 @@ def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, s
     save_button = None
     if save_callback is not None:
         save_button = QToolButton(parent)
-        save_button.setText("💾")
+        save_button.setIcon(emoji_icon("💾"))
         save_button.setToolTip(save_tooltip)
         save_button.setFixedSize(toolbar_button_size)
+        save_button.setIconSize(QSize(MATPLOTLIB_TOOLBAR_EMOJI_SIZE, MATPLOTLIB_TOOLBAR_EMOJI_SIZE))
+        save_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
         try:
             save_button.clicked.connect(save_callback)
         except Exception:
@@ -662,7 +683,6 @@ def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, s
                 border: none;
                 padding: 0px;
                 margin: 0px;
-                font-size: 28px;
                 min-width: 32px;
                 max-width: 32px;
                 min-height: 32px;
