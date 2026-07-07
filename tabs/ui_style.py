@@ -194,6 +194,25 @@ def toolbar_action_text(action):
     return f"{text} {tooltip}"
 
 
+def style_matplotlib_toolbar_button(button, button_size=MATPLOTLIB_TOOLBAR_BUTTON_SIZE):
+    button.setFixedSize(button_size)
+    button.setIconSize(QSize(MATPLOTLIB_TOOLBAR_EMOJI_SIZE, MATPLOTLIB_TOOLBAR_EMOJI_SIZE))
+    button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+    button.setStyleSheet(f"""
+        QToolButton {{
+            background: transparent;
+            background-color: transparent;
+            border: none;
+            padding: 0px;
+            margin: 0px;
+            min-width: {button_size.width()}px;
+            max-width: {button_size.width()}px;
+            min-height: {button_size.height()}px;
+            max-height: {button_size.height()}px;
+        }}
+    """)
+
+
 def emojiize_matplotlib_toolbar(toolbar, button_size=MATPLOTLIB_TOOLBAR_BUTTON_SIZE, remove_customize=False):
     try:
         toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -225,21 +244,7 @@ def emojiize_matplotlib_toolbar(toolbar, button_size=MATPLOTLIB_TOOLBAR_BUTTON_S
         widget = toolbar.widgetForAction(action)
         if isinstance(widget, QToolButton):
             try:
-                widget.setIconSize(QSize(MATPLOTLIB_TOOLBAR_EMOJI_SIZE, MATPLOTLIB_TOOLBAR_EMOJI_SIZE))
-                widget.setFixedSize(button_size)
-                widget.setStyleSheet(f"""
-                    QToolButton {{
-                        background: transparent;
-                        background-color: transparent;
-                        border: none;
-                        padding: 0px;
-                        margin: 0px;
-                        min-width: {button_size.width()}px;
-                        max-width: {button_size.width()}px;
-                        min-height: {button_size.height()}px;
-                        max-height: {button_size.height()}px;
-                    }}
-                """)
+                style_matplotlib_toolbar_button(widget, button_size)
             except Exception:
                 pass
 
@@ -649,8 +654,7 @@ def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, s
         widget = toolbar.widgetForAction(action)
         if isinstance(widget, QToolButton):
             try:
-                widget.setFixedSize(toolbar_button_size)
-                widget.setIconSize(QSize(MATPLOTLIB_TOOLBAR_EMOJI_SIZE, MATPLOTLIB_TOOLBAR_EMOJI_SIZE))
+                style_matplotlib_toolbar_button(widget, toolbar_button_size)
             except Exception:
                 pass
 
@@ -667,28 +671,13 @@ def make_matplotlib_toolbar_block(parent, title, toolbar, option_widgets=None, s
     save_button = None
     if save_callback is not None:
         save_button = QToolButton(parent)
-        save_button.setIcon(emoji_icon("💾"))
+        save_button.setIcon(emoji_icon("💾", MATPLOTLIB_TOOLBAR_EMOJI_SIZE))
         save_button.setToolTip(save_tooltip)
-        save_button.setFixedSize(toolbar_button_size)
-        save_button.setIconSize(QSize(MATPLOTLIB_TOOLBAR_EMOJI_SIZE, MATPLOTLIB_TOOLBAR_EMOJI_SIZE))
-        save_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        style_matplotlib_toolbar_button(save_button, toolbar_button_size)
         try:
             save_button.clicked.connect(save_callback)
         except Exception:
             pass
-        save_button.setStyleSheet("""
-            QToolButton {
-                background: transparent;
-                background-color: transparent;
-                border: none;
-                padding: 0px;
-                margin: 0px;
-                min-width: 32px;
-                max-width: 32px;
-                min-height: 32px;
-                max-height: 32px;
-            }
-        """)
         toolbar_extra_layout.addWidget(save_button, stretch=0, alignment=Qt.AlignVCenter)
 
     toolbar_layout.addLayout(toolbar_extra_layout)
