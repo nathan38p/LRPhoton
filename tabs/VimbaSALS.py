@@ -2527,11 +2527,9 @@ class VimbaSALSWidget(QWidget):
                 return
             frame_status = self.frame_status_text(frame)
             frame_is_complete = self.frame_status_is_complete(frame_status)
-            if not self.frame_status_is_complete(frame_status):
+            self.last_frame_status = frame_status
+            if not frame_is_complete:
                 self.incomplete_frame_count += 1
-                self.last_frame_status = frame_status
-            else:
-                self.last_frame_status = frame_status
             image = np.asarray(self.frame_to_numpy(frame))
             if image.ndim == 3 and image.shape[-1] == 1:
                 image = image[:, :, 0]
