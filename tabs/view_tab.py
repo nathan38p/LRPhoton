@@ -55,6 +55,7 @@ from .instrument_presets import (
 )
 from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path, should_hide_file_in_browser
 from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton, parse_header_text
+from .q_map_io import is_real_geometry_h5, read_h5_q_map
 from .ui_style import (
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
@@ -1004,7 +1005,7 @@ class CompositeImageDialog(QDialog):
         self.composite_name_filter = QLineEdit()
         self.composite_name_filter.setPlaceholderText("Name filter")
         self.composite_name_filter.textChanged.connect(self.refresh_source_files)
-        self.composite_extension_filter = QLineEdit("*.h5 *.hdf5")
+        self.composite_extension_filter = QLineEdit("*.edf *.h5 *.hdf5")
         self.composite_extension_filter.setPlaceholderText("Extensions")
         self.composite_extension_filter.textChanged.connect(self.refresh_source_files)
         self.composite_show_subfolders_checkbox = QCheckBox("Show subfolders")
@@ -1020,17 +1021,17 @@ class CompositeImageDialog(QDialog):
         self.browser_file_list = QListWidget()
         self.browser_file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.browser_file_list.setMinimumHeight(150)
-        self.browser_file_list.itemDoubleClicked.connect(lambda _item: self.add_selected_h5_files())
+        self.browser_file_list.itemDoubleClicked.connect(lambda _item: self.add_selected_files())
         source_layout.addWidget(self.browser_file_list)
 
         source_buttons = QHBoxLayout()
-        self.add_h5_button = QPushButton("Add selected H5")
-        self.add_h5_button.clicked.connect(self.add_selected_h5_files)
+        self.add_files_button = QPushButton("Add selected files")
+        self.add_files_button.clicked.connect(self.add_selected_files)
         self.choose_multi_h5_button = QPushButton("Use selected as multi H5")
         self.choose_multi_h5_button.clicked.connect(self.choose_selected_multi_h5)
         self.clear_button = QPushButton("Clear")
         self.clear_button.clicked.connect(self.clear_entries)
-        source_buttons.addWidget(self.add_h5_button)
+        source_buttons.addWidget(self.add_files_button)
         source_buttons.addWidget(self.choose_multi_h5_button)
         source_buttons.addWidget(self.clear_button)
         source_layout.addLayout(source_buttons)
@@ -1126,7 +1127,7 @@ class CompositeImageDialog(QDialog):
         self.canvas = FigureCanvas(self.fig)
         layout.addWidget(self.canvas, 1)
 
-        self.status_label = QLabel("Choose separate H5 files or a range from one multi-frame H5.")
+        self.status_label = QLabel("Choose separate EDF/H5 files or a range from one multi-frame H5.")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
@@ -1178,6 +1179,26 @@ class CompositeImageDialog(QDialog):
                 return np.asarray(dataset[:, frame_index, :], dtype=float)
             return np.asarray(dataset[:, :, frame_index], dtype=float)
 
+    def read_edf_frame(self, path, frame_index=0):
+        try:
+            import fabio
+        except ImportError:
+            raise ImportError("fabio is required to read EDF files.")
+
+        edf = fabio.open(str(path))
+        try:
+            nframes = int(getattr(edf, "nframes", 1) or 1)
+            if nframes <= 1:
+                return np.asarray(edf.data, dtype=float)
+            if frame_index < 0 or frame_index >= nframes:
+                raise IndexError(f"EDF frame {frame_index + 1} is outside 1-{nframes}.")
+            return np.asarray(edf.getframe(frame_index).data, dtype=float)
+        finally:
+            try:
+                edf.close()
+            except Exception:
+                pass
+
     def choose_source_folder(self):
         folder = QFileDialog.getExistingDirectory(
             self,
@@ -1191,7 +1212,7 @@ class CompositeImageDialog(QDialog):
     def extension_patterns(self):
         text = self.composite_extension_filter.text().strip()
         if not text:
-            return ["*.h5", "*.hdf5"]
+            return ["*.edf", "*.h5", "*.hdf5"]
         return [part.strip() for part in re.split(r"[;,\s]+", text) if part.strip()]
 
     def refresh_source_files(self):
@@ -1231,29 +1252,43 @@ class CompositeImageDialog(QDialog):
                 paths.append(stored_path)
         return paths
 
-    def add_selected_h5_files(self):
+    def add_selected_files(self):
         paths = self.selected_browser_paths()
         if not paths:
-            QMessageBox.information(self, "Composite H5", "Select one or more H5 files in the list first.")
+            QMessageBox.information(self, "Composite images", "Select one or more EDF/H5 files in the list first.")
             return
 
         errors = []
-        for path in paths:
+        for path_text in paths:
+            path = Path(path_text).expanduser()
             try:
-                _score, dataset_name, shape, frame_axis, _n_frames, _image_shape = self.preferred_h5_dataset(path)
-                self.entries.append({
-                    "path": path,
-                    "dataset": dataset_name,
-                    "frame_axis": frame_axis,
-                    "frame": 0,
-                    "title": Path(path).stem,
-                })
-                self.file_list.addItem(f"{Path(path).name}  {dataset_name}  {shape}")
+                suffix = path.suffix.lower()
+                if suffix == ".edf":
+                    self.entries.append({
+                        "format": "edf",
+                        "path": str(path),
+                        "frame": 0,
+                        "title": path.stem,
+                    })
+                    self.file_list.addItem(f"{path.name}  EDF")
+                elif suffix in {".h5", ".hdf5"}:
+                    _score, dataset_name, shape, frame_axis, _n_frames, _image_shape = self.preferred_h5_dataset(path)
+                    self.entries.append({
+                        "format": "h5",
+                        "path": str(path),
+                        "dataset": dataset_name,
+                        "frame_axis": frame_axis,
+                        "frame": 0,
+                        "title": path.stem,
+                    })
+                    self.file_list.addItem(f"{path.name}  {dataset_name}  {shape}")
+                else:
+                    raise ValueError("Unsupported file format.")
             except Exception as error:
-                errors.append(f"{Path(path).name}: {error}")
+                errors.append(f"{path.name}: {error}")
 
         if errors:
-            QMessageBox.warning(self, "Composite H5", "\n".join(errors))
+            QMessageBox.warning(self, "Composite images", "\n".join(errors))
         self.load_preview_images()
 
     def choose_selected_multi_h5(self):
@@ -1261,7 +1296,10 @@ class CompositeImageDialog(QDialog):
         if not paths:
             QMessageBox.information(self, "Composite H5", "Select one multi-frame H5 file in the list first.")
             return
-        path = paths[0]
+        path = Path(paths[0]).expanduser()
+        if path.suffix.lower() not in {".h5", ".hdf5"}:
+            QMessageBox.information(self, "Composite H5", "The multi-frame range tool only works with H5 files.")
+            return
 
         try:
             _score, dataset_name, shape, frame_axis, n_frames, _image_shape = self.preferred_h5_dataset(path)
@@ -1293,6 +1331,7 @@ class CompositeImageDialog(QDialog):
 
         for frame_number in range(start, end + 1, step):
             self.entries.append({
+                "format": "h5",
                 "path": self.multi_h5_path,
                 "dataset": self.multi_dataset_name,
                 "frame_axis": self.multi_frame_axis,
@@ -1329,7 +1368,10 @@ class CompositeImageDialog(QDialog):
 
         for entry in self.entries[:max_images]:
             try:
-                images.append(self.read_h5_frame(entry["path"], entry["dataset"], entry["frame_axis"], entry["frame"]))
+                if entry.get("format") == "edf":
+                    images.append(self.read_edf_frame(entry["path"], entry.get("frame", 0)))
+                else:
+                    images.append(self.read_h5_frame(entry["path"], entry["dataset"], entry["frame_axis"], entry["frame"]))
                 titles.append(entry["title"])
             except Exception as error:
                 errors.append(f"{entry['title']}: {error}")
@@ -1337,7 +1379,7 @@ class CompositeImageDialog(QDialog):
         self.preview_images = images
         self.preview_titles = titles
         if errors:
-            QMessageBox.warning(self, "Composite H5", "\n".join(errors))
+            QMessageBox.warning(self, "Composite images", "\n".join(errors))
         self.auto_intensity()
 
     def auto_intensity(self):
@@ -1417,7 +1459,7 @@ class CompositeImageDialog(QDialog):
 
     def save_composite(self):
         if not self.preview_images:
-            QMessageBox.information(self, "Composite H5", "No composite image to save.")
+            QMessageBox.information(self, "Composite images", "No composite image to save.")
             return
 
         start_folder = str(self.view_tab.current_file.parent) if self.view_tab.current_file is not None else str(Path.home())
@@ -2066,6 +2108,8 @@ class ViewTab(QWidget):
         self.images = None
         self.display_img = None
         self.raw_current_img = None
+        self.q_map_current = None
+        self.suppress_q_current = False
         self.headers = {}
         self.complementary_geometry_metadata = []
         self.h5_datasets = []
@@ -2879,6 +2923,8 @@ class ViewTab(QWidget):
         self.images = None
         self.display_img = None
         self.raw_current_img = None
+        self.q_map_current = None
+        self.suppress_q_current = False
         self.headers = {}
         self.complementary_geometry_metadata = []
         self.h5_datasets = []
@@ -3154,6 +3200,8 @@ class ViewTab(QWidget):
                 self.headers[f"File attribute - {key}"] = str(value)
 
             self.add_matching_geometry_to_headers()
+            self.q_map_current = read_h5_q_map(self.current_file, image_shape)
+            self.suppress_q_current = is_real_geometry_h5(self.current_file)
 
         except Exception as e:
             raise RuntimeError(f"Unable to read this H5 dataset:\n{e}")
@@ -3571,6 +3619,22 @@ class ViewTab(QWidget):
 
         return self.images[self.current_index]
 
+    def q_map_value_at_pixel(self, x_index, y_index):
+        q_map = getattr(self, "q_map_current", None)
+        if q_map is None:
+            return None
+        if not (0 <= y_index < q_map.shape[0] and 0 <= x_index < q_map.shape[1]):
+            return None
+        if getattr(self, "suppress_q_current", False):
+            image = self.get_current_image()
+            if image is None or not (0 <= y_index < image.shape[0] and 0 <= x_index < image.shape[1]):
+                return None
+            pixel_value = image[y_index, x_index]
+            if not np.isfinite(pixel_value) or pixel_value < 0:
+                return None
+        value = q_map[y_index, x_index]
+        return float(value) if np.isfinite(value) else None
+
     def prepare_display_image(self, img):
         img = np.array(img, dtype=float)
         img[img > 4e9] = np.nan
@@ -3873,6 +3937,13 @@ class ViewTab(QWidget):
         return self.get_preset_q_geometry()
 
     def calculate_q_at_pixel(self, x_index, y_index):
+        q_value = self.q_map_value_at_pixel(x_index, y_index)
+        if q_value is not None:
+            return q_value
+
+        if getattr(self, "suppress_q_current", False):
+            return None
+
         if self.is_azimuthal_image:
             return self.calculate_azimuthal_q_at_pixel(x_index)
 

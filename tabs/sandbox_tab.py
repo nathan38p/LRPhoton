@@ -51,6 +51,7 @@ from tabs.sandbox_polynomials import PolynomialProjectMixin
 from tabs.background_tab import BackgroundTab
 from tabs.sandbox_header_editor import HeaderEditorTab
 from tabs.tools_tab import ToolsTab
+from tabs.sandbox_double_detector import DoubleDetectorProject
 
 
 class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMixin, QWidget):
@@ -131,6 +132,10 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.open_tools_project_button = self.make_project_button("🛠️ Tools")
         self.open_tools_project_button.clicked.connect(self.open_tools_project)
         selector_buttons.addWidget(self.open_tools_project_button, 1, 1)
+
+        self.open_double_detector_project_button = self.make_project_button("🧩 BM02 D2AM")
+        self.open_double_detector_project_button.clicked.connect(self.open_double_detector_project)
+        selector_buttons.addWidget(self.open_double_detector_project_button, 2, 0, 1, 2)
 
         selector_layout.addLayout(selector_buttons)
         selector_layout.addStretch(1)
@@ -532,6 +537,11 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.tools_project_page = self.wrap_sandbox_project(self.tools_project)
         self.project_stack.addWidget(self.tools_project_page)
 
+        self.double_detector_project = DoubleDetectorProject()
+        self.double_detector_project.folder_changed.connect(lambda folder: self.folder_changed.emit(Path(folder), self))
+        self.double_detector_project_page = self.wrap_sandbox_project(self.double_detector_project)
+        self.project_stack.addWidget(self.double_detector_project_page)
+
     def make_project_button(self, text):
         button = QPushButton(text)
         button.setMinimumSize(190, 70)
@@ -607,6 +617,9 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
 
     def open_tools_project(self):
         self.project_stack.setCurrentWidget(self.tools_project_page)
+
+    def open_double_detector_project(self):
+        self.project_stack.setCurrentWidget(self.double_detector_project_page)
 
     def apply_sandbox_project(self, name):
         is_imogolite = name == "Imogolite distance"
@@ -781,6 +794,8 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
             self.header_editor_project.set_folder_from_external_tab(str(folder))
         if hasattr(self, "tools_project"):
             self.tools_project.set_folder_from_external_tab(str(folder))
+        if hasattr(self, "double_detector_project"):
+            self.double_detector_project.set_folder_from_external_tab(str(folder))
 
     def set_folder_from_external_tab(self, folder):
         self.set_folder(folder)

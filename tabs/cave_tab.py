@@ -50,6 +50,7 @@ from .instrument_presets import (
     ID13_DEFAULT_PIXEL_MM,
     ID13_DEFAULT_WAVELENGTH_A,
 )
+from .q_map_io import is_real_geometry_h5, read_h5_q_map
 from .ui_style import (
     ACTION_BUTTON_STYLE,
     BLOCK_SPACING,
@@ -671,6 +672,46 @@ def read_h5_frame(filename: str, dataset_name: str, frame_index: int = 0, add_ma
     return image, header
 
 
+def image_to_cave_mask(image: np.ndarray, expected_shape=None):
+    image = np.asarray(image)
+    if expected_shape is not None and tuple(image.shape) != tuple(expected_shape):
+        raise ValueError(
+            f"Mask shape {image.shape[1]} x {image.shape[0]} does not match "
+            f"image shape {expected_shape[1]} x {expected_shape[0]}."
+        )
+    return (~np.isfinite(image)) | (image > 0)
+
+
+def read_cave_mask_image(filename: str, expected_shape=None):
+    path = Path(filename)
+    suffix = path.suffix.lower()
+
+    if suffix == ".edf":
+        image, *_ = read_edf_frame(path, 0)
+    elif suffix in [".h5", ".hdf5"]:
+        dataset_name, *_ = inspect_h5_image_dataset(path)
+        image, _header = read_h5_frame(path, dataset_name, 0, add_matching_center=False)
+    else:
+        raise ValueError("Unsupported mask image format. Please select an EDF, H5 or HDF5 mask.")
+
+    return image_to_cave_mask(image, expected_shape=expected_shape)
+
+
+CAVE_IMAGE_MASK_VALUE = -30.0
+
+
+def apply_cave_image_mask_value(image: np.ndarray, mask):
+    output = np.asarray(image, dtype=np.float64).copy()
+    if mask is None:
+        return output
+
+    mask = np.asarray(mask, dtype=bool)
+    if mask.shape != output.shape:
+        raise ValueError("Loaded image mask shape does not match the image being processed.")
+    output[mask] = CAVE_IMAGE_MASK_VALUE
+    return output
+
+
 def get_header_float(header: dict, *names):
     for name in names:
         if name in header:
@@ -1106,7 +1147,7 @@ class ImageCanvas(FigureCanvas):
                 else:
                     intensity_text = "I = NaN"
 
-                if self.q_calculator is not None:
+                if np.isfinite(value) and value >= 0 and self.q_calculator is not None:
                     q_value = self.q_calculator(x, y)
                     if q_value is not None:
                         q_text = f"q = {q_value:.6g} nm⁻¹"
@@ -1217,7 +1258,7 @@ class ManualCaveCanvas(FigureCanvas):
                 intensity_text = "I = NaN"
 
             parent = self.dialog.parent()
-            if parent is not None and hasattr(parent, "calculate_q_at_pixel"):
+            if np.isfinite(value) and value >= 0 and parent is not None and hasattr(parent, "calculate_q_at_pixel"):
                 q_value = parent.calculate_q_at_pixel(x, y)
                 if q_value is not None:
                     q_text = f"q = {q_value:.6g} nm⁻¹"
@@ -1517,7 +1558,7 @@ def visual_blank_mask(image):
     return (~np.isfinite(image)) | (image < 0)
 
 
-def fill_region_by_symmetry(image, source_image, region_mask, mode, xc, yc):
+def fill_region_by_symmetry(image, source_image, region_mask, mode, xc, yc, reference_angle_deg=0.0):
     output = np.asarray(image, dtype=np.float64).copy()
     source = np.asarray(source_image, dtype=np.float64)
     region_mask = np.asarray(region_mask, dtype=bool)
@@ -1526,15 +1567,25 @@ def fill_region_by_symmetry(image, source_image, region_mask, mode, xc, yc):
     if ys.size == 0:
         return output
 
+    center_x = float(xc)
+    center_y = float(yc)
     if mode == "central":
-        sx = np.rint(2 * float(xc) - xs).astype(int)
-        sy = np.rint(2 * float(yc) - ys).astype(int)
-    elif mode == "horizontal":
-        sx = xs
-        sy = np.rint(2 * float(yc) - ys).astype(int)
-    elif mode == "vertical":
-        sx = np.rint(2 * float(xc) - xs).astype(int)
-        sy = ys
+        sx = np.rint(2 * center_x - xs).astype(int)
+        sy = np.rint(2 * center_y - ys).astype(int)
+    elif mode in {"horizontal", "vertical"}:
+        angle = np.deg2rad(float(reference_angle_deg or 0.0))
+        if mode == "horizontal":
+            axis = np.array([np.cos(angle), np.sin(angle)], dtype=float)
+        else:
+            axis = np.array([-np.sin(angle), np.cos(angle)], dtype=float)
+
+        dx = xs.astype(float) - center_x
+        dy = ys.astype(float) - center_y
+        projection = dx * axis[0] + dy * axis[1]
+        reflected_x = center_x + 2.0 * projection * axis[0] - dx
+        reflected_y = center_y + 2.0 * projection * axis[1] - dy
+        sx = np.rint(reflected_x).astype(int)
+        sy = np.rint(reflected_y).astype(int)
     else:
         return output
 
@@ -1593,7 +1644,7 @@ class CustomCaveCanvas(FigureCanvas):
             value = self.image[y - 1, x - 1]
             intensity_text = f"I = {value:.6g}" if np.isfinite(value) else "I = NaN"
             parent = self.dialog.parent()
-            if parent is not None and hasattr(parent, "calculate_q_at_pixel"):
+            if np.isfinite(value) and value >= 0 and parent is not None and hasattr(parent, "calculate_q_at_pixel"):
                 q_value = parent.calculate_q_at_pixel(x, y)
                 if q_value is not None:
                     q_text = f"q = {q_value:.6g} nm⁻¹"
@@ -1806,6 +1857,17 @@ class CustomCaveDialog(QDialog):
 
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.addWidget(QLabel("Reference angle:"))
+        self.reference_angle_spin = QDoubleSpinBox()
+        self.reference_angle_spin.setRange(-180.0, 180.0)
+        self.reference_angle_spin.setDecimals(3)
+        self.reference_angle_spin.setSingleStep(1.0)
+        self.reference_angle_spin.setValue(float(parent.cave_angle_spin.value()) if hasattr(parent, "cave_angle_spin") else 0.0)
+        self.reference_angle_spin.setSuffix(" deg")
+        self.reference_angle_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.reference_angle_spin.setFixedWidth(120)
+        self.reference_angle_spin.valueChanged.connect(self.refresh_images)
+        toolbar.addWidget(self.reference_angle_spin)
         self.save_button = QPushButton("💾 Save cave+")
         self.save_button.clicked.connect(self.save_cave_plus)
         self.reset_button = QPushButton("Reset")
@@ -2050,6 +2112,7 @@ class CustomCaveDialog(QDialog):
             mode,
             parent.xc_spin.value(),
             parent.yc_spin.value(),
+            reference_angle_deg=self.reference_angle_spin.value(),
         )
         remaining = int(np.count_nonzero(~np.isfinite(self.final_image)))
         self.status_label.setText(f"Applied {mode} symmetry. Remaining NaN pixels: {remaining}.")
@@ -2066,7 +2129,7 @@ class CustomCaveDialog(QDialog):
         parent = self.parent()
         xc = parent.xc_spin.value()
         yc = parent.yc_spin.value()
-        angle = parent.cave_angle_spin.value()
+        angle = self.reference_angle_spin.value()
         original_nan_view = self.source_image.copy()
         original_nan_view[~np.isfinite(self.caved_image)] = np.nan
         self.original_canvas.show_image(original_nan_view, vmin=vmin, vmax=vmax, region_mask=self.selected_region, xc=xc, yc=yc, reference_angle_deg=angle)
@@ -2097,7 +2160,7 @@ class CustomCaveDialog(QDialog):
                 parent.yc_spin.value(),
                 vmin=self.display_limits[0],
                 vmax=self.display_limits[1],
-                reference_angle_deg=parent.cave_angle_spin.value(),
+                reference_angle_deg=self.reference_angle_spin.value(),
             )
             parent.status.append(f"\nSaved cave+:\n{output_path}")
             self.status_label.setText(f"Saved cave+: {output_path}")
@@ -2106,7 +2169,18 @@ class CustomCaveDialog(QDialog):
 
 
 class ManualCaveDialog(QDialog):
-    def __init__(self, parent, image, filled_image, shapes, exclusion_shapes, pre_nan_shapes, display_limits):
+    def __init__(
+        self,
+        parent,
+        image,
+        filled_image,
+        shapes,
+        exclusion_shapes,
+        pre_nan_shapes,
+        display_limits,
+        raster_mask=None,
+        raster_mask_path=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Manual cave mask")
         self.resize(1100, 620)
@@ -2125,6 +2199,10 @@ class ManualCaveDialog(QDialog):
         self._syncing_view = False
         self.synced_xlim = None
         self.synced_ylim = None
+        self.raster_mask = None
+        self.raster_mask_path = raster_mask_path
+        if raster_mask is not None:
+            self.raster_mask = image_to_cave_mask(raster_mask, expected_shape=self.source_image.shape)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -2426,6 +2504,7 @@ class ManualCaveDialog(QDialog):
         try:
             for frame_index in range(total_frames):
                 image, _ = read_h5_frame(parent.current_file, parent.h5_dataset_name, frame_index, add_matching_center=False)
+                image = apply_cave_image_mask_value(image, self.raster_mask)
                 manual_mask = self.combined_manual_mask_for_shape(image.shape, "include")
                 exclusion_mask = self.combined_manual_mask_for_shape(image.shape, "exclude")
                 pre_nan_mask = self.combined_manual_mask_for_shape(image.shape, "pre_nan")
@@ -2538,15 +2617,22 @@ class ManualCaveDialog(QDialog):
             self,
             "Load cave mask",
             str(cave_mask_preset_dir()),
-            "Cave mask JSON (*.json);;All files (*)",
+            "Cave masks (*.json *.edf *.h5 *.hdf5);;Mask image (*.edf *.h5 *.hdf5);;Cave mask JSON (*.json);;All files (*)",
         )
         if not input_path:
             return
 
         try:
+            input_path = Path(input_path).expanduser()
+            if input_path.suffix.lower() in [".edf", ".h5", ".hdf5"]:
+                self.raster_mask = read_cave_mask_image(input_path, expected_shape=self.source_image.shape)
+                self.raster_mask_path = str(input_path)
+                self.refresh_preview()
+                self.parent().status.append(f"Loaded cave image mask:\n{input_path}")
+                return
+
             with open(input_path, "r", encoding="utf-8") as file:
                 payload = json.load(file)
-
             if payload.get("format") != "LRPhoton cave mask":
                 raise ValueError("This file is not an LRPhoton cave mask preset.")
 
@@ -2555,6 +2641,8 @@ class ManualCaveDialog(QDialog):
                 raise ValueError("Invalid mask preset: shapes must be a list.")
 
             self.shapes = [self.copy_shape(shape) for shape in shapes]
+            self.raster_mask = None
+            self.raster_mask_path = None
             self.selected_shape_index = 0 if self.shapes else None
             self.active_polygon = []
             self.refresh_shape_list()
@@ -2692,6 +2780,8 @@ class ManualCaveDialog(QDialog):
 
     def clear_shapes(self):
         self.shapes = []
+        self.raster_mask = None
+        self.raster_mask_path = None
         self.active_polygon = []
         self.selected_shape_index = None
         self.refresh_shape_list()
@@ -2940,8 +3030,9 @@ class ManualCaveDialog(QDialog):
         parent.commit_nan_threshold_edits()
         use_id13_beamstop = parent.instrument_mode == "ID13" and parent.id13_beamstop_checkbox.isChecked()
         extra_operator, extra_threshold = parent.extra_nan_condition()
+        source_image = apply_cave_image_mask_value(self.source_image, self.raster_mask)
         _, filled, _ = apply_central_symmetry_cave(
-            self.source_image,
+            source_image,
             parent.xc_spin.value(),
             parent.yc_spin.value(),
             nan_operator=parent.nan_operator_combo.currentText(),
@@ -3004,6 +3095,8 @@ class ManualCaveDialog(QDialog):
             for shape in self.shapes
             if shape.get("mode", "include") == "pre_nan"
         ]
+        self.parent().manual_cave_image_mask = None if self.raster_mask is None else self.raster_mask.copy()
+        self.parent().manual_cave_image_mask_path = self.raster_mask_path
 
         self.parent().image_filled = self.filled_image()
         self.parent().update_manual_mask_status_label()
@@ -3034,6 +3127,8 @@ class CaveTab(QWidget):
         self.h5_dataset_name = None
         self.h5_frame_axis = None
         self.h5_n_frames = 1
+        self.q_map_current = None
+        self.suppress_q_current = False
         self._edf_frames = None
         self._syncing_folder = False
         self._syncing_frame_controls = False
@@ -3046,6 +3141,8 @@ class CaveTab(QWidget):
         self.manual_cave_shapes = []
         self.manual_cave_exclusion_shapes = []
         self.manual_cave_pre_nan_shapes = []
+        self.manual_cave_image_mask = None
+        self.manual_cave_image_mask_path = None
         self.display_vmin = 0.0
         self.display_vmax = 1.0
         self.slider_scale = 1000
@@ -3277,7 +3374,7 @@ class CaveTab(QWidget):
         preset_layout.addWidget(self.q_manual_button)
         for button in [self.btn_xenocs, self.btn_id02, self.btn_id13, self.btn_custom, self.q_manual_button]:
             button.hide()
-        self.line_geometry_selector = LineGeometrySelector(self, "XENOCS")
+        self.line_geometry_selector = LineGeometrySelector(self, "XENOCS", require_poni_pixel_size=False)
         self.line_geometry_selector.geometry_selected.connect(self.apply_line_geometry_selection)
         self.line_geometry_selector.setMinimumWidth(0)
         self.line_geometry_selector.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
@@ -3705,11 +3802,12 @@ class CaveTab(QWidget):
             return None
 
         mask = np.zeros(self.image.shape, dtype=bool)
-        ny, nx = mask.shape
 
         for shape in self.manual_cave_shapes:
             self.shape_to_mask(mask, shape)
 
+        if not np.any(mask):
+            return None
         return mask
 
     def manual_cave_exclusion_mask(self):
@@ -3920,6 +4018,8 @@ class CaveTab(QWidget):
                 self.manual_cave_exclusion_shapes,
                 self.manual_cave_pre_nan_shapes,
                 self.current_display_limits(),
+                raster_mask=self.manual_cave_image_mask,
+                raster_mask_path=self.manual_cave_image_mask_path,
             )
             dialog.exec()
             self.refresh_preview()
@@ -4268,6 +4368,23 @@ class CaveTab(QWidget):
         return xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_nm
 
     def calculate_q_at_pixel(self, x_index, y_index):
+        q_map = getattr(self, "q_map_current", None)
+        if q_map is not None:
+            x0 = int(x_index) - 1
+            y0 = int(y_index) - 1
+            if 0 <= y0 < q_map.shape[0] and 0 <= x0 < q_map.shape[1]:
+                if getattr(self, "suppress_q_current", False):
+                    if self.image is None or not (0 <= y0 < self.image.shape[0] and 0 <= x0 < self.image.shape[1]):
+                        return None
+                    if not np.isfinite(self.image[y0, x0]) or self.image[y0, x0] < 0:
+                        return None
+                value = q_map[y0, x0]
+                if np.isfinite(value):
+                    return float(value)
+
+        if getattr(self, "suppress_q_current", False):
+            return None
+
         geometry = self.q_geometry()
         if geometry is None:
             return None
@@ -4449,6 +4566,8 @@ class CaveTab(QWidget):
                 self.h5_dataset_name = None
                 self.h5_frame_axis = None
                 self.h5_n_frames = n_frames
+                self.q_map_current = None
+                self.suppress_q_current = False
                 self._edf_frames = None
 
                 self.configure_frame_navigation(self.h5_n_frames)
@@ -4462,6 +4581,8 @@ class CaveTab(QWidget):
                 self.h5_dataset_name = dataset_name
                 self.h5_frame_axis = frame_axis
                 self.h5_n_frames = n_frames
+                self.q_map_current = read_h5_q_map(file_path, image.shape)
+                self.suppress_q_current = is_real_geometry_h5(file_path)
 
                 self.configure_frame_navigation(n_frames)
             else:
@@ -4479,6 +4600,8 @@ class CaveTab(QWidget):
             self.manual_cave_shapes = []
             self.manual_cave_exclusion_shapes = []
             self.manual_cave_pre_nan_shapes = []
+            self.manual_cave_image_mask = None
+            self.manual_cave_image_mask_path = None
             self.update_manual_mask_status_label()
 
             self.set_controls_enabled(True)
@@ -4514,6 +4637,8 @@ class CaveTab(QWidget):
                 self.manual_cave_shapes = []
                 self.manual_cave_exclusion_shapes = []
                 self.manual_cave_pre_nan_shapes = []
+                self.manual_cave_image_mask = None
+                self.manual_cave_image_mask_path = None
                 self.update_manual_mask_status_label()
 
                 if not self.lock_intensity_checkbox.isChecked():
@@ -4537,6 +4662,8 @@ class CaveTab(QWidget):
 
         try:
             image, header = read_h5_frame(self.current_file, self.h5_dataset_name, frame_index, add_matching_center=False)
+            self.q_map_current = read_h5_q_map(self.current_file, image.shape)
+            self.suppress_q_current = is_real_geometry_h5(self.current_file)
             for key in ["Center_1", "Center_2", "center_1", "center_2", "Center source"]:
                 if key in self.header and key not in header:
                     header[key] = self.header[key]
@@ -4548,6 +4675,8 @@ class CaveTab(QWidget):
             self.manual_cave_shapes = []
             self.manual_cave_exclusion_shapes = []
             self.manual_cave_pre_nan_shapes = []
+            self.manual_cave_image_mask = None
+            self.manual_cave_image_mask_path = None
             self.update_manual_mask_status_label()
 
             if not self.lock_intensity_checkbox.isChecked():
@@ -4585,10 +4714,12 @@ class CaveTab(QWidget):
         finally:
             self.image = original_image
 
+        if not np.any(mask):
+            return None
         return mask
 
     def cave_filled_image_for(self, image):
-        image = image.astype(np.float64)
+        image = apply_cave_image_mask_value(image, self.manual_cave_image_mask)
         extra_operator, extra_threshold = self.extra_nan_condition()
         use_id13_beamstop = self.instrument_mode == "ID13" and self.id13_beamstop_checkbox.isChecked()
 
@@ -4646,7 +4777,7 @@ class CaveTab(QWidget):
             _, _, raw_header_text, byte_order = read_edf_frames(path) if self.cave_scope_is_all() else read_edf_file(path)
             saved_paths = []
             for frame_number, image in targets:
-                image = image.astype(np.float64)
+                image = apply_cave_image_mask_value(image, self.manual_cave_image_mask)
 
                 _clean, filled, _mask = apply_central_symmetry_cave(
                     image,
@@ -4872,8 +5003,9 @@ class CaveTab(QWidget):
         use_id13_beamstop = self.instrument_mode == "ID13" and self.id13_beamstop_checkbox.isChecked()
         extra_operator, extra_threshold = self.extra_nan_condition()
 
+        source_image = apply_cave_image_mask_value(self.image, self.manual_cave_image_mask)
         clean, filled, cave_mask = apply_central_symmetry_cave(
-            self.image,
+            source_image,
             self.xc_spin.value(),
             self.yc_spin.value(),
             nan_operator=self.nan_operator_combo.currentText(),
@@ -4935,8 +5067,9 @@ class CaveTab(QWidget):
                     self.start_cave_progress(total_frames, "Cave: {current} / {total}")
                     saved_paths = []
                     for frame_number, frame in enumerate(frames):
+                        frame = apply_cave_image_mask_value(frame, self.manual_cave_image_mask)
                         _, filled, _ = apply_central_symmetry_cave(
-                            frame.astype(np.float64),
+                            frame,
                             self.xc_spin.value(),
                             self.yc_spin.value(),
                             nan_operator=self.nan_operator_combo.currentText(),
@@ -5029,12 +5162,13 @@ class CaveTab(QWidget):
         include_count = len(self.manual_cave_shapes)
         exclude_count = len(self.manual_cave_exclusion_shapes)
         pre_nan_count = len(self.manual_cave_pre_nan_shapes)
+        image_mask_count = 1 if self.manual_cave_image_mask is not None else 0
 
-        if include_count + exclude_count + pre_nan_count == 0:
+        if include_count + exclude_count + pre_nan_count + image_mask_count == 0:
             self.manual_mask_status_label.setText("Manual mask: none")
         else:
             self.manual_mask_status_label.setText(
-                f"Manual mask: Cave + {include_count} | "
+                f"Manual mask: Cave + {include_count + image_mask_count} | "
                 f"Exclude - {exclude_count} | "
                 f"NaN {pre_nan_count}"
             )

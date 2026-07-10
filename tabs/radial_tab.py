@@ -45,6 +45,7 @@ from .instrument_presets import (
 )
 from .file_ratings import file_path_from_item, install_file_rating_menu, is_file_rated_up, set_item_file_path, should_hide_file_in_browser
 from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
+from .q_map_io import is_real_geometry_h5, read_h5_q_map
 from .ui_style import (
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
@@ -1911,7 +1912,7 @@ class ImageCanvas(FigureCanvas):
                         else:
                             value_text = f"{value:.8g}"
 
-                        if self.q_map is not None:
+                        if np.isfinite(value) and value >= 0 and self.q_map is not None:
                             q_value = self.q_map[y_index, x_index]
                             if np.isfinite(q_value):
                                 q_text = f"{q_value:.6g} nm⁻¹"
@@ -3146,13 +3147,16 @@ class RadialTab(QWidget):
             if image.ndim != 2:
                 raise ValueError(f"Expected a 2D image, got shape {image.shape}")
 
-            yy, xx = np.indices(image.shape)
-            dx_px = (xx + 1.0) - float(self.center_x.value())
-            dy_px = (yy + 1.0) - float(self.center_y.value())
-            dx_m = dx_px * float(self.pixel_x.value()) * 1e-3
-            dy_m = dy_px * float(self.pixel_y.value()) * 1e-3
-            r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
-            q_map = q_from_detector_geometry(r_m, float(self.distance.value()), float(self.wavelength.value()))
+            suppress_q = is_real_geometry_h5(file_path)
+            q_map = read_h5_q_map(file_path, image.shape)
+            if q_map is None and not suppress_q:
+                yy, xx = np.indices(image.shape)
+                dx_px = (xx + 1.0) - float(self.center_x.value())
+                dy_px = (yy + 1.0) - float(self.center_y.value())
+                dx_m = dx_px * float(self.pixel_x.value()) * 1e-3
+                dy_m = dy_px * float(self.pixel_y.value()) * 1e-3
+                r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+                q_map = q_from_detector_geometry(r_m, float(self.distance.value()), float(self.wavelength.value()))
 
             self.image_canvas.set_q_map(q_map)
             self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=None)
@@ -3295,20 +3299,19 @@ class RadialTab(QWidget):
                         self.wavelength.value(),
                     )
 
-                    # --- q_map calculation ---
-                    yy, xx = np.indices(image.shape)
+                    suppress_q = is_real_geometry_h5(file_path)
+                    q_map = read_h5_q_map(file_path, image.shape)
+                    if q_map is None and not suppress_q:
+                        yy, xx = np.indices(image.shape)
 
-                    dx_px = (xx + 1.0) - float(self.center_x.value())
-                    dy_px = (yy + 1.0) - float(self.center_y.value())
+                        dx_px = (xx + 1.0) - float(self.center_x.value())
+                        dy_px = (yy + 1.0) - float(self.center_y.value())
 
-                    dx_m = dx_px * float(self.pixel_x.value()) * 1e-3
-                    dy_m = dy_px * float(self.pixel_y.value()) * 1e-3
+                        dx_m = dx_px * float(self.pixel_x.value()) * 1e-3
+                        dy_m = dy_px * float(self.pixel_y.value()) * 1e-3
 
-                    r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
-                    two_theta_map = np.arctan2(r_m, float(self.distance.value()))
-                    wavelength_nm_map = wavelength_to_nm(float(self.wavelength.value()))
-                    q_map = q_from_detector_geometry(r_m, float(self.distance.value()), float(self.wavelength.value()))
-                    # --- end q_map calculation ---
+                        r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+                        q_map = q_from_detector_geometry(r_m, float(self.distance.value()), float(self.wavelength.value()))
 
                     try:
                         matched_poni = self.poni_file_for_image(file_path)

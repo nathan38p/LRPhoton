@@ -47,6 +47,7 @@ from .instrument_presets import (
 )
 from .file_ratings import file_path_from_item, install_file_rating_menu, is_file_rated_up, set_item_file_path, should_hide_file_in_browser
 from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
+from .q_map_io import is_real_geometry_h5, read_h5_q_map
 from .ui_style import (
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
@@ -761,7 +762,14 @@ class ImageCanvas(FigureCanvas):
                         else:
                             value_text = f"{value:.8g}"
 
-                if self.q_map is not None:
+                has_finite_intensity = (
+                    self.raw_image is not None
+                    and 0 <= x_index < self.raw_image.shape[1]
+                    and 0 <= y_index < self.raw_image.shape[0]
+                    and np.isfinite(self.raw_image[y_index, x_index])
+                    and self.raw_image[y_index, x_index] >= 0
+                )
+                if has_finite_intensity and self.q_map is not None:
                     q_ny, q_nx = self.q_map.shape
                     if 0 <= x_index < q_nx and 0 <= y_index < q_ny:
                         q_value = self.q_map[y_index, x_index]
@@ -1083,7 +1091,7 @@ class HermansTab(QWidget):
             "Order parameter S (L3/2 reciprocal fit)",
         ])
         self.parameter_selector.currentIndexChanged.connect(self.parameter_mode_changed)
-        self.parameter_selector.setCurrentIndex(1)
+        self.parameter_selector.setCurrentIndex(0)
 
         mode_layout.addWidget(QLabel("Parameter:"), 0, 0)
         mode_layout.addWidget(self.parameter_selector, 0, 1)
@@ -3134,7 +3142,10 @@ class HermansTab(QWidget):
             self.results_text.setPlainText(str(error))
             return
 
-        q_map = q_map_from_geometry(image.shape, xc, yc, distance, pixel_x, pixel_y, wavelength)
+        suppress_q = is_real_geometry_h5(self.current_file)
+        q_map = read_h5_q_map(self.current_file, image.shape)
+        if q_map is None and not suppress_q:
+            q_map = q_map_from_geometry(image.shape, xc, yc, distance, pixel_x, pixel_y, wavelength)
         self.image_canvas.set_q_map(q_map)
 
         display_h_mask = h_mask.copy()

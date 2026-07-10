@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QComboBox,
+    QSizePolicy,
+    QSlider,
     QSpinBox,
     QToolButton,
     QTreeWidget,
@@ -35,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 
 from tabs.line_geometry import LRP_SALS_DEFAULT_NAME, LineGeometrySelector, default_center_text
@@ -44,10 +47,13 @@ from tabs.ui_style import (
     GROUP_BOX_MARGINS,
     GROUP_BOX_STYLE,
     PAGE_MARGINS,
+    FlexibleDoubleSpinBox,
     make_matplotlib_toolbar_block,
     set_matplotlib_toolbar_enabled,
     set_widget_enabled_with_opacity,
 )
+
+QDoubleSpinBox = FlexibleDoubleSpinBox
 
 
 class SMC100Device:
@@ -515,7 +521,7 @@ class VimbaSALSWidget(QWidget):
     DEFAULT_PIXEL_FORMAT = "Mono12Packed"
     DEFAULT_OFFSET_X = 626
     DEFAULT_OFFSET_Y = 626
-    DEFAULT_EXPOSURE_US = "60"
+    DEFAULT_EXPOSURE_US = "100"
     DEFAULT_GAIN = "0"
     DEFAULT_PREVIEW_FPS = 26
     DEFAULT_ACQUISITION_FRAME_RATE = 26.36992
@@ -524,6 +530,20 @@ class VimbaSALSWidget(QWidget):
     DEFAULT_DISTANCE_M = "0,00477"
     DEFAULT_PIXEL_SIZE_M = "5,5e-6"
     DEFAULT_WAVELENGTH_M = "632,8e-9"
+    PREVIEW_FALLBACK_PERCENTILES = (1.0, 99.0)
+    VIMBA_RAINBOW_CMAP = LinearSegmentedColormap.from_list(
+        "vimbamatlab_rainbow",
+        (
+            "#0000a8",
+            "#004cff",
+            "#00d8ff",
+            "#00e070",
+            "#ffff00",
+            "#ff8000",
+            "#ff0000",
+        ),
+        N=256,
+    )
     VIMBA_SETTINGS_PATH = APP_ROOT / "assets" / "camera" / "settingsvimba.xml"
     DEFAULT_CAMERA_FEATURES = (
         ("Acquisition", "AcquisitionMode", "Continuous"),
@@ -634,6 +654,11 @@ class VimbaSALSWidget(QWidget):
         self.preview_xlim = None
         self.preview_ylim = None
         self.preview_hover_pixel = None
+        self.preview_contrast_initialized = False
+        self.preview_intensity_min = 0.0
+        self.preview_intensity_max = 255.0
+        self.preview_center_artists = []
+        self.colorbar = None
         self.is_recording_frames = False
         self.recording_started_at = None
         self.recording_frame_count = 0
@@ -910,11 +935,39 @@ class VimbaSALSWidget(QWidget):
             }
         """)
 
+        self.preview_colormap_combo = QComboBox()
+        self.preview_colormap_combo.setToolTip("Colormap")
+        self.preview_colormap_combo.setFixedWidth(125)
+        self.preview_colormap_options = [
+            ("Vimba Rainbow", "vimba_rainbow"),
+            ("Gray", "gray"),
+            ("Reversed Gray", "gray_r"),
+            ("Red", "Reds"),
+            ("Green", "Greens"),
+            ("Blue", "Blues"),
+            ("Viridis", "viridis"),
+            ("Cividis", "cividis"),
+            ("Magma", "magma"),
+            ("Inferno", "inferno"),
+            ("Plasma", "plasma"),
+            ("Temperature", "turbo"),
+            ("Jet", "jet"),
+            ("Hsv", "hsv"),
+        ]
+        for label, cmap_name in self.preview_colormap_options:
+            self.preview_colormap_combo.addItem(label, cmap_name)
+        self.preview_colormap_combo.currentIndexChanged.connect(self.change_preview_colormap)
+
         toolbar_box, _, self.preview_save_button = make_matplotlib_toolbar_block(
             self,
             "",
             self.toolbar,
-            option_widgets=[self.status_label, self.record_play_button, self.record_stop_button],
+            option_widgets=[
+                self.preview_colormap_combo,
+                self.status_label,
+                self.record_play_button,
+                self.record_stop_button,
+            ],
             save_callback=self.save_current_edf,
             save_tooltip="Save current EDF",
             toolbar_width=340,
@@ -939,7 +992,64 @@ class VimbaSALSWidget(QWidget):
         preview_canvas_layout.setSpacing(BLOCK_SPACING)
         preview_layout.addWidget(preview_canvas_box, 1)
 
-        preview_canvas_layout.addWidget(self.canvas, 1)
+        preview_image_area = QHBoxLayout()
+        preview_image_area.setContentsMargins(0, 0, 0, 0)
+        preview_image_area.setSpacing(4)
+        preview_image_area.addWidget(self.canvas, stretch=1)
+
+        self.preview_slider_panel = QWidget()
+        self.preview_slider_panel.setFixedWidth(110)
+        self.preview_slider_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        preview_slider_box = QVBoxLayout(self.preview_slider_panel)
+        preview_slider_box.setContentsMargins(0, 0, 0, 0)
+        preview_slider_box.setSpacing(2)
+
+        self.preview_max_slider = QSlider(Qt.Vertical)
+        self.preview_max_slider.setMinimum(0)
+        self.preview_max_slider.setMaximum(1000)
+        self.preview_max_slider.setValue(1000)
+        self.preview_max_slider.valueChanged.connect(self.preview_vertical_sliders_changed)
+
+        self.preview_min_slider = QSlider(Qt.Vertical)
+        self.preview_min_slider.setMinimum(0)
+        self.preview_min_slider.setMaximum(1000)
+        self.preview_min_slider.setValue(0)
+        self.preview_min_slider.valueChanged.connect(self.preview_vertical_sliders_changed)
+
+        self.preview_vmin_spin = QDoubleSpinBox()
+        self.preview_vmin_spin.setDecimals(4)
+        self.preview_vmin_spin.setRange(-999999, 999999)
+        self.preview_vmin_spin.setFixedWidth(90)
+        self.preview_vmin_spin.setValue(0.0)
+        self.preview_vmin_spin.valueChanged.connect(self.preview_spin_intensity_changed)
+
+        self.preview_vmax_spin = QDoubleSpinBox()
+        self.preview_vmax_spin.setDecimals(4)
+        self.preview_vmax_spin.setRange(-999999, 999999)
+        self.preview_vmax_spin.setFixedWidth(90)
+        self.preview_vmax_spin.setValue(255.0)
+        self.preview_vmax_spin.valueChanged.connect(self.preview_spin_intensity_changed)
+
+        self.preview_autoscale_button = QPushButton("Auto")
+        self.preview_autoscale_button.setFixedWidth(90)
+        self.preview_autoscale_button.clicked.connect(self.auto_preview_intensity)
+
+        preview_max_label = QLabel("Max:")
+        preview_min_label = QLabel("Min:")
+        preview_max_label.setAlignment(Qt.AlignCenter)
+        preview_min_label.setAlignment(Qt.AlignCenter)
+
+        preview_slider_box.addWidget(preview_max_label, alignment=Qt.AlignHCenter)
+        preview_slider_box.addWidget(self.preview_vmax_spin, alignment=Qt.AlignHCenter)
+        preview_slider_box.addWidget(self.preview_max_slider, alignment=Qt.AlignHCenter)
+        preview_slider_box.addSpacing(8)
+        preview_slider_box.addWidget(self.preview_min_slider, alignment=Qt.AlignHCenter)
+        preview_slider_box.addWidget(preview_min_label, alignment=Qt.AlignHCenter)
+        preview_slider_box.addWidget(self.preview_vmin_spin, alignment=Qt.AlignHCenter)
+        preview_slider_box.addWidget(self.preview_autoscale_button, alignment=Qt.AlignHCenter)
+
+        preview_image_area.addWidget(self.preview_slider_panel, stretch=0, alignment=Qt.AlignRight)
+        preview_canvas_layout.addLayout(preview_image_area, 1)
 
         self.camera_help_label = QLabel("")
         self.camera_help_label.setWordWrap(True)
@@ -2441,24 +2551,174 @@ class VimbaSALSWidget(QWidget):
             return
         self.canvas.setVisible(True)
         image = np.asarray(self.current_frame, dtype=float)
-        display_image, vmin, vmax = self.preview_display_image(image)
-        self.ax.clear()
-        self.figure.patch.set_alpha(0)
-        self.ax.set_facecolor("none")
-        self.ax.imshow(display_image, cmap="jet", origin="upper", vmin=vmin, vmax=vmax)
+        display_image, default_vmin, default_vmax = self.preview_display_image(image)
+        self.initialize_preview_contrast(display_image, default_vmin, default_vmax)
+        vmin, vmax = self.current_preview_display_limits()
+        if self.image_artist is None:
+            self.ax.clear()
+            self.figure.patch.set_alpha(0)
+            self.ax.set_facecolor("none")
+            self.image_artist = self.ax.imshow(
+                display_image,
+                cmap=self.current_preview_colormap(),
+                origin="upper",
+                vmin=vmin,
+                vmax=vmax,
+            )
+            self.colorbar = self.figure.colorbar(
+                self.image_artist,
+                ax=self.ax,
+                fraction=0.046,
+                pad=0.04,
+            )
+            self.figure.subplots_adjust(left=0.0, right=0.92, top=1.0, bottom=0.0)
+        else:
+            self.image_artist.set_data(display_image)
+            self.image_artist.set_cmap(self.current_preview_colormap())
+            self.image_artist.set_clim(vmin, vmax)
         center_x = self.optional_float(self.center_x_edit.text())
         center_y = self.optional_float(self.center_y_edit.text())
         if center_x is None:
             center_x = (image.shape[1] - 1.0) / 2.0
         if center_y is None:
             center_y = (image.shape[0] - 1.0) / 2.0
-        self.ax.axvline(center_x, color="white", linewidth=0.8, alpha=0.9)
-        self.ax.axhline(center_y, color="white", linewidth=0.8, alpha=0.9)
+        self.draw_preview_center_cross(center_x, center_y)
         self.ax.set_axis_off()
         self.apply_preview_zoom(image.shape)
-        self.figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
         self.refresh_preview_coordinate_label()
         self.canvas.draw_idle()
+
+    def current_preview_colormap(self):
+        combo = getattr(self, "preview_colormap_combo", None)
+        if combo is None:
+            return self.VIMBA_RAINBOW_CMAP
+        cmap_name = combo.currentData()
+        if cmap_name == "vimba_rainbow" or not cmap_name:
+            return self.VIMBA_RAINBOW_CMAP
+        return cmap_name
+
+    def change_preview_colormap(self, *args):
+        if self.image_artist is not None:
+            self.image_artist.set_cmap(self.current_preview_colormap())
+            if self.colorbar is not None:
+                self.colorbar.update_normal(self.image_artist)
+            self.canvas.draw_idle()
+
+    def draw_preview_center_cross(self, center_x, center_y):
+        for artist in self.preview_center_artists:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self.preview_center_artists = [
+            self.ax.axvline(center_x, color="white", linewidth=0.8, alpha=0.9),
+            self.ax.axhline(center_y, color="white", linewidth=0.8, alpha=0.9),
+        ]
+
+    def initialize_preview_contrast(self, display_image, default_vmin, default_vmax):
+        if self.preview_contrast_initialized:
+            return
+        finite_values = display_image[np.isfinite(display_image)]
+        if finite_values.size:
+            self.preview_intensity_min = float(np.nanmin(finite_values))
+            self.preview_intensity_max = float(np.nanmax(finite_values))
+        else:
+            self.preview_intensity_min = float(default_vmin)
+            self.preview_intensity_max = float(default_vmax)
+        if self.preview_intensity_max <= self.preview_intensity_min:
+            self.preview_intensity_max = self.preview_intensity_min + 1.0
+
+        vmin = float(default_vmin)
+        vmax = float(default_vmax)
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        self.set_preview_contrast_controls(vmin, vmax)
+        self.preview_contrast_initialized = True
+
+    def current_preview_display_limits(self):
+        vmin = self.preview_vmin_spin.value()
+        vmax = self.preview_vmax_spin.value()
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        return vmin, vmax
+
+    def preview_value_to_slider(self, value):
+        span = self.preview_intensity_max - self.preview_intensity_min
+        if span <= 0:
+            return 0
+        slider_value = int(1000 * (value - self.preview_intensity_min) / span)
+        return max(0, min(1000, slider_value))
+
+    def preview_slider_to_value(self, value):
+        return self.preview_intensity_min + (
+            value / 1000.0
+        ) * (self.preview_intensity_max - self.preview_intensity_min)
+
+    def set_preview_contrast_controls(self, vmin, vmax):
+        self.preview_vmin_spin.blockSignals(True)
+        self.preview_vmax_spin.blockSignals(True)
+        self.preview_min_slider.blockSignals(True)
+        self.preview_max_slider.blockSignals(True)
+
+        self.preview_vmin_spin.setValue(vmin)
+        self.preview_vmax_spin.setValue(vmax)
+        self.preview_min_slider.setValue(self.preview_value_to_slider(vmin))
+        self.preview_max_slider.setValue(self.preview_value_to_slider(vmax))
+
+        self.preview_vmin_spin.blockSignals(False)
+        self.preview_vmax_spin.blockSignals(False)
+        self.preview_min_slider.blockSignals(False)
+        self.preview_max_slider.blockSignals(False)
+
+    def auto_preview_intensity(self):
+        if self.current_frame is None:
+            return
+        image = np.asarray(self.current_frame, dtype=float)
+        display_image, _, _ = self.preview_display_image(image)
+        finite_values = display_image[np.isfinite(display_image)]
+        if finite_values.size == 0:
+            return
+
+        vmin, vmax = np.nanpercentile(finite_values, self.PREVIEW_FALLBACK_PERCENTILES)
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+
+        self.preview_intensity_min = float(np.nanmin(finite_values))
+        self.preview_intensity_max = float(np.nanmax(finite_values))
+        if self.preview_intensity_max <= self.preview_intensity_min:
+            self.preview_intensity_max = self.preview_intensity_min + 1.0
+
+        self.set_preview_contrast_controls(float(vmin), float(vmax))
+        self.update_preview()
+
+    def preview_vertical_sliders_changed(self):
+        vmin = self.preview_slider_to_value(self.preview_min_slider.value())
+        vmax = self.preview_slider_to_value(self.preview_max_slider.value())
+        if vmin >= vmax:
+            return
+        self.preview_vmin_spin.blockSignals(True)
+        self.preview_vmax_spin.blockSignals(True)
+        self.preview_vmin_spin.setValue(vmin)
+        self.preview_vmax_spin.setValue(vmax)
+        self.preview_vmin_spin.blockSignals(False)
+        self.preview_vmax_spin.blockSignals(False)
+        self.update_preview()
+
+    def preview_spin_intensity_changed(self):
+        vmin, vmax = self.current_preview_display_limits()
+        current_min = min(vmin, self.preview_intensity_min)
+        current_max = max(vmax, self.preview_intensity_max)
+        if current_max > current_min:
+            self.preview_intensity_min = current_min
+            self.preview_intensity_max = current_max
+
+        self.preview_min_slider.blockSignals(True)
+        self.preview_max_slider.blockSignals(True)
+        self.preview_min_slider.setValue(self.preview_value_to_slider(vmin))
+        self.preview_max_slider.setValue(self.preview_value_to_slider(vmax))
+        self.preview_min_slider.blockSignals(False)
+        self.preview_max_slider.blockSignals(False)
+        self.update_preview()
 
     def eventFilter(self, obj, event):
         if obj is self.canvas and self.current_frame is not None:
@@ -2711,15 +2971,49 @@ class VimbaSALSWidget(QWidget):
     def preview_display_image(self, image):
         finite = np.isfinite(image)
         if np.any(finite):
-            display_image = image
-            display_finite = np.isfinite(display_image)
-            vmin, vmax = np.nanpercentile(display_image[display_finite], [0.1, 99.9])
+            finite_values = image[finite]
+            display_image = self.preview_matlab_uint8_image(image, finite_values)
+            if display_image is not image:
+                vmin, vmax = 0.0, 255.0
+            else:
+                vmin, vmax = np.nanpercentile(finite_values, self.PREVIEW_FALLBACK_PERCENTILES)
             if vmax <= vmin:
                 vmax = vmin + 1
         else:
             display_image = image
             vmin, vmax = 0, 1
         return display_image, vmin, vmax
+
+    def preview_matlab_uint8_image(self, image, finite_values):
+        if finite_values.size == 0:
+            return image
+
+        sensor_max = self.preview_sensor_max(finite_values)
+        if sensor_max is None or sensor_max <= 0:
+            return image
+
+        return np.round(np.clip(image, 0.0, sensor_max) * (255.0 / sensor_max)).astype(np.uint8)
+
+    def preview_sensor_max(self, finite_values):
+        pixel_format = ""
+        if hasattr(self, "pixel_format_combo"):
+            pixel_format = self.pixel_format_combo.currentText().lower()
+
+        if "mono8" in pixel_format:
+            return 255.0
+        if "mono10" in pixel_format:
+            return 1023.0
+        if "mono12" in pixel_format:
+            return 4095.0
+        if "mono14" in pixel_format:
+            return 16383.0
+        if "mono16" in pixel_format:
+            data_max = float(np.nanmax(finite_values))
+            if data_max <= 4095.0:
+                return 4095.0
+            return 65535.0
+
+        return None
 
     def choose_output_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose EDF output folder", self.output_edit.text())

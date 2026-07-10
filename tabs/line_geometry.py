@@ -211,7 +211,7 @@ def _merge_geometry(base, override):
     return merged
 
 
-def read_poni_line_geometry(path, fallback=None, name="PONI"):
+def read_poni_line_geometry(path, fallback=None, name="PONI", require_pixel_size=True):
     values = {}
     detector_config = {}
     path = Path(path)
@@ -282,22 +282,29 @@ def read_poni_line_geometry(path, fallback=None, name="PONI"):
     except Exception:
         pass
 
-    missing = [
-        label for label, value in {
-            "Poni1": poni1_m,
-            "Poni2": poni2_m,
+    required_fields = {
+        "Poni1": poni1_m,
+        "Poni2": poni2_m,
+    }
+    if require_pixel_size:
+        required_fields.update({
             "PixelSize1": pixel1_m,
             "PixelSize2": pixel2_m,
-        }.items()
-        if value is None or value == 0
-    ]
+        })
+    missing = [label for label, value in required_fields.items() if value is None or value == 0]
     if missing:
         raise ValueError(f"Missing PONI geometry field(s): {', '.join(missing)}")
 
+    fallback_geometry = normalized_line_geometry(fallback or {})
+    if pixel1_m is None or pixel1_m == 0:
+        pixel1_m = number_value(fallback_geometry.get("pixel_y_m", "0")) or None
+    if pixel2_m is None or pixel2_m == 0:
+        pixel2_m = number_value(fallback_geometry.get("pixel_x_m", "0")) or None
+
     poni_geometry = {
         "name": name,
-        "center_x": _optional_number_text((pyfai_center[0] + 1.0) if pyfai_center is not None else (poni2_m / pixel2_m) + 0.5),
-        "center_y": _optional_number_text((pyfai_center[1] + 1.0) if pyfai_center is not None else (poni1_m / pixel1_m) + 0.5),
+        "center_x": _optional_number_text((pyfai_center[0] + 1.0) if pyfai_center is not None else (poni2_m / pixel2_m) + 0.5 if pixel2_m else None),
+        "center_y": _optional_number_text((pyfai_center[1] + 1.0) if pyfai_center is not None else (poni1_m / pixel1_m) + 0.5 if pixel1_m else None),
         "pixel_x_m": _optional_number_text(pixel2_m),
         "pixel_y_m": _optional_number_text(pixel1_m),
         "distance_m": _optional_number_text(distance_m),
@@ -455,10 +462,11 @@ def line_geometry_to_lrphoton(geometry):
 class LineGeometrySelector(QWidget):
     geometry_selected = Signal(str, dict)
 
-    def __init__(self, parent=None, current_name=LRP_SALS_DEFAULT_NAME, show_poni=True):
+    def __init__(self, parent=None, current_name=LRP_SALS_DEFAULT_NAME, show_poni=True, require_poni_pixel_size=True):
         super().__init__(parent)
         self.context_owner = parent
         self.show_poni = bool(show_poni)
+        self.require_poni_pixel_size = bool(require_poni_pixel_size)
         self.geometries = load_line_geometries()
         if current_name == LEGACY_SALS_DEFAULT_NAME:
             current_name = LRP_SALS_DEFAULT_NAME
@@ -542,7 +550,12 @@ class LineGeometrySelector(QWidget):
 
         poni_path = self.selected_poni_path()
         if poni_path is not None:
-            geometry = read_poni_line_geometry(poni_path, geometry, name)
+            geometry = read_poni_line_geometry(
+                poni_path,
+                geometry,
+                name,
+                require_pixel_size=self.require_poni_pixel_size,
+            )
         return geometry
 
     def selected_poni_path(self):

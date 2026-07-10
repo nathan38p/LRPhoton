@@ -42,6 +42,7 @@ from .instrument_presets import (
 )
 from .file_ratings import file_path_from_item, install_file_rating_menu, is_file_rated_up, set_item_file_path, should_hide_file_in_browser
 from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
+from .q_map_io import is_real_geometry_h5, read_h5_q_map
 from .ui_style import (
     BLOCK_SPACING,
     FILE_BROWSER_WIDTH,
@@ -1301,7 +1302,14 @@ class ImageCanvas(FigureCanvas):
                         else:
                             value_text = f"{value:.8g}"
 
-                if self.q_map is not None:
+                has_finite_intensity = (
+                    self.raw_image is not None
+                    and 0 <= x_index < self.raw_image.shape[1]
+                    and 0 <= y_index < self.raw_image.shape[0]
+                    and np.isfinite(self.raw_image[y_index, x_index])
+                    and self.raw_image[y_index, x_index] >= 0
+                )
+                if has_finite_intensity and self.q_map is not None:
                     q_ny, q_nx = self.q_map.shape
                     if 0 <= x_index < q_nx and 0 <= y_index < q_ny:
                         q_value = self.q_map[y_index, x_index]
@@ -2558,6 +2566,8 @@ class AzimuthalTab(QWidget):
             q_max = np.inf
 
         try:
+            suppress_q = is_real_geometry_h5(file_path)
+            embedded_q_map = read_h5_q_map(file_path, image.shape)
             if is_azimuthal_processed_image(Path(file_path), header):
                 q_values_full = self.azimuthal_image_q_axis(image.shape, header)
                 q_step = float(np.nanmedian(np.diff(q_values_full))) if q_values_full.size > 1 else np.nan
@@ -2578,6 +2588,14 @@ class AzimuthalTab(QWidget):
                 self.image_canvas.set_coordinate_mode("azimuthal_image")
                 self.image_canvas.set_q_map(q_map)
                 self.image_canvas.show_image(image, 0.0, 0.0, mask=mask)
+                self.sync_image_intensity_sliders()
+                return
+
+            if embedded_q_map is not None:
+                mask = np.isfinite(embedded_q_map) & (embedded_q_map >= q_min) & (embedded_q_map <= q_max)
+                self.image_canvas.set_coordinate_mode("detector")
+                self.image_canvas.set_q_map(embedded_q_map)
+                self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
                 self.sync_image_intensity_sliders()
                 return
 
@@ -2617,7 +2635,7 @@ class AzimuthalTab(QWidget):
                 )
 
             self.image_canvas.set_coordinate_mode("detector")
-            self.image_canvas.set_q_map(q_map)
+            self.image_canvas.set_q_map(embedded_q_map if suppress_q and embedded_q_map is not None else q_map)
             self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
             self.sync_image_intensity_sliders()
         except Exception as exc:
@@ -2793,7 +2811,9 @@ class AzimuthalTab(QWidget):
                 self.last_result_frame_counts[file_path.stem] = int(header.get("Number of frames", 1) or 1)
 
                 if file_path == files[0]:
-                    self.image_canvas.set_q_map(q_map)
+                    suppress_q = is_real_geometry_h5(file_path)
+                    embedded_q_map = read_h5_q_map(file_path, image.shape)
+                    self.image_canvas.set_q_map(embedded_q_map if embedded_q_map is not None else q_map)
                     self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
                     self.sync_image_intensity_sliders()
 

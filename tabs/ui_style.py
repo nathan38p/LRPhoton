@@ -34,46 +34,6 @@ GROUP_BOX_STYLE = """
         color: #111111;
     }
 
-    QListWidget QScrollBar:vertical {
-        width: 0px;
-        background: transparent;
-        border: none;
-    }
-
-    QListWidget QScrollBar::handle:vertical {
-        background: transparent;
-        border: none;
-    }
-
-    QListWidget QScrollBar::add-line:vertical,
-    QListWidget QScrollBar::sub-line:vertical,
-    QListWidget QScrollBar::add-page:vertical,
-    QListWidget QScrollBar::sub-page:vertical {
-        background: transparent;
-        border: none;
-        height: 0px;
-    }
-
-    QListWidget QScrollBar:horizontal {
-        height: 0px;
-        background: transparent;
-        border: none;
-    }
-
-    QListWidget QScrollBar::handle:horizontal {
-        background: transparent;
-        border: none;
-    }
-
-    QListWidget QScrollBar::add-line:horizontal,
-    QListWidget QScrollBar::sub-line:horizontal,
-    QListWidget QScrollBar::add-page:horizontal,
-    QListWidget QScrollBar::sub-page:horizontal {
-        background: transparent;
-        border: none;
-        width: 0px;
-    }
-
     QListWidget {
         background-color: transparent;
         border: none;
