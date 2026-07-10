@@ -48,9 +48,11 @@ from tabs.ui_style import (
     GROUP_BOX_STYLE,
     PAGE_MARGINS,
     FlexibleDoubleSpinBox,
+    emoji_icon,
     make_matplotlib_toolbar_block,
     set_matplotlib_toolbar_enabled,
     set_widget_enabled_with_opacity,
+    style_matplotlib_toolbar_button,
 )
 
 QDoubleSpinBox = FlexibleDoubleSpinBox
@@ -902,32 +904,12 @@ class VimbaSALSWidget(QWidget):
         self.toolbar = SALSPreviewToolbar(self.canvas, self)
 
         self.record_play_button = QToolButton(self)
-        self.record_play_button.setText("▶️")
-        self.record_play_button.setFixedSize(32, 32)
-        self.record_play_button.setStyleSheet("""
-            QToolButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                margin: 0px;
-                font-size: 28px;
-            }
-        """)
+        self.configure_record_toolbar_button(self.record_play_button, "▶")
         self.record_play_button.setToolTip("Start saving EDF frames at the selected preview fps")
         self.record_play_button.clicked.connect(self.start_recording_frames)
 
         self.record_stop_button = QToolButton(self)
-        self.record_stop_button.setText("⏹️")
-        self.record_stop_button.setFixedSize(32, 32)
-        self.record_stop_button.setStyleSheet("""
-            QToolButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                margin: 0px;
-                font-size: 28px;
-            }
-        """)
+        self.configure_record_toolbar_button(self.record_stop_button, "■")
         self.record_stop_button.setToolTip("Stop saving EDF frames")
         self.record_stop_button.clicked.connect(self.stop_recording_frames)
 
@@ -1267,6 +1249,11 @@ class VimbaSALSWidget(QWidget):
         layout.addWidget(field, 1)
         layout.addWidget(button)
         return layout
+
+    def configure_record_toolbar_button(self, button, symbol):
+        button.setIcon(emoji_icon(symbol))
+        button.setText("")
+        style_matplotlib_toolbar_button(button)
 
     def form_label(self, text, minimum_width=0):
         label = QLabel(f"{text}:")
