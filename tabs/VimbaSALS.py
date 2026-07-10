@@ -632,6 +632,13 @@ class VimbaSALSWidget(QWidget):
         ("IO / SyncOut", "SyncOutSelector", "SyncOut1"),
         ("IO / SyncOut", "SyncOutSource", "Exposing"),
     )
+    WINDOWS_CAMERA_FEATURE_OVERRIDES = {
+        "GevSCPSPacketSize": 1500,
+        "StreamBytesPerSecond": 60000000,
+        "GVSPMaxRequests": 8,
+        "GVSPTimeout": 200,
+        "StreamAnnouncedBufferCount": 16,
+    }
     CAMERA_SETTING_ALIASES = {
         "AcquisitionFrameRate": ("AcquisitionFrameRate", "AcquisitionFrameRateAbs"),
         "ExposureTime": ("ExposureTime", "ExposureTimeAbs"),
@@ -659,6 +666,8 @@ class VimbaSALSWidget(QWidget):
         self.preview_intensity_max = 255.0
         self.preview_center_artists = []
         self.colorbar = None
+        self.dropped_incomplete_frames = 0
+        self.last_frame_status = ""
         self.is_recording_frames = False
         self.recording_started_at = None
         self.recording_frame_count = 0
@@ -1849,6 +1858,7 @@ class VimbaSALSWidget(QWidget):
         loaded_settings = self.load_vimba_settings_file()
         if not loaded_settings:
             self.apply_default_camera_features()
+        self.apply_windows_stream_stability_settings()
         self.set_camera_feature("ReverseY", self.reverse_y_checkbox.isChecked())
         self.set_camera_feature("Width", self.width_spinbox.value())
         self.set_camera_feature("Height", self.height_spinbox.value())
@@ -1886,8 +1896,23 @@ class VimbaSALSWidget(QWidget):
                 self.status_label.setText(f"Could not load Vimba settings XML: {exc}")
             return False
 
+    def camera_default_features(self):
+        if not sys.platform.startswith("win"):
+            return self.DEFAULT_CAMERA_FEATURES
+
+        features = []
+        for section, name, value in self.DEFAULT_CAMERA_FEATURES:
+            features.append((section, name, self.WINDOWS_CAMERA_FEATURE_OVERRIDES.get(name, value)))
+        return tuple(features)
+
+    def apply_windows_stream_stability_settings(self):
+        if not sys.platform.startswith("win"):
+            return
+        for name, value in self.WINDOWS_CAMERA_FEATURE_OVERRIDES.items():
+            self.set_camera_feature(name, value)
+
     def apply_default_camera_features(self):
-        for _, name, value in self.DEFAULT_CAMERA_FEATURES:
+        for _, name, value in self.camera_default_features():
             self.set_first_available_camera_feature(self.CAMERA_SETTING_ALIASES.get(name, (name,)), value)
 
     def show_camera_settings_dialog(self):
@@ -2069,7 +2094,7 @@ class VimbaSALSWidget(QWidget):
             ("Controls / Gain", "Gain", self.gain_edit.text().strip(), None),
             ("Acquisition", "Preview fps", self.fps_spinbox.value(), None),
         ]
-        for section, name, value in self.DEFAULT_CAMERA_FEATURES:
+        for section, name, value in self.camera_default_features():
             rows.append((section, name, value, None))
         rows.extend([
             ("ImageMode", "SensorWidth", 2048, None),
@@ -2302,7 +2327,7 @@ class VimbaSALSWidget(QWidget):
             "ExposureTime",
             "Gain",
         ]
-        ordered_names.extend(name for _, name, _ in self.DEFAULT_CAMERA_FEATURES if name not in ordered_names)
+        ordered_names.extend(name for _, name, _ in self.camera_default_features() if name not in ordered_names)
         ordered_names.extend(name for name in values if name not in ordered_names)
         for name in ordered_names:
             if name in values:
@@ -2335,11 +2360,11 @@ class VimbaSALSWidget(QWidget):
             "ExposureTime": float(self.DEFAULT_EXPOSURE_US),
             "Gain": float(self.DEFAULT_GAIN),
         }
-        defaults.update({name: value for _, name, value in self.DEFAULT_CAMERA_FEATURES if isinstance(value, (int, float))})
+        defaults.update({name: value for _, name, value in self.camera_default_features() if isinstance(value, (int, float))})
         return defaults
 
     def boolean_camera_setting(self, name):
-        for _, feature_name, value in self.DEFAULT_CAMERA_FEATURES:
+        for _, feature_name, value in self.camera_default_features():
             if feature_name == name:
                 return isinstance(value, bool)
         return False
@@ -2500,13 +2525,23 @@ class VimbaSALSWidget(QWidget):
             frame = self.camera.get_frame(timeout_ms=1000)
             if self.is_closing:
                 return
+            frame_status = self.frame_status_text(frame)
+            if not self.frame_status_is_complete(frame_status):
+                self.dropped_incomplete_frames += 1
+                self.last_frame_status = frame_status
+                self.status_label.setText(
+                    f"Dropped incomplete Vimba frame ({frame_status}); "
+                    f"{self.dropped_incomplete_frames} dropped. Check Windows GigE settings."
+                )
+                return
+            self.last_frame_status = frame_status
             image = np.asarray(self.frame_to_numpy(frame))
             if image.ndim == 3 and image.shape[-1] == 1:
                 image = image[:, :, 0]
             elif image.ndim == 3:
                 image = image.mean(axis=2)
             image = np.flipud(image)
-            self.current_frame = np.asarray(image)
+            self.current_frame = np.array(image, copy=True)
             self.frame_index += 1
             self.update_preview()
             self.update_connection_state(self.camera is not None)
@@ -2515,6 +2550,30 @@ class VimbaSALSWidget(QWidget):
                 self.status_label.setText(f"Frame grab failed: {exc}")
         finally:
             self.is_grabbing_frame = False
+
+    def frame_status_text(self, frame):
+        for method_name in ("get_status", "get_receive_status"):
+            try:
+                value = getattr(frame, method_name)()
+            except Exception:
+                continue
+            return str(getattr(value, "name", value))
+
+        for attr_name in ("receive_status", "receiveStatus", "status"):
+            value = getattr(frame, attr_name, None)
+            if value is not None:
+                return str(getattr(value, "name", value))
+        return "Complete"
+
+    def frame_status_is_complete(self, status_text):
+        text = str(status_text).strip().lower()
+        if not text:
+            return True
+        if text in {"0", "complete", "framestatus.complete", "vmbframestatuscomplete"}:
+            return True
+        if "incomplete" in text or "too_small" in text or "toosmall" in text or "invalid" in text:
+            return False
+        return "complete" in text
 
     def frame_to_numpy(self, frame):
         source_format = frame.get_pixel_format()
@@ -2540,7 +2599,7 @@ class VimbaSALSWidget(QWidget):
                 continue
             try:
                 converted_frame = frame.convert_pixel_format(target_format)
-                return converted_frame.as_numpy_ndarray()
+                return np.array(converted_frame.as_numpy_ndarray(), copy=True)
             except Exception:
                 continue
 
@@ -3165,6 +3224,8 @@ class VimbaSALSWidget(QWidget):
             "Camera": f"Allied Vision {self.CAMERA_MODEL}",
             "CameraID": self.CAMERA_ID,
             "PixelFormat": self.pixel_format_combo.currentText().strip(),
+            "VimbaFrameStatus": self.last_frame_status,
+            "DroppedIncompleteFrames": str(self.dropped_incomplete_frames),
             "ROIWidth": str(nx),
             "ROIHeight": str(ny),
             "OffsetX": str(self.offset_x_spinbox.value()),
