@@ -666,7 +666,7 @@ class VimbaSALSWidget(QWidget):
         self.preview_intensity_max = 255.0
         self.preview_center_artists = []
         self.colorbar = None
-        self.dropped_incomplete_frames = 0
+        self.incomplete_frame_count = 0
         self.last_frame_status = ""
         self.is_recording_frames = False
         self.recording_started_at = None
@@ -2526,15 +2526,12 @@ class VimbaSALSWidget(QWidget):
             if self.is_closing:
                 return
             frame_status = self.frame_status_text(frame)
+            frame_is_complete = self.frame_status_is_complete(frame_status)
             if not self.frame_status_is_complete(frame_status):
-                self.dropped_incomplete_frames += 1
+                self.incomplete_frame_count += 1
                 self.last_frame_status = frame_status
-                self.status_label.setText(
-                    f"Dropped incomplete Vimba frame ({frame_status}); "
-                    f"{self.dropped_incomplete_frames} dropped. Check Windows GigE settings."
-                )
-                return
-            self.last_frame_status = frame_status
+            else:
+                self.last_frame_status = frame_status
             image = np.asarray(self.frame_to_numpy(frame))
             if image.ndim == 3 and image.shape[-1] == 1:
                 image = image[:, :, 0]
@@ -2545,6 +2542,11 @@ class VimbaSALSWidget(QWidget):
             self.frame_index += 1
             self.update_preview()
             self.update_connection_state(self.camera is not None)
+            if not frame_is_complete:
+                self.status_label.setText(
+                    f"Saved flagged Vimba frame ({frame_status}); "
+                    f"{self.incomplete_frame_count} incomplete frame(s)."
+                )
         except Exception as exc:
             if not self.is_closing:
                 self.status_label.setText(f"Frame grab failed: {exc}")
@@ -3225,7 +3227,7 @@ class VimbaSALSWidget(QWidget):
             "CameraID": self.CAMERA_ID,
             "PixelFormat": self.pixel_format_combo.currentText().strip(),
             "VimbaFrameStatus": self.last_frame_status,
-            "DroppedIncompleteFrames": str(self.dropped_incomplete_frames),
+            "IncompleteFrames": str(self.incomplete_frame_count),
             "ROIWidth": str(nx),
             "ROIHeight": str(ny),
             "OffsetX": str(self.offset_x_spinbox.value()),
