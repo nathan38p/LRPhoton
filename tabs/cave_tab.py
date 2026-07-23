@@ -644,6 +644,16 @@ def read_h5_frame(filename: str, dataset_name: str, frame_index: int = 0, add_ma
         for key, value in dataset.attrs.items():
             header[key] = str(value)
 
+        # Les H5 exportés par le Sandbox stockent une partie de la géométrie
+        # au niveau racine (et parfois sur le groupe detector), pas sur le
+        # dataset image. La Cave tab doit récupérer ces métadonnées aussi.
+        for obj in (h5, h5.get("/entry_0000/instrument/detector")):
+            if obj is None:
+                continue
+            for key, value in obj.attrs.items():
+                if key not in header:
+                    header[key] = str(value)
+
         if add_matching_center:
             add_matching_edf_center(header, filename)
 
@@ -4316,6 +4326,8 @@ class CaveTab(QWidget):
             "Distance",
             "DetectorDistance",
             "detector_distance",
+            "Distance_m",
+            "distance_m",
         )
         pixel_x = get_header_float(
             self.header,
@@ -4325,6 +4337,8 @@ class CaveTab(QWidget):
             "PixelSizeX",
             "pixel_size_x",
             "x_pixel_size",
+            "PixelSizeX_mm",
+            "pixel_size_x_mm",
         )
         pixel_y = get_header_float(
             self.header,
@@ -4334,6 +4348,8 @@ class CaveTab(QWidget):
             "PixelSizeY",
             "pixel_size_y",
             "y_pixel_size",
+            "PixelSizeY_mm",
+            "pixel_size_y_mm",
         )
         wavelength = get_header_float(
             self.header,
@@ -4342,6 +4358,8 @@ class CaveTab(QWidget):
             "wavelength",
             "Lambda",
             "lambda",
+            "Wavelength_nm",
+            "wavelength_nm",
         )
 
         if self.instrument_mode == "ID02":

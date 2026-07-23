@@ -202,6 +202,12 @@ def read_h5_first_image(filename: str, frame_index: int = 0):
 
         for key, value in dataset.attrs.items():
             header[key] = str(value)
+        for obj in (h5, h5.get("/entry_0000/instrument/detector")):
+            if obj is None:
+                continue
+            for key, value in obj.attrs.items():
+                if key not in header:
+                    header[key] = str(value)
 
         add_matching_edf_center(header, filename)
 
@@ -1573,7 +1579,7 @@ class AzimuthalTab(QWidget):
         filters_layout = QGridLayout()
 
         self.extensions_filter = QLineEdit("*.edf *.h5")
-        self.name_filter = QLineEdit("*cave*")
+        self.name_filter = QLineEdit("*")
 
         self.extensions_filter.textChanged.connect(self.refresh_files)
         self.name_filter.textChanged.connect(self.refresh_files)
@@ -2395,6 +2401,27 @@ class AzimuthalTab(QWidget):
             except Exception:
                 header = {}
         self.current_header_for_line_geometry = header
+
+        tilt_plane = get_header_float(
+            header, "TiltPlane", "tilt_plane", "TiltPlane_deg", "tilt_plane_deg",
+            "DetectorTiltPlane", "tilt plane", "Tilt plane",
+        )
+        if tilt_plane is None and file_path is not None and "WOS" in Path(file_path).name.upper():
+            tilt_plane = 2.87602
+        if hasattr(self, "reference_angle"):
+            self.reference_angle.setValue(-abs(float(tilt_plane)) if tilt_plane is not None else 0.0)
+
+        # Le q-range doit venir du fichier lorsqu'il est présent, jamais d'un
+        # profil BM02 laissé en mémoire. Sans q-range dans le header, on laisse
+        # l'utilisateur intégrer toute la plage q.
+        header_q_min = get_header_float(header, "QMin", "Q Min", "q_min", "qmin", "q_min_nm-1", "q_min_nm^-1")
+        header_q_max = get_header_float(header, "QMax", "Q Max", "q_max", "qmax", "q_max_nm-1", "q_max_nm^-1")
+        if header_q_min is not None and header_q_max is not None and header_q_max > header_q_min:
+            self.use_q_range.setChecked(True)
+            self.q_min.setValue(header_q_min)
+            self.q_max.setValue(header_q_max)
+        else:
+            self.use_q_range.setChecked(False)
 
         if self.instrument_mode == "XENOCS":
             cx = get_header_float(header, *CENTER_X_KEYS)

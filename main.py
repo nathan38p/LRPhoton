@@ -397,16 +397,18 @@ class ColoredTabBar(QTabBar):
         6: ("#ffedd5", "#f97316"),  # Average
         7: ("#ffedd5", "#f97316"),  # Cave
         8: ("#ffedd5", "#f97316"),  # Unfold
-        9: ("#dcfce7", "#16a34a"),  # Radial
-        10: ("#dcfce7", "#16a34a"),  # Azimuthal
-        11: ("#f3e8ff", "#9333ea"),  # Anisotropy
-        12: ("#cffafe", "#0891b2"),  # Distances
-        13: ("#e5e7eb", "#6b7280"),  # Sandbox
+        8: ("#dcfce7", "#16a34a"),  # Radial
+        9: ("#dcfce7", "#16a34a"),  # Azimuthal
+        10: ("#f3e8ff", "#9333ea"),  # Anisotropy
+        11: ("#cffafe", "#0891b2"),  # Distances
+        12: ("#e5e7eb", "#6b7280"),  # Sandbox
     }
 
     def tabSizeHint(self, index):
         size = super().tabSizeHint(index)
-        return QSize(size.width() + 4, 30)
+        # Keep the complete navigation usable on compact windows; the tab bar
+        # still provides scroll buttons when the tabs do not all fit.
+        return QSize(max(76, int(size.width() * 1.0)), 30)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -480,7 +482,11 @@ class MainWindow(QMainWindow):
                 visible_width += self.tab_bar.tabSizeHint(index).width()
 
         if visible_width > 0:
-            self.tab_bar.setFixedWidth(visible_width + 8)
+            # Do not let the tab bar push the header outside the window.
+            # When constrained, QTabBar's scroll buttons expose the remaining tabs.
+            # Reserve the branding block on the left of the header as well.
+            available_width = max(420, self.width() - 430)
+            self.tab_bar.setFixedWidth(min(visible_width + 8, available_width))
         self.tab_bar.updateGeometry()
         self.tab_bar.update()
 
@@ -773,7 +779,6 @@ class MainWindow(QMainWindow):
         self.capture_sals_tab_index = self.tab_bar.addTab("📷 Capture")
         self.tools_tab_index = self.tab_bar.addTab("🛠️ Tools")
         self.centre_tab_index = self.tab_bar.addTab("🎯 Center")
-        self.background_tab_index = self.tab_bar.addTab("🧹 Background")
         self.tab_bar.addTab("🧮 Average")
         self.tab_bar.addTab("🕳️ Cave")
         self.unfold_tab_index = self.tab_bar.addTab("Unfold")
@@ -783,9 +788,6 @@ class MainWindow(QMainWindow):
         self.distances_tab_index = self.tab_bar.addTab("📏 Distances")
         self.sandbox_tab_index = self.tab_bar.addTab("🧪 Sandbox")
 
-        self.tab_bar.setTabText(self.background_tab_index, "🧹 Background")
-        self.tab_bar.setTabVisible(self.background_tab_index, False)
-        self.tab_bar.setTabEnabled(self.background_tab_index, False)
 
         self.tab_bar.setTabText(self.tools_tab_index, "🛠️ Tools")
         self.tab_bar.setTabVisible(self.tools_tab_index, False)
@@ -931,6 +933,9 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # Recompute the navigation width after the window has its real size;
+        # otherwise it can remain at the compact startup width.
+        self.refresh_tab_bar_width()
         self.sync_pages_width_to_window()
 
     def sync_pages_width_to_window(self):
@@ -1037,16 +1042,12 @@ class MainWindow(QMainWindow):
         from tabs.tools_tab import ToolsTab
         from tabs.sandbox_tab import SandboxTab
         from tabs.VimbaSALS import VimbaSALSWidget
-
-        BackgroundTab = self.resolve_background_tab_class()
-
         self.view_tab = ViewTab()
         self.datplot_tab = DatPlotTab()
         self.capture_sals_tab = VimbaSALSWidget()
         self.tools_tab = ToolsTab()
 
         self.centre_tab = CentreTab()
-        self.background_tab = BackgroundTab()
         self.cave_tab = CaveTab()
         self.average_tab = AverageTab()
         self.radial_tab = RadialTab()
@@ -1078,7 +1079,6 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.capture_sals_tab)
         self.pages.addWidget(self.tools_tab)
         self.pages.addWidget(self.centre_tab)
-        self.pages.addWidget(self.background_tab)
         self.pages.addWidget(self.average_tab)
         self.pages.addWidget(self.cave_tab)
         self.pages.addWidget(self.unfold_tab)
@@ -1096,7 +1096,6 @@ class MainWindow(QMainWindow):
             self.datplot_tab,
             self.tools_tab,
             self.centre_tab,
-            self.background_tab,
             self.average_tab,
             self.cave_tab,
             self.radial_tab,

@@ -283,6 +283,12 @@ def inspect_h5_image_dataset(filename: str):
 
         for key, value in dataset.attrs.items():
             header[key] = str(value)
+        for obj in (h5, h5.get("/entry_0000/instrument/detector")):
+            if obj is None:
+                continue
+            for key, value in obj.attrs.items():
+                if key not in header:
+                    header[key] = str(value)
 
         add_matching_edf_center(header, filename)
 
@@ -367,10 +373,10 @@ def get_header_float(header: dict, *names):
 def header_q_geometry_values(header: dict):
     cx = get_header_float(header, *CENTER_X_KEYS)
     cy = get_header_float(header, *CENTER_Y_KEYS)
-    dist = get_header_float(header, "SampleDistance", "sampledistance", "sample_distance", "Distance", "DetectorDistance")
-    px = get_header_float(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX", "pixel_size_x", "x_pixel_size")
-    py = get_header_float(header, "PSize_2", "psize_2", "PSize_Y", "PixelSizeY", "pixel_size_y", "y_pixel_size")
-    wav = get_header_float(header, "WaveLength", "Wavelength", "wavelength", "Lambda", "lambda")
+    dist = get_header_float(header, "SampleDistance", "sampledistance", "sample_distance", "Distance", "DetectorDistance", "Distance_m", "distance_m")
+    px = get_header_float(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX", "pixel_size_x", "x_pixel_size", "PixelSizeX_mm", "pixel_size_x_mm")
+    py = get_header_float(header, "PSize_2", "psize_2", "PSize_Y", "PixelSizeY", "pixel_size_y", "y_pixel_size", "PixelSizeY_mm", "pixel_size_y_mm")
+    wav = get_header_float(header, "WaveLength", "Wavelength", "wavelength", "Lambda", "lambda", "Wavelength_nm", "wavelength_nm")
 
     values = {
         "cx": cx,
@@ -878,6 +884,41 @@ def radial_average(
     return q_axis, intensity, counts, valid
 
 
+def radial_average_from_q_map(image, q_map, q_min, q_max, n_bins,
+                              sector_min=0, sector_max=360, min_pixels_per_bin=1,
+                              center_x=None, center_y=None):
+    """Integrate a hand-corrected Nexus q-map directly, pixel by pixel."""
+    img = np.asarray(image, dtype=float)
+    q = np.asarray(q_map, dtype=float)
+    if img.shape != q.shape:
+        raise ValueError("q-map shape does not match image shape")
+    valid = np.isfinite(img) & (img >= 0) & (img < 4e9) & np.isfinite(q) & (q > 0)
+    if q_min > 0:
+        valid &= q >= q_min
+    if q_max > 0:
+        valid &= q <= q_max
+    if center_x is not None and center_y is not None and abs((sector_max - sector_min) % 360.0) > 1e-9:
+        yy, xx = np.indices(img.shape)
+        psi = np.degrees(np.arctan2(yy - (float(center_y) - 1.0), xx - (float(center_x) - 1.0))) % 360.0
+        a, b = float(sector_min) % 360.0, float(sector_max) % 360.0
+        valid &= ((psi >= a) & (psi <= b)) if a <= b else ((psi >= a) | (psi <= b))
+    values_q, values_i = q[valid], img[valid]
+    if values_q.size == 0:
+        raise ValueError("No valid pixel found in the selected q range / sector.")
+    lo = float(q_min) if q_min > 0 else float(np.nanmin(values_q))
+    hi = float(q_max) if q_max > 0 else float(np.nanmax(values_q))
+    if hi <= lo:
+        raise ValueError("q max must be greater than q min.")
+    edges = np.linspace(lo, hi, int(n_bins) + 1)
+    q_axis = 0.5 * (edges[:-1] + edges[1:])
+    sums, _ = np.histogram(values_q, bins=edges, weights=values_i)
+    counts, _ = np.histogram(values_q, bins=edges)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        intensity = sums / counts
+    keep = (counts >= max(1, int(min_pixels_per_bin))) & np.isfinite(intensity) & (intensity > 0)
+    return q_axis[keep], intensity[keep], counts[keep].astype(int), ~valid
+
+
 def pyfai_radial_average(
     image,
     xc,
@@ -956,8 +997,10 @@ def pyfai_radial_average(
     if abs(raw_sector_max - raw_sector_min) >= 1e-9 and abs((raw_sector_max - raw_sector_min) % 360.0) >= 1e-9:
         # pyFAI uses chi in [-180, 180]. For wrapping sectors, keep the local
         # integrator path; it handles 0..360 sectors explicitly.
-        if -180.0 <= raw_sector_min <= 180.0 and -180.0 <= raw_sector_max <= 180.0 and raw_sector_min < raw_sector_max:
-            azimuth_range = (raw_sector_min, raw_sector_max)
+        norm_min = ((raw_sector_min + 180.0) % 360.0) - 180.0
+        norm_max = ((raw_sector_max + 180.0) % 360.0) - 180.0
+        if norm_min < norm_max:
+            azimuth_range = (norm_min, norm_max)
 
     result = integrator.integrate1d(
         img,
@@ -1702,6 +1745,7 @@ class ImageCanvas(FigureCanvas):
         self.last_xc = None
         self.last_yc = None
         self.last_mask = None
+        self.reference_angle_deg = 0.0
 
         self.mpl_connect("scroll_event", self._on_scroll)
         self.mpl_connect("button_press_event", self._on_press)
@@ -1838,6 +1882,9 @@ class ImageCanvas(FigureCanvas):
     def set_coordinate_label(self, label):
         self.coordinate_label = label
 
+    def set_reference_angle(self, angle_deg):
+        self.reference_angle_deg = float(angle_deg)
+
     def reset_display_limits(self):
         self.display_vmin = None
         self.display_vmax = None
@@ -1920,7 +1967,7 @@ class ImageCanvas(FigureCanvas):
                         if self.last_xc is not None and self.last_yc is not None:
                             dx = (x_index + 1) - self.last_xc
                             dy = (y_index + 1) - self.last_yc
-                            psi = np.degrees(np.arctan2(dy, dx)) % 360.0
+                            psi = (np.degrees(np.arctan2(dy, dx)) - self.reference_angle_deg) % 360.0
                             psi_text = f"{psi:.3f}°"
 
                 self.coordinate_label.setText(
@@ -1997,15 +2044,22 @@ class ImageCanvas(FigureCanvas):
         if xc is not None and yc is not None:
             center_x = float(xc) - 1.0
             center_y = float(yc) - 1.0
-            self.ax.axvline(center_x, color="red", linewidth=1.0)
-            self.ax.axhline(center_y, color="red", linewidth=1.0)
+            ny, nx = image.shape
+            angle0 = np.deg2rad(float(self.reference_angle_deg))
+            angle90 = angle0 + np.pi / 2.0
+            line_radius = max(nx, ny) * 2.0
+            for line_angle in (angle0, angle90):
+                dx_line = line_radius * np.cos(line_angle)
+                dy_line = line_radius * np.sin(line_angle)
+                self.ax.plot([center_x - dx_line, center_x + dx_line],
+                             [center_y - dy_line, center_y + dy_line],
+                             color="red", linewidth=1.0)
             self.ax.plot(center_x, center_y, "wo", markersize=4)
 
-            ny, nx = image.shape
             radius = min(nx, ny) * 0.35
             angle_marks = [0, 90, 180, 270]
             for angle in angle_marks:
-                rad = np.deg2rad(angle)
+                rad = np.deg2rad(angle + float(self.reference_angle_deg))
                 x_text = center_x + radius * np.cos(rad)
                 y_text = center_y + radius * np.sin(rad)
                 self.ax.text(
@@ -2226,7 +2280,7 @@ class RadialTab(QWidget):
         filters_layout = QGridLayout()
 
         self.extensions_filter = QLineEdit("*.edf *.h5")
-        self.name_filter = QLineEdit("*cave*")
+        self.name_filter = QLineEdit("*")
 
         self.extensions_filter.textChanged.connect(self.refresh_files)
         self.name_filter.textChanged.connect(self.refresh_files)
@@ -2317,11 +2371,20 @@ class RadialTab(QWidget):
         self.use_id13_pyfai_comparison.setChecked(False)
         self.use_id13_pyfai_comparison.setVisible(False)
 
+        self.reference_angle = self.double_spin(0.0, decimals=6, minimum=-360.0)
+        self.reference_angle.setRange(-360.0, 360.0)
+        self.reference_angle.setSingleStep(1.0)
+        self.reference_angle.setSuffix(" °")
+        self.reference_angle.valueChanged.connect(self.reference_angle_changed)
+
         self.use_sector = QCheckBox("Use azimuthal sector")
         self.use_sector.setChecked(False)
         self.use_sector.stateChanged.connect(self.update_mask_parameter_state)
+        self.use_sector.stateChanged.connect(self.refresh_preview_selection)
         self.sector_min = self.double_spin(0, decimals=3, minimum=-360)
         self.sector_max = self.double_spin(360, decimals=3, minimum=-360)
+        self.sector_min.valueChanged.connect(self.refresh_preview_selection)
+        self.sector_max.valueChanged.connect(self.refresh_preview_selection)
         self.n_bins = QSpinBox()
         self.n_bins.setRange(10, 10000)
         self.n_bins.setValue(1000)
@@ -2337,6 +2400,8 @@ class RadialTab(QWidget):
         self.q_max_filter.setToolTip("Optional q max in nm⁻¹. Leave empty for no upper bound.")
         self.q_max_filter.setFixedHeight(24)
         self.q_max_filter.setMinimumWidth(130)
+        self.q_min_filter.textChanged.connect(self.refresh_preview_selection)
+        self.q_max_filter.textChanged.connect(self.refresh_preview_selection)
         self.normalization_mode = QComboBox()
         self.normalization_mode.addItem("Raw detector intensity", "raw")
         self.normalization_mode.addItem("Counts/s: I / ExposureTime", "exposure")
@@ -2386,15 +2451,17 @@ class RadialTab(QWidget):
         self.frame_spin.hide()
         self.frame_spin.valueChanged.connect(self.update_selected_h5_frame)
 
-        form.addWidget(self.use_sector, 0, 0, 1, 2)
-        form.addWidget(QLabel("Sector min ψ (°):"), 1, 0)
-        form.addWidget(self.sector_min, 1, 1)
-        form.addWidget(QLabel("Sector max ψ (°):"), 2, 0)
-        form.addWidget(self.sector_max, 2, 1)
-        form.addWidget(QLabel("q min (nm⁻¹):"), 3, 0)
-        form.addWidget(self.q_min_filter, 3, 1)
-        form.addWidget(QLabel("q max (nm⁻¹):"), 4, 0)
-        form.addWidget(self.q_max_filter, 4, 1)
+        form.addWidget(QLabel("Reference angle (°):"), 0, 0)
+        form.addWidget(self.reference_angle, 0, 1)
+        form.addWidget(self.use_sector, 1, 0, 1, 2)
+        form.addWidget(QLabel("Sector min ψ (°):"), 2, 0)
+        form.addWidget(self.sector_min, 2, 1)
+        form.addWidget(QLabel("Sector max ψ (°):"), 3, 0)
+        form.addWidget(self.sector_max, 3, 1)
+        form.addWidget(QLabel("q min (nm⁻¹):"), 4, 0)
+        form.addWidget(self.q_min_filter, 4, 1)
+        form.addWidget(QLabel("q max (nm⁻¹):"), 5, 0)
+        form.addWidget(self.q_max_filter, 5, 1)
 
         params_layout.addLayout(form)
 
@@ -2568,6 +2635,14 @@ class RadialTab(QWidget):
         self.btn_id13.clicked.connect(lambda: self.set_instrument_mode("ID13"))
         self.btn_custom.clicked.connect(self.open_geometry_dialog)
         self.update_mask_parameter_state()
+
+    def reference_angle_changed(self, *_args):
+        """Update the displayed ψ reference and the selected-area overlay."""
+        if hasattr(self, "image_canvas"):
+            self.image_canvas.set_reference_angle(float(self.reference_angle.value()))
+        self.refresh_preview_selection()
+        if getattr(self, "last_results", None):
+            self.integrate_selected_files()
 
     def update_mask_parameter_state(self):
         use_sector = self.use_sector.isChecked()
@@ -3088,6 +3163,15 @@ class RadialTab(QWidget):
                 header = {}
         self.current_header_for_line_geometry = header
 
+        tilt_plane = get_header_float(
+            header, "TiltPlane", "tilt_plane", "TiltPlane_deg", "tilt_plane_deg",
+            "DetectorTiltPlane", "tilt plane", "Tilt plane",
+        )
+        if tilt_plane is None and file_path is not None and "WOS" in Path(file_path).name.upper():
+            tilt_plane = 2.87602
+        if hasattr(self, "reference_angle"):
+            self.reference_angle.setValue(-abs(float(tilt_plane)) if tilt_plane is not None else 0.0)
+
         if self.instrument_mode == "XENOCS":
             values, missing = header_q_geometry_values(header)
 
@@ -3159,13 +3243,52 @@ class RadialTab(QWidget):
                 q_map = q_from_detector_geometry(r_m, float(self.distance.value()), float(self.wavelength.value()))
 
             self.image_canvas.set_q_map(q_map)
-            self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=None)
+            self.image_canvas.set_reference_angle(float(self.reference_angle.value()))
+            preview_mask = self.preview_selection_mask(image, q_map)
+            self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=preview_mask)
             self.sync_image_intensity_sliders()
             self.image_coordinate_label.setText("ψ = - | q = - | I = -")
+
         except Exception as error:
             self.image_canvas.raw_image = None
             self.image_canvas.set_q_map(None)
             self.image_coordinate_label.setText("ψ = - | q = - | I = -")
+
+    def refresh_preview_selection(self, *_args):
+        """Refresh only the Selected area overlay when radial limits change."""
+        if not hasattr(self, "image_canvas") or self.image_canvas.raw_image is None:
+            return
+        self.image_canvas.set_reference_angle(float(self.reference_angle.value()))
+        preview_mask = self.preview_selection_mask(self.image_canvas.raw_image, self.image_canvas.q_map)
+        self.image_canvas.show_image(
+            self.image_canvas.raw_image,
+            self.image_canvas.last_xc,
+            self.image_canvas.last_yc,
+            mask=preview_mask,
+        )
+    def preview_selection_mask(self, image, q_map):
+        """Mask used only for preview: keep the selected q/sector area bright."""
+        if q_map is None or np.shape(q_map) != np.shape(image):
+            return None
+        selected = np.isfinite(q_map) & (q_map > 0)
+        q_min, q_max = self.q_range_filter_values()
+        if q_min > 0:
+            selected &= q_map >= q_min
+        if q_max > 0:
+            selected &= q_map <= q_max
+        if self.use_sector.isChecked():
+            yy, xx = np.indices(image.shape)
+            dx = xx.astype(float) - (float(self.center_x.value()) - 1.0)
+            dy = yy.astype(float) - (float(self.center_y.value()) - 1.0)
+            psi = (np.degrees(np.arctan2(dy, dx)) - float(self.reference_angle.value())) % 360.0
+            sector_min = float(self.sector_min.value()) % 360.0
+            sector_max = float(self.sector_max.value()) % 360.0
+            if abs((sector_max - sector_min) % 360.0) > 1e-9:
+                if sector_min <= sector_max:
+                    selected &= (psi >= sector_min) & (psi <= sector_max)
+                else:
+                    selected &= (psi >= sector_min) | (psi <= sector_max)
+        return selected
 
     def radial_integration_tasks(self, files, all_h5_frames=False):
         tasks = []
@@ -3285,8 +3408,9 @@ class RadialTab(QWidget):
                     image, header = read_image_file(file_path, task["dataset_name"], task["frame_index"])
                     q_min = q_min_filter
                     q_max = q_max_filter
-                    sector_min = self.sector_min.value() if self.use_sector.isChecked() else 0
-                    sector_max = self.sector_max.value() if self.use_sector.isChecked() else 360
+                    reference_angle = float(self.reference_angle.value())
+                    sector_min = (self.sector_min.value() + reference_angle) if self.use_sector.isChecked() else 0
+                    sector_max = (self.sector_max.value() + reference_angle) if self.use_sector.isChecked() else 360
                     use_log_bins = self.plot_mode.currentText() in RADIAL_LOG_X_MODES or self.plot_mode.currentText() in ["qI log", "qI log linear", "Kratky log", "Kratky log linear"]
 
                     diagnostics = q_geometry_diagnostics(
@@ -3315,23 +3439,21 @@ class RadialTab(QWidget):
 
                     try:
                         matched_poni = self.poni_file_for_image(file_path)
-                        effective_engine = f"pyFAI + {matched_poni.name}" if matched_poni is not None else "pyFAI"
-                        q, intensity, counts, mask = pyfai_radial_average(
-                            image,
-                            self.center_x.value(),
-                            self.center_y.value(),
-                            self.distance.value(),
-                            self.pixel_x.value(),
-                            self.pixel_y.value(),
-                            self.wavelength.value(),
-                            q_min,
-                            q_max,
-                            self.n_bins.value(),
-                            sector_min,
-                            sector_max,
-                            self.min_pixels_per_bin.value(),
-                            poni_path=matched_poni,
-                        )
+                        effective_engine = f"q-map Nexus ({file_path.name})" if suppress_q and q_map is not None else (f"pyFAI + {matched_poni.name}" if matched_poni is not None else "pyFAI")
+                        if suppress_q and q_map is not None:
+                            q, intensity, counts, mask = radial_average_from_q_map(
+                                image, q_map, q_min, q_max, self.n_bins.value(),
+                                sector_min, sector_max, self.min_pixels_per_bin.value(),
+                                self.center_x.value(), self.center_y.value(),
+                            )
+                        else:
+                            q, intensity, counts, mask = pyfai_radial_average(
+                                image, self.center_x.value(), self.center_y.value(),
+                                self.distance.value(), self.pixel_x.value(), self.pixel_y.value(),
+                                self.wavelength.value(), q_min, q_max, self.n_bins.value(),
+                                sector_min, sector_max, self.min_pixels_per_bin.value(),
+                                poni_path=matched_poni,
+                            )
                     except Exception as pyfai_error:
                         raise RuntimeError(f"pyFAI integration failed: {pyfai_error}") from pyfai_error
 

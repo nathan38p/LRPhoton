@@ -52,6 +52,7 @@ from tabs.background_tab import BackgroundTab
 from tabs.sandbox_header_editor import HeaderEditorTab
 from tabs.tools_tab import ToolsTab
 from tabs.sandbox_double_detector import DoubleDetectorProject
+from tabs.sandbox_mask_project import MaskProject
 
 
 class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMixin, QWidget):
@@ -136,6 +137,10 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.open_double_detector_project_button = self.make_project_button("🧩 BM02 D2AM")
         self.open_double_detector_project_button.clicked.connect(self.open_double_detector_project)
         selector_buttons.addWidget(self.open_double_detector_project_button, 2, 0, 1, 2)
+
+        self.open_mask_project_button = self.make_project_button("🎭 Apply Mask")
+        self.open_mask_project_button.clicked.connect(self.open_mask_project)
+        selector_buttons.addWidget(self.open_mask_project_button, 3, 0, 1, 2)
 
         selector_layout.addLayout(selector_buttons)
         selector_layout.addStretch(1)
@@ -542,6 +547,10 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.double_detector_project_page = self.wrap_sandbox_project(self.double_detector_project)
         self.project_stack.addWidget(self.double_detector_project_page)
 
+        self.mask_project = MaskProject()
+        self.mask_project_page = self.wrap_sandbox_project(self.mask_project)
+        self.project_stack.addWidget(self.mask_project_page)
+
     def make_project_button(self, text):
         button = QPushButton(text)
         button.setMinimumSize(190, 70)
@@ -620,6 +629,9 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
 
     def open_double_detector_project(self):
         self.project_stack.setCurrentWidget(self.double_detector_project_page)
+
+    def open_mask_project(self):
+        self.project_stack.setCurrentWidget(self.mask_project_page)
 
     def apply_sandbox_project(self, name):
         is_imogolite = name == "Imogolite distance"

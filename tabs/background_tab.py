@@ -876,6 +876,12 @@ class BackgroundTab(QWidget):
 
             edf_image = EdfImage(data=np.asarray(result, dtype=np.float32))
             edf_image.write(edf_path)
+            if self.sample_stack.kind == "hdf5":
+                h5_path = os.path.join(
+                    self.output_folder_path,
+                    f"{base_name}_frame_{frame_index:04d}.h5",
+                )
+                self.write_background_h5(h5_path, result, frame_index)
 
             if self.save_preview_checkbox.isChecked():
                 png_path = os.path.join(
@@ -928,6 +934,12 @@ class BackgroundTab(QWidget):
 
                 edf_image = EdfImage(data=np.asarray(result, dtype=np.float32))
                 edf_image.write(edf_path)
+                if self.sample_stack.kind == "hdf5":
+                    h5_path = os.path.join(
+                        self.output_folder_path,
+                        f"{base_name}_frame_{frame_index:04d}.h5",
+                    )
+                    self.write_background_h5(h5_path, result, frame_index)
 
                 self.log_text.append(f"Saved EDF: {edf_path}")
 
@@ -935,6 +947,43 @@ class BackgroundTab(QWidget):
 
         except Exception as exc:
             self.status_label.setText(f"Save all error: {exc}")
+
+    def write_background_h5(self, output_path, result, frame_index):
+        """Copy the complete source H5/header and replace only the selected frame."""
+        import h5py
+
+        source_path = self.sample_file_path
+        dataset_path = self.sample_stack.dataset_path
+        with h5py.File(source_path, "r") as source, h5py.File(output_path, "w") as out:
+            for key, value in source.attrs.items():
+                out.attrs[key] = value
+            for key in source.keys():
+                source.copy(key, out, name=key)
+            if dataset_path not in out:
+                raise ValueError(f"Dataset {dataset_path} is missing from copied H5.")
+            dataset = out[dataset_path]
+            dataset_attrs = dict(dataset.attrs.items())
+            source_data = np.asarray(dataset[()], dtype=np.float32)
+            if self.sample_stack.frame_axis is None:
+                source_data = np.asarray(result, dtype=np.float32)
+            else:
+                index = [slice(None)] * dataset.ndim
+                index[self.sample_stack.frame_axis] = int(frame_index)
+                source_data[tuple(index)] = np.asarray(result, dtype=np.float32)
+            parent = out[dataset_path.rsplit("/", 1)[0] or "/"]
+            name = dataset_path.rsplit("/", 1)[-1]
+            del parent[name]
+            dataset = parent.create_dataset(name, data=source_data, compression="gzip")
+            for key, value in dataset_attrs.items():
+                dataset.attrs[key] = value
+            dataset.attrs["background_subtracted"] = True
+            dataset.attrs["background_source"] = str(self.background_file_path)
+            dataset.attrs["background_scale"] = float(self.background_scale_spin.value())
+            dataset.attrs["background_offset"] = float(self.offset_spin.value())
+            out.attrs["background_subtracted"] = True
+            out.attrs["background_source"] = str(self.background_file_path)
+            out.attrs["background_scale"] = float(self.background_scale_spin.value())
+            out.attrs["background_offset"] = float(self.offset_spin.value())
 
     def run_background_subtraction(self):
         if not self.sample_file_path:
