@@ -437,6 +437,7 @@ def azimuthal_average(
     psi_points,
     min_pixels_per_bin=1,
     axis_mask_px=0,
+    q_map_override=None,
 ):
     if distance_m <= 0:
         raise ValueError("Detector distance must be > 0.")
@@ -455,15 +456,17 @@ def azimuthal_average(
     dx_px = x + 1 - xc
     dy_px = y + 1 - yc
 
-    # Always use geometric q calculation:
-    dx_m = dx_px * pixel_x_mm * 1e-3
-    dy_m = dy_px * pixel_y_mm * 1e-3
-    r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+    if q_map_override is not None and np.shape(q_map_override) == np.shape(img):
+        q = np.asarray(q_map_override, dtype=float)
+    else:
+        dx_m = dx_px * pixel_x_mm * 1e-3
+        dy_m = dy_px * pixel_y_mm * 1e-3
+        r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
 
-    two_theta = np.arctan2(r_m, distance_m)
-    theta = two_theta / 2
-    wavelength_nm = wavelength_a * 0.1
-    q = (4 * np.pi / wavelength_nm) * np.sin(theta)
+        two_theta = np.arctan2(r_m, distance_m)
+        theta = two_theta / 2
+        wavelength_nm = wavelength_a * 0.1
+        q = (4 * np.pi / wavelength_nm) * np.sin(theta)
 
     psi = (np.degrees(np.arctan2(dy_px, dx_px)) + 360) % 360
 
@@ -2771,8 +2774,28 @@ class AzimuthalTab(QWidget):
                     q_min = 0
                     q_max = np.inf
 
+                embedded_q_map = read_h5_q_map(file_path, image.shape)
+                q_override = embedded_q_map if embedded_q_map is not None else None
+
                 engine = self.integration_engine.currentText()
-                if engine == "pyFAI":
+                if q_override is not None:
+                    psi, intensity, counts, mask, q_map = azimuthal_average(
+                        image,
+                        self.center_x.value(),
+                        self.center_y.value(),
+                        self.distance.value(),
+                        self.pixel_x.value(),
+                        self.pixel_y.value(),
+                        self.wavelength.value(),
+                        q_min,
+                        q_max,
+                        self.n_points.value(),
+                        self.min_pixels_per_bin.value(),
+                        self.axis_mask_pixels.value(),
+                        q_map_override=q_override,
+                    )
+                    engine = "LRPhoton embedded q map"
+                elif engine == "pyFAI":
                     try:
                         psi, intensity, counts, mask, q_map = pyfai_azimuthal_average(
                             image,

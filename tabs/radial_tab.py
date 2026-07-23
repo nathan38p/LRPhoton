@@ -3539,7 +3539,16 @@ class RadialTab(QWidget):
 
                     if index == 1:
                         self.image_canvas.set_q_map(q_map)
-                        self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=mask)
+                        # radial_average_from_q_map returns an exclusion mask
+                        # (True = pixel not used), while Selected area expects
+                        # a selection mask (True = pixel used).
+                        selected_area_mask = None if mask is None else ~np.asarray(mask, dtype=bool)
+                        self.image_canvas.show_image(
+                            image,
+                            self.center_x.value(),
+                            self.center_y.value(),
+                            mask=selected_area_mask,
+                        )
                         self.sync_image_intensity_sliders()
                     frame_text = (
                         f" | H5 frame {task['frame_index'] + 1} / {frame_count}"
