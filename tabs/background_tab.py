@@ -158,7 +158,6 @@ class BackgroundTab(QWidget):
 
         parameters_box = QGroupBox("Background tools")
         parameters_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
-        parameters_box.setFixedWidth(FILE_BROWSER_WIDTH)
         parameters_layout = QVBoxLayout(parameters_box)
         parameters_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         parameters_layout.setSpacing(6)
@@ -201,6 +200,12 @@ class BackgroundTab(QWidget):
         install_file_rating_menu(self.file_list)
         self.file_list.itemSelectionChanged.connect(self.select_sample_files_from_browser)
         file_browser_layout.addWidget(self.file_list, 1)
+
+        mask_box = QGroupBox("Mask")
+        mask_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
+        mask_layout = QVBoxLayout(mask_box)
+        mask_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        mask_layout.addStretch(1)
 
         self.sample_file_edit = QLineEdit()
         self.sample_file_edit.setPlaceholderText("Sample file")
@@ -309,26 +314,24 @@ class BackgroundTab(QWidget):
         parameters_layout.addWidget(self.save_current_button)
         self.save_current_button.hide()
 
+        parameters_layout.addStretch(1)
         self.run_button = QPushButton("▶️ Run and Save")
         self.run_button.clicked.connect(self.run_background_subtraction)
-        parameters_layout.addWidget(self.run_button)
-        self.batch_progress = QProgressBar()
-        self.batch_progress.setRange(0, 1)
-        self.batch_progress.setValue(0)
-        self.batch_progress.setVisible(False)
-        parameters_layout.addWidget(self.batch_progress)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
-        parameters_layout.addWidget(self.status_label)
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumHeight(80)
         self.log_text.setPlaceholderText("Background processing messages will appear here.")
-        parameters_layout.addWidget(self.log_text)
         self.log_text.hide()
-        parameters_layout.addStretch(1)
+
+        normalization_box = QGroupBox("Normalization")
+        normalization_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
+        normalization_layout = QVBoxLayout(normalization_box)
+        normalization_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        normalization_layout.addStretch(1)
 
         result_box = QGroupBox("Background-subtracted pattern")
         result_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
@@ -357,9 +360,29 @@ class BackgroundTab(QWidget):
         controls_layout = QVBoxLayout(controls_panel)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(BLOCK_SPACING)
-        controls_layout.addWidget(file_browser_box, 1)
-        controls_layout.addWidget(parameters_box, 1)
-        controls_panel.setFixedWidth(FILE_BROWSER_WIDTH)
+        columns_layout = QHBoxLayout()
+        columns_layout.setContentsMargins(0, 0, 0, 0)
+        columns_layout.setSpacing(BLOCK_SPACING)
+        left_controls = QVBoxLayout()
+        left_controls.setContentsMargins(0, 0, 0, 0)
+        left_controls.setSpacing(BLOCK_SPACING)
+        left_controls.addWidget(file_browser_box, 1)
+        left_controls.addWidget(mask_box, 1)
+        right_controls = QVBoxLayout()
+        right_controls.setContentsMargins(0, 0, 0, 0)
+        right_controls.setSpacing(BLOCK_SPACING)
+        right_controls.addWidget(parameters_box, 1)
+        right_controls.addWidget(normalization_box, 1)
+        columns_layout.addLayout(left_controls, 1)
+        columns_layout.addLayout(right_controls, 1)
+        controls_layout.addLayout(columns_layout, 1)
+        self.batch_progress = QProgressBar()
+        self.batch_progress.setRange(0, 1)
+        self.batch_progress.setValue(0)
+        self.batch_progress.setVisible(False)
+        controls_layout.addWidget(self.batch_progress)
+        controls_layout.addWidget(self.run_button)
+        controls_panel.setFixedWidth(FILE_BROWSER_WIDTH * 2 + BLOCK_SPACING)
         content_layout.addWidget(controls_panel, 0)
 
         content_layout.addWidget(result_box, 2)
@@ -972,7 +995,7 @@ class BackgroundTab(QWidget):
             base_name = os.path.splitext(os.path.basename(self.sample_file_path))[0]
         else:
             base_name = "background_subtracted"
-        return f"{base_name}_background_subtracted"
+        return f"{base_name}_sub"
 
     def compute_result_frame(self, frame_index):
         if self.sample_stack is None:
