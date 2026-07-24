@@ -3256,47 +3256,23 @@ class ViewTab(QWidget):
         ]
 
         if self.headers:
-            lines.extend([
-                "",
-                "Header / Metadata:",
-            ])
-
+            lines.extend(["", "Header / Metadata:"])
+            hidden_keys = (
+                "cave_nan_regions",
+                "pixel_indices",
+                "bounds_mm",
+                "coordinates",
+                "positions",
+            )
             for key, value in self.headers.items():
-                lines.append(f"{key}: {value}")
-
-        q_geometry = self.get_q_geometry_from_header()
-        if q_geometry is not None:
-            xc, yc, distance_m, pixel_x_mm, pixel_y_mm, wavelength_nm = q_geometry
-            source = self.q_geometry_mode or "header"
-            if self.get_header_q_values():
-                source = f"{source} + header"
-
-            lines.extend([
-                "",
-                "q geometry:",
-                f"Source: {source}",
-                f"Center: X = {xc:.6g}, Y = {yc:.6g}",
-                f"Distance: {distance_m:.6g} m",
-                f"Pixel: {pixel_x_mm:.6g} x {pixel_y_mm:.6g} mm",
-                f"Wavelength: {wavelength_nm:.6g} nm",
-            ])
-
-        if self.complementary_geometry_metadata:
-            lines.extend([
-                "",
-                "Complementary geometry metadata:",
-            ])
-            for block in self.complementary_geometry_metadata:
-                source = block.get("source", "")
-                source_format = block.get("format", "")
-                entries = block.get("entries", [])
-                copied = block.get("copied", [])
-                lines.append(f"Source: {source} ({source_format})")
-                if copied:
-                    lines.append(f"Used to complete: {', '.join(copied)}")
-                for origin, key, value in entries:
-                    origin_text = f"{origin} / " if origin else ""
-                    lines.append(f"{origin_text}{key}: {value}")
+                key_text = str(key)
+                value_text = str(value)
+                if (
+                    len(value_text) > 180
+                    or any(token in key_text.lower() for token in hidden_keys)
+                ):
+                    continue
+                lines.append(f"{key}: {value_text}")
 
         self.info_text.setPlainText("\n".join(lines))
 

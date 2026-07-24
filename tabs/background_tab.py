@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, Signal, QDir
+from PySide6.QtCore import Qt, Signal, QDir, QSignalBlocker
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -14,12 +14,18 @@ from PySide6.QtWidgets import (
     QSlider,
     QScrollArea,
     QSizePolicy,
+    QListWidget,
+    QListWidgetItem,
+    QProgressBar,
+    QGridLayout,
 )
 
 import os
+import fnmatch
 import numpy as np
 
 from .cave_tab import ImageCanvas
+from .file_ratings import is_file_rated_up, install_file_rating_menu, set_item_file_path, should_hide_file_in_browser
 
 try:
     import fabio
@@ -108,6 +114,7 @@ class BackgroundTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.sample_file_path = ""
+        self.sample_file_paths = []
         self.background_file_path = ""
         self.output_folder_path = ""
         self.current_folder = ""
@@ -156,14 +163,50 @@ class BackgroundTab(QWidget):
         parameters_layout.setContentsMargins(*GROUP_BOX_MARGINS)
         parameters_layout.setSpacing(6)
 
+        file_browser_box = QGroupBox("File browser")
+        file_browser_layout = QVBoxLayout(file_browser_box)
+        file_browser_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        file_browser_layout.setSpacing(6)
+        self.folder_path_edit = QLineEdit()
+        self.folder_path_edit.setPlaceholderText("Folder")
+        self.folder_path_edit.returnPressed.connect(self.refresh_file_browser)
+        file_browser_layout.addWidget(self.folder_path_edit)
+        browse_folder_button = QPushButton("Browse")
+        browse_folder_button.clicked.connect(self.select_working_folder)
+        file_browser_layout.addWidget(browse_folder_button)
+        filters_layout = QGridLayout()
+        self.name_filter = QLineEdit("*")
+        self.extensions_filter = QLineEdit("*.edf *.h5 *.hdf5")
+        self.name_filter.textChanged.connect(self.refresh_file_browser)
+        self.extensions_filter.textChanged.connect(self.refresh_file_browser)
+        filters_layout.addWidget(QLabel("Name:"), 0, 0)
+        filters_layout.addWidget(self.name_filter, 0, 1)
+        filters_layout.addWidget(QLabel("Extensions:"), 1, 0)
+        filters_layout.addWidget(self.extensions_filter, 1, 1)
+        file_browser_layout.addLayout(filters_layout)
+        self.show_subfolders_checkbox = QCheckBox("Show subfolders")
+        self.only_thumbs_up_checkbox = QCheckBox("Only 👍")
+        self.show_subfolders_checkbox.stateChanged.connect(self.refresh_file_browser)
+        self.only_thumbs_up_checkbox.stateChanged.connect(self.refresh_file_browser)
+        options_layout = QHBoxLayout()
+        options_layout.addWidget(self.show_subfolders_checkbox)
+        options_layout.addWidget(self.only_thumbs_up_checkbox)
+        options_layout.addStretch(1)
+        file_browser_layout.addLayout(options_layout)
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.refresh_file_browser)
+        file_browser_layout.addWidget(refresh_button)
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
+        install_file_rating_menu(self.file_list)
+        self.file_list.itemSelectionChanged.connect(self.select_sample_files_from_browser)
+        file_browser_layout.addWidget(self.file_list, 1)
+
         self.sample_file_edit = QLineEdit()
         self.sample_file_edit.setPlaceholderText("Sample file")
         self.sample_file_edit.setReadOnly(True)
         self.sample_file_button = QPushButton("Open sample")
         self.sample_file_button.clicked.connect(self.select_sample_file)
-        parameters_layout.addWidget(QLabel("Sample"))
-        parameters_layout.addWidget(self.sample_file_edit)
-        parameters_layout.addWidget(self.sample_file_button)
 
         self.background_file_edit = QLineEdit()
         self.background_file_edit.setPlaceholderText("Background file")
@@ -179,9 +222,10 @@ class BackgroundTab(QWidget):
         self.output_folder_edit.setReadOnly(True)
         self.output_folder_button = QPushButton("Output folder")
         self.output_folder_button.clicked.connect(self.select_output_folder)
-        parameters_layout.addWidget(QLabel("Output"))
         parameters_layout.addWidget(self.output_folder_edit)
         parameters_layout.addWidget(self.output_folder_button)
+        self.output_folder_edit.hide()
+        self.output_folder_button.hide()
 
         self.background_scale_spin = QDoubleSpinBox()
         self.background_scale_spin.setDecimals(4)
@@ -253,21 +297,28 @@ class BackgroundTab(QWidget):
         self.auto_contrast_button = QPushButton("Auto contrast")
         self.auto_contrast_button.clicked.connect(self.auto_contrast)
         contrast_layout.addWidget(self.auto_contrast_button)
-        parameters_layout.addWidget(contrast_box)
+        contrast_box.hide()
 
         self.save_preview_checkbox = QCheckBox("Save preview image")
         self.save_preview_checkbox.setChecked(False)
         parameters_layout.addWidget(self.save_preview_checkbox)
+        self.save_preview_checkbox.hide()
 
         self.save_current_button = QPushButton("💾 Save current frame")
         self.save_current_button.clicked.connect(self.save_current_frame)
         parameters_layout.addWidget(self.save_current_button)
+        self.save_current_button.hide()
 
-        self.run_button = QPushButton("💾 Save all frames")
+        self.run_button = QPushButton("▶️ Run and Save")
         self.run_button.clicked.connect(self.run_background_subtraction)
         parameters_layout.addWidget(self.run_button)
+        self.batch_progress = QProgressBar()
+        self.batch_progress.setRange(0, 1)
+        self.batch_progress.setValue(0)
+        self.batch_progress.setVisible(False)
+        parameters_layout.addWidget(self.batch_progress)
 
-        self.status_label = QLabel("Ready")
+        self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         parameters_layout.addWidget(self.status_label)
 
@@ -276,6 +327,7 @@ class BackgroundTab(QWidget):
         self.log_text.setMaximumHeight(80)
         self.log_text.setPlaceholderText("Background processing messages will appear here.")
         parameters_layout.addWidget(self.log_text)
+        self.log_text.hide()
         parameters_layout.addStretch(1)
 
         result_box = QGroupBox("Background-subtracted pattern")
@@ -301,16 +353,31 @@ class BackgroundTab(QWidget):
 
         content_layout.addWidget(original_box, 2)
 
-        parameters_scroll = QScrollArea()
-        parameters_scroll.setWidgetResizable(True)
-        parameters_scroll.setFrameShape(QScrollArea.NoFrame)
-        parameters_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        parameters_scroll.setWidget(parameters_box)
-        parameters_scroll.setFixedWidth(FILE_BROWSER_WIDTH)
-        content_layout.addWidget(parameters_scroll, 0)
+        controls_panel = QWidget()
+        controls_layout = QVBoxLayout(controls_panel)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(BLOCK_SPACING)
+        controls_layout.addWidget(file_browser_box, 1)
+        controls_layout.addWidget(parameters_box, 1)
+        controls_panel.setFixedWidth(FILE_BROWSER_WIDTH)
+        content_layout.addWidget(controls_panel, 0)
 
         content_layout.addWidget(result_box, 2)
         main_layout.addLayout(content_layout, 1)
+
+        contrast_bar_box = QGroupBox("Contrast")
+        contrast_bar_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
+        contrast_bar_layout = QHBoxLayout(contrast_bar_box)
+        contrast_bar_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        contrast_bar_layout.setSpacing(6)
+        contrast_bar_layout.addWidget(QLabel("Min"))
+        contrast_bar_layout.addWidget(self.intensity_min_spin)
+        contrast_bar_layout.addWidget(self.intensity_min_slider, 1)
+        contrast_bar_layout.addWidget(self.auto_contrast_button)
+        contrast_bar_layout.addWidget(self.intensity_max_slider, 1)
+        contrast_bar_layout.addWidget(QLabel("Max"))
+        contrast_bar_layout.addWidget(self.intensity_max_spin)
+        main_layout.addWidget(contrast_bar_box)
 
         frame_slider_layout = QHBoxLayout()
         frame_slider_layout.setContentsMargins(0, 0, 0, 0)
@@ -718,7 +785,7 @@ class BackgroundTab(QWidget):
         result = self.compute_result_frame(frame_index)
         self.result_data = result
         self.display_image(self.result_ax, self.result_canvas, result, "Result")
-        self.status_label.setText("Preview updated.")
+        self.status_label.setText("")
 
     def sync_frame_slider_from_spin(self, value):
         if self.frame_slider.value() != value:
@@ -738,6 +805,10 @@ class BackgroundTab(QWidget):
 
     def set_working_folder(self, folder_path):
         self.current_folder = folder_path or ""
+        if hasattr(self, "folder_path_edit"):
+            self.folder_path_edit.setText(self.current_folder)
+            if self.current_folder and os.path.isdir(self.current_folder) and hasattr(self, "file_list"):
+                self.refresh_file_browser()
         if folder_path and hasattr(self, "output_folder_edit") and not self.output_folder_path:
             self.output_folder_path = folder_path
             self.output_folder_edit.setText(folder_path)
@@ -791,6 +862,71 @@ class BackgroundTab(QWidget):
                 self.update_frame_controls()
                 self.display_image(self.original_ax, self.original_canvas, None, "Original file")
                 self.status_label.setText(f"Sample loading error: {exc}")
+
+    def select_working_folder(self):
+        start_folder = self.current_folder if self.current_folder and os.path.isdir(self.current_folder) else QDir.homePath()
+        folder = QFileDialog.getExistingDirectory(self, "Select data folder", start_folder)
+        if folder:
+            self.set_working_folder(folder)
+            self.folder_path_edit.setText(folder)
+            self.refresh_file_browser()
+
+    def refresh_file_browser(self):
+        folder = self.folder_path_edit.text().strip()
+        if not os.path.isdir(folder):
+            return
+        self.current_folder = folder
+        blocker = QSignalBlocker(self.file_list)
+        try:
+            self.file_list.clear()
+            name_pattern = self.name_filter.text().strip() or "*"
+            extension_patterns = self.extensions_filter.text().split() or ["*.edf", "*.h5", "*.hdf5"]
+            if self.show_subfolders_checkbox.isChecked():
+                candidates = (
+                    os.path.join(root, name)
+                    for root, _dirs, names in os.walk(folder)
+                    for name in names
+                )
+            else:
+                candidates = (os.path.join(folder, name) for name in os.listdir(folder))
+            paths = []
+            for path in candidates:
+                if not os.path.isfile(path) or should_hide_file_in_browser(path):
+                    continue
+                name = os.path.basename(path)
+                if not fnmatch.fnmatch(name.lower(), name_pattern.lower()):
+                    continue
+                if not any(fnmatch.fnmatch(name.lower(), pattern.lower()) for pattern in extension_patterns):
+                    continue
+                if self.only_thumbs_up_checkbox.isChecked() and not is_file_rated_up(path):
+                    continue
+                paths.append(path)
+            for path in sorted(paths):
+                item = QListWidgetItem(os.path.relpath(path, folder))
+                set_item_file_path(item, path)
+                self.file_list.addItem(item)
+        finally:
+            del blocker
+
+    def select_sample_files_from_browser(self):
+        paths = [item.data(Qt.UserRole) for item in self.file_list.selectedItems()]
+        if not paths:
+            return
+        self.sample_file_paths = paths
+        self.sample_file_path = paths[0]
+        self.sample_file_edit.setText("; ".join(paths))
+        try:
+            self.sample_stack = self.open_image_stack(paths[0])
+            self.contrast_auto_initialized = False
+            self.contrast_vmin = None
+            self.contrast_vmax = None
+            self.update_frame_controls()
+            self.update_sample_preview()
+            self.status_label.setText(f"Preview: {os.path.basename(paths[0])} ({len(paths)} selected)")
+        except Exception as exc:
+            self.sample_stack = None
+            self.update_frame_controls()
+            self.status_label.setText(f"Sample loading error: {exc}")
 
     def select_background_file(self):
         file_path = self.open_data_file_dialog("Select background file")
@@ -986,7 +1122,8 @@ class BackgroundTab(QWidget):
             out.attrs["background_offset"] = float(self.offset_spin.value())
 
     def run_background_subtraction(self):
-        if not self.sample_file_path:
+        paths = self.sample_file_paths or ([self.sample_file_path] if self.sample_file_path else [])
+        if not paths:
             self.status_label.setText("Select a sample file first.")
             return
 
@@ -994,9 +1131,25 @@ class BackgroundTab(QWidget):
             self.status_label.setText("Select a background file first.")
             return
 
-        if not self.output_folder_path:
-            self.status_label.setText("Select an output folder first.")
-            return
-
-        self.update_result_preview()
-        self.save_all_frames_as_npy()
+        saved_files = 0
+        try:
+            self.batch_progress.setVisible(len(paths) > 1)
+            self.batch_progress.setRange(0, len(paths))
+            self.batch_progress.setValue(0)
+            self.batch_progress.setFormat("%v / %m files")
+            self.run_button.setEnabled(False)
+            for path in paths:
+                self.sample_file_path = path
+                self.sample_stack = self.open_image_stack(path)
+                self.output_folder_path = os.path.dirname(path)
+                self.update_frame_controls()
+                self.save_all_frames_as_npy()
+                saved_files += 1
+                self.batch_progress.setValue(saved_files)
+            self.status_label.setText(f"Run and Save complete: {saved_files} file(s).")
+        except Exception as exc:
+            self.status_label.setText(f"Run and Save error: {exc}")
+        finally:
+            self.run_button.setEnabled(True)
+            if saved_files == len(paths):
+                self.batch_progress.setVisible(False)

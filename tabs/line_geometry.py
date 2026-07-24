@@ -110,6 +110,24 @@ def default_line_geometries():
             "distance_m": f"{ID13_DEFAULT_DISTANCE_M:.10g}",
             "wavelength_m": f"{ID13_DEFAULT_WAVELENGTH_M:.10g}",
         },
+        "BM02-D2AM (WOS)": {
+            "name": "BM02-D2AM (WOS)",
+            "center_x": "",
+            "center_y": "",
+            "pixel_x_m": "130e-6",
+            "pixel_y_m": "130e-6",
+            "distance_m": "0.10014062583742449",
+            "wavelength_m": "8.265610517e-11",
+        },
+        "BM02-DSAM (Si4M)": {
+            "name": "BM02-DSAM (Si4M)",
+            "center_x": "",
+            "center_y": "",
+            "pixel_x_m": "75e-6",
+            "pixel_y_m": "75e-6",
+            "distance_m": "3.1279710344946503",
+            "wavelength_m": "8.265610517e-11",
+        },
     }
 
 
@@ -269,19 +287,6 @@ def read_poni_line_geometry(path, fallback=None, name="PONI", require_pixel_size
     if pixel2_m is None:
         pixel2_m = get_detector_value("pixel2", "pixelsize2", "pixel_size_x")
 
-    pyfai_center = None
-    try:
-        import pyFAI
-
-        integrator = pyFAI.load(str(path.expanduser()))
-        detector = getattr(integrator, "detector", None)
-        if detector is not None:
-            pixel1_m = pixel1_m or getattr(detector, "pixel1", None)
-            pixel2_m = pixel2_m or getattr(detector, "pixel2", None)
-            pyfai_center = _pyfai_beam_center_pixels(integrator)
-    except Exception:
-        pass
-
     required_fields = {
         "Poni1": poni1_m,
         "Poni2": poni2_m,
@@ -303,8 +308,8 @@ def read_poni_line_geometry(path, fallback=None, name="PONI", require_pixel_size
 
     poni_geometry = {
         "name": name,
-        "center_x": _optional_number_text((pyfai_center[0] + 1.0) if pyfai_center is not None else (poni2_m / pixel2_m) + 0.5 if pixel2_m else None),
-        "center_y": _optional_number_text((pyfai_center[1] + 1.0) if pyfai_center is not None else (poni1_m / pixel1_m) + 0.5 if pixel1_m else None),
+        "center_x": _optional_number_text((poni2_m / pixel2_m) + 0.5 if pixel2_m else None),
+        "center_y": _optional_number_text((poni1_m / pixel1_m) + 0.5 if pixel1_m else None),
         "pixel_x_m": _optional_number_text(pixel2_m),
         "pixel_y_m": _optional_number_text(pixel1_m),
         "distance_m": _optional_number_text(distance_m),
@@ -606,7 +611,13 @@ class LineGeometrySelector(QWidget):
             if persist:
                 save_last_line_geometry_name(name)
             if emit_selection:
-                self.geometry_selected.emit(name, self.geometry_for_name(name))
+                try:
+                    geometry = self.geometry_for_name(name)
+                except Exception:
+                    # An invalid optional PONI file must not prevent unrelated
+                    # tabs (for example Background) from opening or selecting files.
+                    geometry = normalized_line_geometry(self.geometries.get(name, {}))
+                self.geometry_selected.emit(name, geometry)
 
     def on_combo_changed(self, name):
         if not name:
