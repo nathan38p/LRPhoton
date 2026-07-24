@@ -3123,6 +3123,8 @@ class ManualCaveDialog(QDialog):
 class CaveTab(QWidget):
     """Cave tab: fill masked detector zones by central symmetry."""
 
+    open_bm02_sandbox_requested = Signal(str)
+
     folder_changed = Signal(Path)
 
     def __init__(self):
@@ -3386,6 +3388,12 @@ class CaveTab(QWidget):
             button.hide()
         self.line_geometry_selector = LineGeometrySelector(self, "XENOCS", require_poni_pixel_size=False)
         self.line_geometry_selector.geometry_selected.connect(self.apply_line_geometry_selection)
+        self.line_geometry_selector.geometry_selected.connect(self.open_bm02_sandbox_for_line)
+        self.line_geometry_selector.skip_last_geometry = True
+        self.line_geometry_selector.current_name = ""
+        self.line_geometry_selector.has_explicit_selection = False
+        self.line_geometry_selector.combo.setPlaceholderText("Sélectionner une ligne")
+        self.line_geometry_selector.combo.setCurrentIndex(-1)
         self.line_geometry_selector.setMinimumWidth(0)
         self.line_geometry_selector.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.line_geometry_selector.combo.setMinimumWidth(0)
@@ -4156,6 +4164,19 @@ class CaveTab(QWidget):
         self.update_centre_warning_labels()
         self.update_beamstop_visibility()
         self.refresh_preview()
+
+    def open_bm02_sandbox_for_line(self, name, _geometry):
+        if name in {"BM02-D2AM (WOS)", "BM02-D2AM (Si4M)", "BM02-DSAM (Si4M)"}:
+            detector = "WOS" if name.endswith("(WOS)") else "Si4M"
+            self.open_bm02_sandbox_requested.emit(detector)
+
+    def reset_line_geometry_picker(self):
+        self.line_geometry_selector.current_name = ""
+        self.line_geometry_selector.has_explicit_selection = False
+        self.line_geometry_selector.combo.blockSignals(True)
+        self.line_geometry_selector.combo.setCurrentIndex(-1)
+        self.line_geometry_selector.combo.setPlaceholderText("Sélectionner une ligne")
+        self.line_geometry_selector.combo.blockSignals(False)
 
     def apply_line_geometry_selection(self, name, geometry):
         values = line_geometry_to_lrphoton(geometry)

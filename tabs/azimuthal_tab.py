@@ -1582,7 +1582,7 @@ class AzimuthalTab(QWidget):
         filters_layout = QGridLayout()
 
         self.extensions_filter = QLineEdit("*.edf *.h5")
-        self.name_filter = QLineEdit("*")
+        self.name_filter = QLineEdit("*cave*")
 
         self.extensions_filter.textChanged.connect(self.refresh_files)
         self.name_filter.textChanged.connect(self.refresh_files)
@@ -1911,9 +1911,42 @@ class AzimuthalTab(QWidget):
         self.clear_graph_coordinates()
         clear_plot_canvas(self.canvas)
 
+        self.auto_select_line_geometry(current_file)
+        self.auto_select_si4m_poni(current_file)
         self.apply_preset_from_file(current_file)
         self.update_frame_controls_from_file(current_file)
         self.display_selected_file_preview(current_file)
+
+    def auto_select_line_geometry(self, image_path):
+        """Select the BM02 line geometry from the loaded filename."""
+        name = Path(image_path).name.upper()
+        selector = self.line_geometry_selector
+        if "WOS" in name and "BM02-D2AM (WOS)" in selector.geometries:
+            selector.set_current_name("BM02-D2AM (WOS)", explicit=True)
+        elif "SI4M" in name and "BM02-DSAM (Si4M)" in selector.geometries:
+            selector.set_current_name("BM02-DSAM (Si4M)", explicit=True)
+
+    def auto_select_si4m_poni(self, image_path):
+        """Select a same-folder Si4M PONI file, never for WOS data."""
+        image_path = Path(image_path).expanduser()
+        filename = image_path.name.lower()
+        if "si4m" not in filename or "wos" in filename:
+            return
+        try:
+            candidates = [
+                path for path in image_path.parent.iterdir()
+                if path.is_file()
+                and path.suffix.lower() == ".poni"
+                and "si4m" in path.name.lower()
+                and "wos" not in path.name.lower()
+            ]
+        except OSError:
+            candidates = []
+        if not candidates:
+            return
+        poni_path = sorted(candidates, key=lambda path: (len(path.name), path.name.lower()))[0]
+        self.line_geometry_selector.poni_path.setText(str(poni_path))
+        self.line_geometry_selector.on_poni_changed()
 
     def double_spin(self, value, decimals=3, minimum=-1e9):
         spin = QDoubleSpinBox()
@@ -2414,6 +2447,16 @@ class AzimuthalTab(QWidget):
         if hasattr(self, "reference_angle"):
             self.reference_angle.setValue(-abs(float(tilt_plane)) if tilt_plane is not None else 0.0)
 
+        # BM02 WOS always takes its detector centre from the file header,
+        # even when the line geometry selector is in Custom mode.
+        if file_path is not None and "WOS" in Path(file_path).name.upper():
+            cx = get_header_float(header, "Center_1", "center_1", "CenterX", "center_x")
+            cy = get_header_float(header, "Center_2", "center_2", "CenterY", "center_y")
+            if cx is not None:
+                self.center_x.setValue(cx)
+            if cy is not None:
+                self.center_y.setValue(cy)
+
         # Le q-range doit venir du fichier lorsqu'il est présent, jamais d'un
         # profil BM02 laissé en mémoire. Sans q-range dans le header, on laisse
         # l'utilisateur intégrer toute la plage q.
@@ -2587,6 +2630,14 @@ class AzimuthalTab(QWidget):
             self.image_coordinate_label.setText("ψ = - | q = - | I = -")
             clear_plot_canvas(self.image_canvas)
             return
+
+        if "WOS" in Path(file_path).name.upper():
+            cx = get_header_float(header, "Center_1", "center_1", "CenterX", "center_x")
+            cy = get_header_float(header, "Center_2", "center_2", "CenterY", "center_y")
+            if cx is not None:
+                self.center_x.setValue(cx)
+            if cy is not None:
+                self.center_y.setValue(cy)
 
         if self.use_q_range.isChecked():
             q_min = self.q_min.value()

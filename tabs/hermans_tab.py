@@ -429,6 +429,39 @@ def fit_gaussian_fixed_center(x, y, x0, window):
     return best[1], abs(best[2])
 
 
+def estimate_hermans_initial_parameters(azimuth, intensity):
+    """Estimate baseline and the broad principal peak on a circular profile."""
+    x = np.asarray(azimuth, dtype=float)
+    y = np.asarray(intensity, dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y)
+    if np.count_nonzero(valid) < 12:
+        return None
+    x = x[valid] % 360.0
+    y = y[valid]
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+
+    baseline = float(np.nanpercentile(y, 10.0))
+    corrected = np.maximum(y - baseline, 0.0)
+    # Smooth the broad peak while avoiding an artificial peak at 0/360° from
+    # wrapping a noisy endpoint onto the other endpoint.
+    width = max(5, int(round(len(y) / 36)))
+    kernel = np.ones(width, dtype=float) / width
+    padded = np.pad(corrected, (width, width), mode="reflect")
+    smooth = np.convolve(padded, kernel, mode="same")[width:-width]
+    peak_index = int(np.nanargmax(smooth))
+    peak = float(x[peak_index])
+    # Profiles with two equivalent lobes can have one lobe split at 0/360°.
+    # Prefer the equivalent interior lobe when it is nearly as strong; this
+    # avoids initializing ψ0 at the circular boundary instead of near 180°.
+    if peak < 15.0 or peak > 345.0:
+        opposite_index = int(np.nanargmin(np.abs(((x - 180.0 + 180.0) % 360.0) - 180.0)))
+        if smooth[opposite_index] >= 0.85 * smooth[peak_index]:
+            peak = float(x[opposite_index])
+    return baseline, peak
+
+
 # ============================================================
 # ========== Reciprocal Lorentzian Distribution ==============
 # ============================================================
@@ -2627,6 +2660,17 @@ class HermansTab(QWidget):
         self.last_fit = None
         self.last_order_parameter = None
         self.update_plot_toolbar_enabled(True)
+
+        initial = estimate_hermans_initial_parameters(self.azimuth, self.intensity)
+        if initial is not None:
+            estimated_baseline, estimated_peak = initial
+            intensity_min = float(np.nanmin(self.intensity))
+            self.offset_spin.blockSignals(True)
+            self.offset_spin.setValue(estimated_baseline - intensity_min)
+            self.offset_spin.blockSignals(False)
+            self.peak_spin.blockSignals(True)
+            self.peak_spin.setValue(estimated_peak)
+            self.peak_spin.blockSignals(False)
 
         if self.is_order_mode():
             self.set_order_q_from_filename()

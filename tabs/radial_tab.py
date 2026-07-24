@@ -324,6 +324,15 @@ def read_h5_frame(filename: str, dataset_name: str = None, frame_index: int = 0)
         for key, value in dataset.attrs.items():
             header[key] = str(value)
 
+        # HDF5 detector geometry is often stored on the file or detector
+        # group rather than on the data dataset itself (notably BM02 WOS).
+        for obj in (h5, h5.get("/entry_0000/instrument/detector")):
+            if obj is None:
+                continue
+            for key, value in obj.attrs.items():
+                if key not in header:
+                    header[key] = str(value)
+
         add_matching_edf_center(header, filename)
 
         if dataset.ndim == 2:
@@ -2122,6 +2131,7 @@ class RadialTab(QWidget):
         self._syncing_frame_controls = False
         self._radial_integration_running = False
         self.q_axis_unit = "nm"
+        self._auto_poni_path = None
 
         self.build_ui()
         self.set_controls_enabled(False)
@@ -2280,7 +2290,7 @@ class RadialTab(QWidget):
         filters_layout = QGridLayout()
 
         self.extensions_filter = QLineEdit("*.edf *.h5")
-        self.name_filter = QLineEdit("*")
+        self.name_filter = QLineEdit("*cave*")
 
         self.extensions_filter.textChanged.connect(self.refresh_files)
         self.name_filter.textChanged.connect(self.refresh_files)
@@ -2988,6 +2998,8 @@ class RadialTab(QWidget):
                 self.configure_frame_navigation(1)
 
             self.update_frame_selector_visibility()
+            self.auto_select_line_geometry(first_file)
+            self.auto_select_si4m_poni(first_file)
             self.apply_preset_from_file(first_file)
             self.display_selected_file_preview(first_file)
         else:
@@ -3004,6 +3016,55 @@ class RadialTab(QWidget):
             self.image_coordinate_label.setText("ψ = - | q = - | I = -")
             clear_plot_canvas(self.canvas)
             clear_plot_canvas(self.image_canvas)
+
+    def auto_select_line_geometry(self, image_path):
+        """Select the BM02 line geometry from the loaded filename."""
+        name = Path(image_path).name.upper()
+        selector = self.line_geometry_selector
+        if "WOS" in name and "BM02-D2AM (WOS)" in selector.geometries:
+            selector.set_current_name("BM02-D2AM (WOS)", explicit=True)
+        elif "SI4M" in name and "BM02-DSAM (Si4M)" in selector.geometries:
+            selector.set_current_name("BM02-DSAM (Si4M)", explicit=True)
+
+    def auto_select_si4m_poni(self, image_path):
+        """Select a same-folder Si4M PONI file, never for WOS data."""
+        image_path = Path(image_path).expanduser()
+        filename = image_path.name.lower()
+        is_si4m = "si4m" in filename
+        is_wos = "wos" in filename
+
+        if not is_si4m or is_wos:
+            if self._auto_poni_path is not None:
+                current = self.line_geometry_selector.selected_poni_path()
+                if current is not None and current.resolve() == self._auto_poni_path.resolve():
+                    self.line_geometry_selector.poni_path.clear()
+                    self.line_geometry_selector.on_poni_changed()
+            self._auto_poni_path = None
+            return
+
+        try:
+            candidates = [
+                path for path in image_path.parent.iterdir()
+                if path.is_file()
+                and path.suffix.lower() == ".poni"
+                and "si4m" in path.name.lower()
+                and "wos" not in path.name.lower()
+            ]
+        except OSError:
+            candidates = []
+        if not candidates:
+            if self._auto_poni_path is not None:
+                current = self.line_geometry_selector.selected_poni_path()
+                if current is not None and current.resolve() == self._auto_poni_path.resolve():
+                    self.line_geometry_selector.poni_path.clear()
+                    self.line_geometry_selector.on_poni_changed()
+            self._auto_poni_path = None
+            return
+
+        poni_path = sorted(candidates, key=lambda path: (len(path.name), path.name.lower()))[0]
+        self.line_geometry_selector.poni_path.setText(str(poni_path))
+        self.line_geometry_selector.on_poni_changed()
+        self._auto_poni_path = poni_path.resolve()
 
     def selected_files(self):
         selected_items = list(self.file_list.selectedItems())
@@ -3172,6 +3233,31 @@ class RadialTab(QWidget):
         if hasattr(self, "reference_angle"):
             self.reference_angle.setValue(-abs(float(tilt_plane)) if tilt_plane is not None else 0.0)
 
+        # Les sorties Cave contiennent leur propre centre recalculé. Il doit
+        # primer sur le centre éventuel de la ligne BM02 sélectionnée.
+        if file_path is not None and "_cave" in Path(file_path).stem.lower():
+            values, _ = header_q_geometry_values(header)
+            cave_center_x = get_header_float(header, "center_x_pixel", "Center_1", "center_1")
+            cave_center_y = get_header_float(header, "center_y_pixel", "Center_2", "center_2")
+            if cave_center_x is not None:
+                self.center_x.setValue(cave_center_x)
+            elif values["cx"] is not None:
+                self.center_x.setValue(values["cx"])
+            if cave_center_y is not None:
+                self.center_y.setValue(cave_center_y)
+            elif values["cy"] is not None:
+                self.center_y.setValue(values["cy"])
+
+        # BM02 WOS files use the detector header centre even when the line
+        # geometry selector is in Custom mode. This centre drives the red
+        # reference axes in the Selected area preview.
+        if file_path is not None and "WOS" in Path(file_path).name.upper():
+            values, _ = header_q_geometry_values(header)
+            if values["cx"] is not None:
+                self.center_x.setValue(values["cx"])
+            if values["cy"] is not None:
+                self.center_y.setValue(values["cy"])
+
         if self.instrument_mode == "XENOCS":
             values, missing = header_q_geometry_values(header)
 
@@ -3226,7 +3312,16 @@ class RadialTab(QWidget):
 
             h5_dataset_name = self.h5_dataset_name if file_path.suffix.lower() in [".h5", ".hdf5"] else None
             h5_frame_index = self.frame_spin.value() - 1 if file_path.suffix.lower() in [".h5", ".hdf5"] else 0
-            image, _ = read_image_file(file_path, h5_dataset_name, h5_frame_index)
+            image, preview_header = read_image_file(file_path, h5_dataset_name, h5_frame_index)
+
+            # The Selected area axes must use the WOS file header, not the
+            # manually selected BM02 line geometry.
+            if "WOS" in file_path.name.upper():
+                header_values, _ = header_q_geometry_values(preview_header)
+                if header_values["cx"] is not None:
+                    self.center_x.setValue(header_values["cx"])
+                if header_values["cy"] is not None:
+                    self.center_y.setValue(header_values["cy"])
 
             if image.ndim != 2:
                 raise ValueError(f"Expected a 2D image, got shape {image.shape}")

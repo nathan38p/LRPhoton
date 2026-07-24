@@ -287,6 +287,12 @@ def read_poni_line_geometry(path, fallback=None, name="PONI", require_pixel_size
     if pixel2_m is None:
         pixel2_m = get_detector_value("pixel2", "pixelsize2", "pixel_size_x")
 
+    fallback_geometry = normalized_line_geometry(fallback or {})
+    if pixel1_m is None or pixel1_m == 0:
+        pixel1_m = number_value(fallback_geometry.get("pixel_y_m", "0")) or None
+    if pixel2_m is None or pixel2_m == 0:
+        pixel2_m = number_value(fallback_geometry.get("pixel_x_m", "0")) or None
+
     required_fields = {
         "Poni1": poni1_m,
         "Poni2": poni2_m,
@@ -300,16 +306,10 @@ def read_poni_line_geometry(path, fallback=None, name="PONI", require_pixel_size
     if missing:
         raise ValueError(f"Missing PONI geometry field(s): {', '.join(missing)}")
 
-    fallback_geometry = normalized_line_geometry(fallback or {})
-    if pixel1_m is None or pixel1_m == 0:
-        pixel1_m = number_value(fallback_geometry.get("pixel_y_m", "0")) or None
-    if pixel2_m is None or pixel2_m == 0:
-        pixel2_m = number_value(fallback_geometry.get("pixel_x_m", "0")) or None
-
     poni_geometry = {
         "name": name,
-        "center_x": _optional_number_text((poni2_m / pixel2_m) + 0.5 if pixel2_m else None),
-        "center_y": _optional_number_text((poni1_m / pixel1_m) + 0.5 if pixel1_m else None),
+        "center_x": _optional_number_text(poni2_m / pixel2_m if pixel2_m else None),
+        "center_y": _optional_number_text(poni1_m / pixel1_m if pixel1_m else None),
         "pixel_x_m": _optional_number_text(pixel2_m),
         "pixel_y_m": _optional_number_text(pixel1_m),
         "distance_m": _optional_number_text(distance_m),
@@ -480,6 +480,7 @@ class LineGeometrySelector(QWidget):
             current_name = last_name
         self.current_name = current_name if current_name in self.geometries else next(iter(self.geometries))
         self.has_explicit_selection = self.current_name == last_name
+        self.skip_last_geometry = False
         self.context_geometry_provider = None
 
         layout = QVBoxLayout(self)

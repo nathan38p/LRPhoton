@@ -1,6 +1,8 @@
 from pathlib import Path
 import copy
+import fnmatch
 import json
+import re
 import tempfile
 
 import numpy as np
@@ -11,6 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QAbstractItemView,
     QComboBox,
+    QCheckBox,
     QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
@@ -23,6 +26,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QPlainTextEdit,
+    QProgressBar,
     QScrollArea,
     QSplitter,
     QSlider,
@@ -44,6 +48,12 @@ from tabs.cave_tab import (
     read_h5_frame,
     sanitize_cave_output_image,
     set_h5_attr,
+)
+from tabs.file_ratings import (
+    install_file_rating_menu,
+    is_file_rated_up,
+    set_item_file_path,
+    should_hide_file_in_browser,
 )
 from tabs.ui_style import FILE_BROWSER_WIDTH, GROUP_BOX_STYLE, PANEL_MARGINS
 
@@ -274,7 +284,7 @@ def normalize_cave_region(region):
         mode = "central"
         rotate_with_reference = True
         visible = True
-    if mode not in {"central", "vertical", "horizontal", "extend_nan"} or len(bounds) != 4:
+    if mode not in {"central", "vertical", "horizontal", "extend_nan", "exclude_nan"} or len(bounds) != 4:
         mode = "central"
     return {
         "bounds_mm": list(map(float, bounds)),
@@ -433,6 +443,7 @@ class DoubleDetectorCanvas(FigureCanvas):
         self.intensity_max_percentile = 99.5
         super().__init__(self.figure)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMouseTracking(True)
         self.mpl_connect("motion_notify_event", self.on_motion)
         self.mpl_connect("scroll_event", self.on_scroll)
         self.mpl_connect("button_press_event", self.on_button_press)
@@ -708,6 +719,9 @@ class DoubleDetectorCanvas(FigureCanvas):
             ax.text(0.5, 0.5, "missing geometry", ha="center", va="center", transform=ax.transAxes)
             return
         original_image = np.asarray(image, dtype=float)
+        # These are detector gaps already present in the real BM02 image.
+        # They must never become targets of a Cave symmetry operation.
+        existing_nan_mask = ~np.isfinite(original_image)
         x_centers = np.asarray(data.get("real_x_centers_mm"), dtype=float)
         y_centers = np.asarray(data.get("real_y_centers_mm"), dtype=float)
         normalized_regions = [normalize_cave_region(region) for region in data.get("cave_nan_regions", [])]
@@ -726,6 +740,13 @@ class DoubleDetectorCanvas(FigureCanvas):
                 region, x_centers, y_centers, center_mm, reference_angle
             )
             cave_input[region_mask] = np.nan
+
+        protected_nan_mask = np.zeros_like(original_image, dtype=bool)
+        for region in normalized_regions:
+            if region["mode"] != "exclude_nan":
+                continue
+            region_mask = self.region_grid_mask(region, x_centers, y_centers, center_mm, reference_angle)
+            protected_nan_mask |= region_mask & ~np.isfinite(original_image)
 
         # Si4M workflow: first reconstruct the four tiles with the selected
         # vertical/horizontal operations; central Cave symmetry comes later.
@@ -750,12 +771,12 @@ class DoubleDetectorCanvas(FigureCanvas):
         remaining_layer_nans = ~np.isfinite(cave_input)
         for region in normalized_regions:
             non_layer_modes = {"extend_nan"} if detector == "Si4M" else {"central", "extend_nan"}
-            if region["mode"] in non_layer_modes:
+            if region["mode"] in non_layer_modes or region["mode"] == "exclude_nan":
                 continue
             region_mask = self.region_grid_mask(
                 region, x_centers, y_centers, center_mm, reference_angle
             )
-            was_nan_for_caving = remaining_layer_nans & region_mask
+            was_nan_for_caving = remaining_layer_nans & region_mask & ~existing_nan_mask & ~protected_nan_mask
             filled[was_nan_for_caving] = np.nan
             source_rows[was_nan_for_caving] = -1
             source_cols[was_nan_for_caving] = -1
@@ -790,7 +811,8 @@ class DoubleDetectorCanvas(FigureCanvas):
             np.isfinite(before_final_cave)
             & ((source_rows != row_grid) | (source_cols != col_grid))
         )
-        final_missing_rows, final_missing_cols = np.where(~np.isfinite(before_final_cave))
+        final_missing_mask = ~np.isfinite(before_final_cave) & ~existing_nan_mask & ~protected_nan_mask
+        final_missing_rows, final_missing_cols = np.where(final_missing_mask)
         filled = before_final_cave.copy() if detector in {"Si4M", "Combo (test)"} else self.axial_symmetry_cave(before_final_cave, None, center_pixel)
         if final_missing_rows.size:
             final_source_cols = np.rint(2.0 * center_col - final_missing_cols).astype(int)
@@ -881,18 +903,22 @@ class DoubleDetectorCanvas(FigureCanvas):
         extended_y = center_y + offsets * step
         extended = np.full((offsets.size, offsets.size), np.nan, dtype=float)
         extended_q = np.full_like(extended, np.nan)
+        extended_existing_nan = np.zeros_like(extended, dtype=bool)
 
         target_cols = np.rint((x_centers - extended_x[0]) / step).astype(int)
         target_rows = np.rint((y_centers - extended_y[0]) / step).astype(int)
         valid_cols = (target_cols >= 0) & (target_cols < extended.shape[1])
         valid_rows = (target_rows >= 0) & (target_rows < extended.shape[0])
         cave_array = np.asarray(cave, dtype=float)
+        real_array = np.asarray(data.get("real_image"), dtype=float)
+        real_nan = ~np.isfinite(real_array)
         cave_q = data.get("cave_q_nm")
         for source_row, target_row in enumerate(target_rows):
             if not valid_rows[source_row]:
                 continue
             source_columns = np.where(valid_cols)[0]
             extended[target_row, target_cols[source_columns]] = cave_array[source_row, source_columns]
+            extended_existing_nan[target_row, target_cols[source_columns]] = real_nan[source_row, source_columns]
             if cave_q is not None and np.shape(cave_q) == cave_array.shape:
                 extended_q[target_row, target_cols[source_columns]] = np.asarray(cave_q)[source_row, source_columns]
 
@@ -901,12 +927,13 @@ class DoubleDetectorCanvas(FigureCanvas):
             extended_source = extended.copy()
             for raw_region in data.get("cave_nan_regions", []):
                 region = normalize_cave_region(raw_region)
-                if not region.get("visible", True) or region["mode"] == "extend_nan":
+                if not region.get("visible", True) or region["mode"] in {"extend_nan", "exclude_nan"}:
                     continue
                 target_mask = self.region_grid_mask(
                     region, extended_x, extended_y, center_mm,
                     data.get("reference_angle_deg", 0.0),
                 )
+                target_mask &= ~extended_existing_nan
                 self.apply_region_symmetry(
                     extended, extended_source, region["bounds_mm"],
                     extended_center, region["mode"], extended_x, extended_y,
@@ -1002,6 +1029,7 @@ class DoubleDetectorCanvas(FigureCanvas):
             "extend_nan": ("#f59e0b", "#b45309"),
             "vertical": ("#3b82f6", "#1d4ed8"),
             "horizontal": ("#22c55e", "#15803d"),
+            "exclude_nan": ("#6b7280", "#374151"),
         }
         for region_index, raw_region in enumerate(data.get("cave_nan_regions", [])):
             region = normalize_cave_region(raw_region)
@@ -1621,8 +1649,13 @@ class DoubleDetectorCanvas(FigureCanvas):
         elif kind == "resized":
             image = self.resized_image_for_data(data)
             rows, cols = image.shape
-            extended_x = np.asarray(data.get("extended_x_centers_mm"), dtype=float)
-            side_mm = abs(float(np.nanmedian(np.diff(extended_x)))) if extended_x.size > 1 else 1.0
+            extended_values = data.get("extended_x_centers_mm")
+            extended_x = np.asarray(extended_values, dtype=float) if extended_values is not None else np.array([])
+            side_mm = (
+                abs(float(np.nanmedian(np.diff(extended_x))))
+                if extended_x.size > 1
+                else float(data.get("resized_pixel_size_mm", 1.0))
+            )
             row_centers = (np.arange(rows) - (rows - 1) / 2.0) * side_mm
             col_centers = (np.arange(cols) - (cols - 1) / 2.0) * side_mm
             q_map = None
@@ -1672,6 +1705,9 @@ class DoubleDetectorCanvas(FigureCanvas):
         psi_text = "psi = -"
         if psi_map is not None and psi_map.shape == image.shape and np.isfinite(psi_map[row, col]):
             psi_text = f"psi = {float(psi_map[row, col]):.3f}°"
+        elif kind in {"extended", "resized"}:
+            psi_value = np.degrees(np.arctan2(float(row_centers[row]), float(col_centers[col])))
+            psi_text = f"psi = {psi_value:.3f}°"
 
         source_text = ""
         if source_pixel is not None:
@@ -2192,10 +2228,32 @@ class DoubleDetectorCanvas(FigureCanvas):
         data_dx = float(shifted[0] - origin[0])
         data_dy = float(shifted[1] - origin[1])
         for target_axis in self.axes:
+            if self.axis_kind(target_axis) == "raw":
+                continue
             x0, x1 = target_axis.get_xlim()
             y0, y1 = target_axis.get_ylim()
             target_axis.set_xlim(x0 - data_dx, x1 - data_dx)
             target_axis.set_ylim(y0 - data_dy, y1 - data_dy)
+        self.draw_idle()
+
+    def fit_si4m_view(self):
+        data = self.loaded.get("Si4M", {})
+        x = np.asarray(data.get("extended_x_centers_mm"), dtype=float)
+        y = np.asarray(data.get("extended_y_centers_mm"), dtype=float)
+        if x.size < 2 or y.size < 2:
+            return
+        pad_x = abs(float(np.nanmedian(np.diff(x)))) * 0.5
+        pad_y = abs(float(np.nanmedian(np.diff(y)))) * 0.5
+        bounds = (
+            float(np.nanmin(x) - pad_x), float(np.nanmax(x) + pad_x),
+            float(np.nanmin(y) - pad_y), float(np.nanmax(y) + pad_y),
+        )
+        self.si4m_initial_view_bounds = bounds
+        for target_axis in self.axes:
+            if self.axis_kind(target_axis) == "raw":
+                continue
+            target_axis.set_xlim(bounds[0], bounds[1])
+            target_axis.set_ylim(bounds[3], bounds[2])
         self.draw_idle()
 
     def zoom_extended_axis(self, axis, center_x, center_y, factor):
@@ -2203,10 +2261,18 @@ class DoubleDetectorCanvas(FigureCanvas):
             return
         factor = float(np.clip(factor, 0.05, 20.0))
         for target_axis in self.axes:
+            if self.axis_kind(target_axis) == "raw":
+                continue
             x0, x1 = target_axis.get_xlim()
             y0, y1 = target_axis.get_ylim()
-            target_axis.set_xlim(center_x + (x0 - center_x) * factor, center_x + (x1 - center_x) * factor)
-            target_axis.set_ylim(center_y + (y0 - center_y) * factor, center_y + (y1 - center_y) * factor)
+            new_x = (center_x + (x0 - center_x) * factor, center_x + (x1 - center_x) * factor)
+            new_y = (center_y + (y0 - center_y) * factor, center_y + (y1 - center_y) * factor)
+            bounds = getattr(self, "si4m_initial_view_bounds", None)
+            if bounds is not None and self.selected_detector == "Si4M":
+                new_x = (max(new_x[0], bounds[0]), min(new_x[1], bounds[1]))
+                new_y = (max(new_y[0], bounds[2]), min(new_y[1], bounds[3]))
+            target_axis.set_xlim(*new_x)
+            target_axis.set_ylim(new_y[1], new_y[0])
         self.draw_idle()
 
     def current_detector_pixel_bounds(self, detector, axis):
@@ -2411,15 +2477,45 @@ class DoubleDetectorProject(QWidget):
         browse_button = QPushButton("Browse")
         browse_button.clicked.connect(self.browse_folder)
         self.detector_combo = QComboBox()
-        self.detector_combo.addItems(["Si4M", "WOS", "Combo (test)"])
+        self.detector_combo.addItems(["Si4M", "WOS"])
         self.detector_combo.setCurrentText("WOS")
         self.detector_combo.currentTextChanged.connect(self.set_selected_detector)
         load_button = QPushButton("Load test files")
         load_button.clicked.connect(self.load_test_files)
 
-        side_layout.addWidget(QLabel("Test folder"))
         side_layout.addWidget(self.folder_edit)
         side_layout.addWidget(browse_button)
+        self.file_list = QListWidget()
+        install_file_rating_menu(self.file_list)
+        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_list.itemSelectionChanged.connect(self.load_selected_preview)
+        self.bm02_name_filter = QLineEdit("*")
+        self.bm02_extension_filter = QLineEdit("*.edf *.h5 *.hdf5")
+        self.bm02_show_subfolders = QCheckBox("Show subfolders")
+        self.bm02_only_thumbs_up = QCheckBox("Only 👍")
+        for widget in (
+            self.bm02_name_filter,
+            self.bm02_extension_filter,
+            self.bm02_show_subfolders,
+            self.bm02_only_thumbs_up,
+        ):
+            widget.stateChanged.connect(self.refresh_file_list) if isinstance(widget, QCheckBox) else widget.textChanged.connect(self.refresh_file_list)
+        browser_filters = QGridLayout()
+        browser_filters.addWidget(QLabel("Name:"), 0, 0)
+        browser_filters.addWidget(self.bm02_name_filter, 0, 1)
+        browser_filters.addWidget(QLabel("Extensions:"), 1, 0)
+        browser_filters.addWidget(self.bm02_extension_filter, 1, 1)
+        side_layout.addWidget(QLabel("Files"))
+        side_layout.addLayout(browser_filters)
+        browser_options = QHBoxLayout()
+        browser_options.addWidget(self.bm02_show_subfolders)
+        browser_options.addWidget(self.bm02_only_thumbs_up)
+        browser_options.addStretch(1)
+        side_layout.addLayout(browser_options)
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.refresh_file_list)
+        side_layout.addWidget(refresh_button)
+        side_layout.addWidget(self.file_list, 1)
         side_layout.addWidget(QLabel("Detector"))
         side_layout.addWidget(self.detector_combo)
         self.combo_top_selector = QComboBox()
@@ -2441,12 +2537,14 @@ class DoubleDetectorProject(QWidget):
         self.si4m_display_angle_label = side_layout.itemAt(side_layout.count() - 1).widget()
         self.si4m_display_angle_label.setVisible(False)
         side_layout.addWidget(self.si4m_display_angle_spin)
+        load_button.hide()
         side_layout.addWidget(load_button)
 
         self.summary = QPlainTextEdit()
         self.summary.setReadOnly(True)
         self.summary.setMinimumHeight(0)
-        side_layout.addWidget(self.summary, 1)
+        self.summary.hide()
+        side_layout.addWidget(self.summary, 0)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -2529,6 +2627,7 @@ class DoubleDetectorProject(QWidget):
         raw_controls_layout.addLayout(background_file_layout)
         self.raw_controls_widget = QWidget()
         self.raw_controls_widget.setLayout(raw_controls_layout)
+        self.raw_controls_widget.hide()
         side_layout.addWidget(self.raw_controls_widget, 0)
         preview_content_layout.addLayout(raw_preview_layout, 1)
 
@@ -2623,7 +2722,8 @@ class DoubleDetectorProject(QWidget):
             self.colormap_combo.addItem(name, name)
         self.colormap_combo.currentIndexChanged.connect(self.change_colormap)
         controls_layout.addWidget(self.colormap_combo)
-        controls_layout.addWidget(QLabel("Resize px"))
+        self.resize_label = QLabel("Resize px")
+        controls_layout.addWidget(self.resize_label)
         self.resize_width_spin = QSpinBox()
         self.resize_width_spin.setRange(1, 10000)
         self.resize_width_spin.setValue(1000)
@@ -2639,15 +2739,14 @@ class DoubleDetectorProject(QWidget):
         self.final_save_button = QPushButton("💾")
         self.final_save_button.setToolTip("Enregistrer le motif final en H5")
         self.final_save_button.setFixedSize(34, 28)
-        self.final_save_button.clicked.connect(
-            lambda: self.save_panel(
-                self.selected_detector(),
-                "extended" if self.selected_detector() == "Si4M" else "resized",
-                "h5",
-            )
-        )
+        self.final_save_button.clicked.connect(self.save_selected_files)
         controls_layout.addWidget(self.final_save_button)
         preview_layout.addLayout(controls_layout)
+        self.batch_progress = QProgressBar()
+        self.batch_progress.setRange(0, 1)
+        self.batch_progress.setValue(0)
+        self.batch_progress.setVisible(True)
+        preview_layout.addWidget(self.batch_progress)
         self.canvas.set_coordinate_labels({
             "Si4M": self.si4m_coordinate_label,
             "WOS": self.wos_coordinate_label,
@@ -2775,15 +2874,17 @@ class DoubleDetectorProject(QWidget):
         return self.detector_combo.currentText() if hasattr(self, "detector_combo") else "WOS"
 
     def set_selected_detector(self, detector):
-        if detector not in DOUBLE_DETECTOR_FILES and detector != "Combo (test)":
+        if detector not in DOUBLE_DETECTOR_FILES:
             return
-        self.combo_top_selector.setVisible(detector == "Combo (test)")
-        self.si4m_display_angle_spin.setVisible(detector == "Combo (test)")
-        self.si4m_display_angle_label.setVisible(detector == "Combo (test)")
-        if detector in DOUBLE_DETECTOR_FILES:
-            self.update_raw_file_field(detector)
-        elif self.loaded:
-            self.rebuild_combo()
+        self.combo_top_selector.setVisible(False)
+        self.si4m_display_angle_spin.setVisible(False)
+        self.si4m_display_angle_label.setVisible(False)
+        for widget_name in ("resize_label", "resize_width_spin", "resize_height_spin"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(detector != "Si4M")
+        self.update_raw_file_field(detector)
+        self.refresh_file_list()
         self.canvas.selected_detector = detector
         self.canvas.selected_region_index = None
         self.update_coordinate_label_visibility()
@@ -2798,15 +2899,6 @@ class DoubleDetectorProject(QWidget):
         if self.selected_detector() == "Combo (test)" and self.loaded:
             self.rebuild_combo()
         self.refresh_custom_zones_panel()
-        resized_shape = self.loaded.get(detector, {}).get("resized_shape")
-        if resized_shape:
-            rows, cols = resized_shape
-            self.resize_height_spin.blockSignals(True)
-            self.resize_width_spin.blockSignals(True)
-            self.resize_height_spin.setValue(int(rows))
-            self.resize_width_spin.setValue(int(cols))
-            self.resize_height_spin.blockSignals(False)
-            self.resize_width_spin.blockSignals(False)
 
     def default_resized_shape(self, data):
         image = data.get("real_image")
@@ -2880,6 +2972,7 @@ class DoubleDetectorProject(QWidget):
                     "extend_nan": "#fef3c7",
                     "vertical": "#dbeafe",
                     "horizontal": "#dcfce7",
+                    "exclude_nan": "#e5e7eb",
                 }
                 number_label.setStyleSheet(
                     f"background: {mode_colors[region['mode']] if region['visible'] else '#e5e7eb'}; "
@@ -2901,6 +2994,7 @@ class DoubleDetectorProject(QWidget):
                 )
                 mode_combo.addItem("Vertical symmetry", "vertical")
                 mode_combo.addItem("Horizontal symmetry", "horizontal")
+                mode_combo.addItem("Exclude NaN from cave", "exclude_nan")
                 mode_combo.setCurrentIndex(mode_combo.findData(region["mode"]))
                 mode_combo.pressed.connect(
                     lambda i=index: self.custom_zones_list.setCurrentRow(i)
@@ -3047,17 +3141,24 @@ class DoubleDetectorProject(QWidget):
                 [center_x, center_x + radius, center_y, center_y + radius],
             ]
             self.push_zone_undo_state(detector)
+            si4m_modes = ("central", "vertical", "horizontal", "central")
             data["cave_nan_regions"] = [
-                {"bounds_mm": list(bounds), "mode": "central", "visible": True,
+                {"bounds_mm": list(bounds), "mode": mode, "visible": True,
                  "rotate_with_reference": True}
-                for bounds in quadrant_bounds
+                for bounds, mode in zip(quadrant_bounds, si4m_modes)
             ]
+            data["cave_nan_regions"].insert(0, {
+                "bounds_mm": [x_edges[0], x_edges[1], y_edges[0], y_edges[1]],
+                "mode": "exclude_nan",
+                "visible": True,
+                "rotate_with_reference": True,
+            })
             max_pixels = 2 * int(np.ceil(radius / max(x_step, y_step))) + 1
             data["si4m_max_extended_shape"] = (max_pixels, max_pixels)
             self.canvas.regions_changed.emit(detector)
             self.canvas.refresh_detector_preserve_view(detector)
             self.status.setText(
-                f"Si4M: 4 zones created; maximum reconstructed image {max_pixels} × {max_pixels} px."
+                f"Si4M: Exclude NaN zone + 4 symmetry zones created; maximum reconstructed image {max_pixels} × {max_pixels} px."
             )
             return
 
@@ -3088,7 +3189,7 @@ class DoubleDetectorProject(QWidget):
     def set_zone_mode_from_panel(self, detector, index, mode):
         data = self.loaded.get(detector, {})
         regions = data.get("cave_nan_regions", [])
-        if not (0 <= index < len(regions)) or mode not in {"central", "extend_nan", "vertical", "horizontal"}:
+        if not (0 <= index < len(regions)) or mode not in {"central", "extend_nan", "vertical", "horizontal", "exclude_nan"}:
             return
         region = normalize_cave_region(regions[index])
         if region["mode"] == mode:
@@ -3153,7 +3254,104 @@ class DoubleDetectorProject(QWidget):
         if hasattr(self, "raw_file_edit"):
             self.update_raw_file_field()
         self.folder_edit.setText(str(folder))
+        self.refresh_file_list()
         self.refresh_summary()
+
+    def refresh_file_list(self):
+        if not hasattr(self, "file_list"):
+            return
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+        if self.folder.exists():
+            patterns = self.bm02_extension_filter.text().split() or ["*.edf", "*.h5", "*.hdf5"]
+            name_pattern = self.bm02_name_filter.text().strip() or "*"
+            iterator = self.folder.rglob("*") if self.bm02_show_subfolders.isChecked() else self.folder.glob("*")
+            cave_outputs = set()
+            candidate_paths = []
+            for path in iterator:
+                if not path.is_file():
+                    continue
+                if "_cave" in path.stem.lower():
+                    base_stem = re.sub(r"_cave.*$", "", path.stem, flags=re.IGNORECASE)
+                    cave_outputs.add((path.parent.resolve(), base_stem.lower()))
+                    continue
+                candidate_paths.append(path)
+            for path in sorted(candidate_paths):
+                if (
+                    path.is_file()
+                    and not should_hide_file_in_browser(path)
+                    and fnmatch.fnmatch(path.name.lower(), name_pattern.lower())
+                    and any(fnmatch.fnmatch(path.name.lower(), pattern.lower()) for pattern in patterns)
+                    and (not self.bm02_only_thumbs_up.isChecked() or is_file_rated_up(path))
+                    and path.name.upper().startswith(self.selected_detector().upper())
+                ):
+                    has_cave = (path.parent.resolve(), path.stem.lower()) in cave_outputs
+                    display_name = str(path.relative_to(self.folder))
+                    if has_cave:
+                        display_name = f"✅ {display_name}"
+                    item = QListWidgetItem(display_name)
+                    set_item_file_path(item, path)
+                    if has_cave:
+                        item.setToolTip("Une sortie Cave existe déjà pour ce fichier.")
+                    self.file_list.addItem(item)
+        self.file_list.blockSignals(False)
+
+    def selected_file_paths(self):
+        return [Path(item.data(Qt.UserRole)) for item in self.file_list.selectedItems()]
+
+    def load_selected_preview(self):
+        paths = self.selected_file_paths()
+        if paths:
+            filename = paths[0].name.upper()
+            if filename.startswith("WOS"):
+                self.detector_combo.blockSignals(True)
+                self.detector_combo.setCurrentText("WOS")
+                self.detector_combo.blockSignals(False)
+            elif filename.startswith("SI4M"):
+                self.detector_combo.blockSignals(True)
+                self.detector_combo.setCurrentText("Si4M")
+                self.detector_combo.blockSignals(False)
+            self.raw_file_edit.setText(str(paths[0]))
+            # Une sélection multiple ne sert qu'au traitement batch :
+            # l'aperçu et le chargement interactif restent limités au premier fichier.
+            self.load_test_files(paths=[paths[0]], preview_only=True)
+
+    def save_selected_files(self):
+        paths = self.selected_file_paths()
+        if not paths:
+            self.status.setText("Sélectionne au moins un fichier.")
+            return
+        detector = self.selected_detector()
+        kind = "extended" if detector == "Si4M" else "resized"
+        zone_template = copy.deepcopy(
+            self.loaded.get(detector, {}).get("cave_nan_regions", [])
+        )
+        self.batch_progress.setVisible(True)
+        self.batch_progress.setRange(0, len(paths))
+        self.batch_progress.setValue(0)
+        self.final_save_button.setEnabled(False)
+        try:
+            for index, path in enumerate(paths, start=1):
+                self.load_test_files(
+                    paths=[path],
+                    preview_only=True,
+                    cave_regions_override=zone_template,
+                )
+                image = self.panel_image_for_save(detector, kind)
+                output_path = path.with_name(f"{path.stem}_cave.h5")
+                self.write_panel_h5(output_path, detector, kind, image)
+                self.batch_progress.setValue(index)
+            self.load_test_files(
+                paths=[paths[0]],
+                preview_only=True,
+                cave_regions_override=zone_template,
+            )
+            self.status.setText(f"{len(paths)} fichier(s) enregistré(s).")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save batch error", str(exc))
+            self.status.setText(f"Save failed: {exc}")
+        finally:
+            self.final_save_button.setEnabled(True)
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose double-detector folder", str(self.folder))
@@ -3296,59 +3494,65 @@ class DoubleDetectorProject(QWidget):
             "source_path": paths[top_name], "distance_m": 1.0, "wavelength_m": 1e-10,
         }
 
-    def load_test_files(self):
+    def load_test_files(self, paths=None, preview_only=False, cave_regions_override=None):
         try:
+            paths = paths or self.selected_file_paths()
+            if not paths and self.raw_file_edit.text().strip():
+                paths = [Path(self.raw_file_edit.text().strip()).expanduser()]
+            if not paths:
+                self.status.setText("Sélectionne au moins un fichier.")
+                return
+            self.batch_progress.setVisible(True)
+            self.batch_progress.setRange(0, len(paths))
+            self.batch_progress.setValue(0)
             self.loaded = {}
             self.zone_undo_stacks = {detector: [] for detector in DOUBLE_DETECTOR_FILES}
             for detector, config in DOUBLE_DETECTOR_FILES.items():
+                if detector != self.selected_detector():
+                    continue
                 detector_data = {}
+                detector_data["resized_pixel_size_mm"] = float(config["pixel_size_m"]) * 1000.0
                 for sample in ("5CB",):
-                    source_path = self.folder / config[sample]
-                    if detector == self.selected_detector() and self.raw_file_edit.text().strip():
-                        candidate = Path(self.raw_file_edit.text().strip()).expanduser()
-                        if candidate.exists():
-                            source_path = candidate
+                    source_path = paths[0]
                     detector_data[sample] = self.read_first_h5_image(source_path)
                     detector_data["source_path"] = source_path
                     detector_data["source_dataset"] = inspect_h5_image_dataset(source_path)[0]
-                mask_path = self.folder / config["mask"]
-                if detector == self.selected_detector() and self.mask_disabled:
-                    mask_path = None
-                elif detector == self.selected_detector() and self.mask_file_edit.text().strip():
-                    candidate = Path(self.mask_file_edit.text().strip()).expanduser()
-                    if candidate.exists():
-                        mask_path = candidate
-                detector_data["mask"] = self.read_mask(mask_path) if mask_path is not None else None
-                detector_data["mask_path"] = mask_path
+                mask_path = None
+                detector_data["mask"] = None
+                detector_data["mask_path"] = None
                 detector_data["poni_path"] = self.folder / config["poni"]
-                (
-                    detector_data["pixel_corners"],
-                    detector_data["center_mm"],
-                    detector_data["center_pixel"],
-                    detector_data["q_nm"],
-                    detector_data["psi_deg"],
-                    detector_data["row_centers_mm"],
-                    detector_data["col_centers_mm"],
-                    detector_data["tilt_plane_deg"],
-                    detector_data["distance_m"],
-                    detector_data["wavelength_m"],
-                ) = self.read_pyfai_geometry(
-                    self.folder / config["poni"]
-                )
-                masked_image = np.asarray(detector_data["5CB"], dtype=float).copy()
-                background_path = getattr(self, "background_file", None)
-                if detector == self.selected_detector() and background_path is not None and Path(background_path).exists():
-                    background_image = self.read_first_h5_image(Path(background_path))
-                    if background_image.shape != masked_image.shape:
-                        raise ValueError("Le background doit avoir la même taille que l'image brute.")
-                    masked_image -= np.asarray(background_image, dtype=float)
-                    detector_data["background_path"] = Path(background_path)
-                    detector_data["background_subtracted"] = True
+                if "_cave" in source_path.stem.lower():
+                    rows, cols = detector_data["5CB"].shape
+                    pixel_mm = float(config["pixel_size_m"]) * 1000.0
+                    center_pixel = ((cols - 1) / 2.0, (rows - 1) / 2.0)
+                    x_centers = (np.arange(cols) - center_pixel[0]) * pixel_mm
+                    y_centers = (np.arange(rows) - center_pixel[1]) * pixel_mm
+                    detector_data["pixel_corners"] = None
+                    detector_data["center_pixel"] = center_pixel
+                    detector_data["center_mm"] = (0.0, 0.0)
+                    detector_data["q_nm"] = None
+                    detector_data["psi_deg"] = None
+                    detector_data["row_centers_mm"] = y_centers
+                    detector_data["col_centers_mm"] = x_centers
+                    detector_data["tilt_plane_deg"] = 0.0
+                    detector_data["distance_m"] = 1.0
+                    detector_data["wavelength_m"] = 1e-10
                 else:
-                    detector_data["background_subtracted"] = False
+                    (
+                        detector_data["pixel_corners"],
+                        detector_data["center_mm"],
+                        detector_data["center_pixel"],
+                        detector_data["q_nm"],
+                        detector_data["psi_deg"],
+                        detector_data["row_centers_mm"],
+                        detector_data["col_centers_mm"],
+                        detector_data["tilt_plane_deg"],
+                        detector_data["distance_m"],
+                        detector_data["wavelength_m"],
+                    ) = self.read_pyfai_geometry(self.folder / config["poni"])
+                masked_image = np.asarray(detector_data["5CB"], dtype=float).copy()
+                detector_data["background_subtracted"] = False
                 detector_mask = detector_data.get("mask")
-                if detector_mask is not None and detector_mask.shape == masked_image.shape:
-                    masked_image[detector_mask] = np.nan
                 masked_image[~np.isfinite(masked_image) | (masked_image < 0)] = np.nan
                 real_package = self.prepare_panel_save_package(
                     detector,
@@ -3381,11 +3585,16 @@ class DoubleDetectorProject(QWidget):
                     float(self.canvas.nearest_sorted_index(real_package["x_centers_mm"], center_x_mm)),
                     float(self.canvas.nearest_sorted_index(real_package["y_centers_mm"], center_y_mm)),
                 )
-                detector_data["cave_nan_regions"] = read_cave_regions(detector_data["source_path"])
+                detector_data["cave_nan_regions"] = copy.deepcopy(
+                    cave_regions_override
+                    if cave_regions_override is not None
+                    else read_cave_regions(detector_data["source_path"])
+                )
                 # Start in the tilted reference frame; the panel button can
                 # switch it back to the laboratory (0°) frame.
                 detector_data["reference_angle_deg"] = -float(detector_data.get("tilt_plane_deg", 0.0))
                 self.loaded[detector] = detector_data
+            self.batch_progress.setValue(len(paths))
             default_shape = self.loaded.get(self.selected_detector(), {}).get("resized_shape")
             if default_shape:
                 self.resize_height_spin.blockSignals(True)
@@ -3400,6 +3609,7 @@ class DoubleDetectorProject(QWidget):
             self.canvas.draw_detectors(self.loaded, self.selected_detector())
             if self.selected_detector() == "Si4M":
                 self.add_auto_tile_zones()
+                self.canvas.fit_si4m_view()
             elif self.selected_detector() == "Combo (test)":
                 self.rebuild_combo()
             self.refresh_custom_zones_panel()
@@ -3414,6 +3624,9 @@ class DoubleDetectorProject(QWidget):
     def read_first_h5_image(self, path: Path):
         if not path.exists():
             raise FileNotFoundError(path)
+        if path.suffix.lower() == ".edf":
+            image, *_ = read_edf_frame(path, 0)
+            return np.asarray(image, dtype=float)
         dataset_name, *_ = inspect_h5_image_dataset(path)
         image, _header = read_h5_frame(path, dataset_name, 0, add_matching_center=False)
         return np.asarray(image, dtype=float)

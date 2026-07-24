@@ -781,7 +781,7 @@ class MainWindow(QMainWindow):
         self.centre_tab_index = self.tab_bar.addTab("🎯 Center")
         self.tab_bar.addTab("🧪 Pre-treatment")
         self.tab_bar.addTab("🧮 Average")
-        self.tab_bar.addTab("🕳️ Cave")
+        self.cave_tab_index = self.tab_bar.addTab("🕳️ Cave")
         self.unfold_tab_index = self.tab_bar.addTab("Unfold")
         self.radial_tab_index = self.tab_bar.addTab("⭕ Radial")
         self.tab_bar.addTab("〰️ Azimuthal")
@@ -1059,6 +1059,7 @@ class MainWindow(QMainWindow):
         self.hermans_tab = HermansTab()
         self.distances_tab = DistancesTab()
         self.sandbox_tab = SandboxTab()
+        self.cave_tab.open_bm02_sandbox_requested.connect(self.open_bm02_sandbox_from_cave)
         self.header_editor_tab = HeaderEditorTab()
         development_copy = self.is_development_copy()
         self.radial_tab.radial_test_button.setVisible(development_copy)
@@ -1153,9 +1154,18 @@ class MainWindow(QMainWindow):
         self.apply_last_line_geometry_to_tab(self.pages.widget(index))
         self.sync_pages_width_to_window()
 
+    def open_bm02_sandbox_from_cave(self, detector):
+        self.tab_bar.setCurrentIndex(self.sandbox_tab_index)
+        self.sandbox_tab.open_double_detector_project(
+            detector=detector,
+            return_to_cave=True,
+        )
+
     def apply_last_line_geometry_to_tab(self, tab):
         selector = getattr(tab, "line_geometry_selector", None)
         if selector is None:
+            return
+        if getattr(selector, "skip_last_geometry", False):
             return
         try:
             from tabs.line_geometry import load_last_line_geometry_name

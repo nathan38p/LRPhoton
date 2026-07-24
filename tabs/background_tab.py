@@ -21,9 +21,10 @@ from PySide6.QtWidgets import (
 )
 
 import os
+import re
 import fnmatch
 import numpy as np
-from scipy.ndimage import binary_dilation, label
+from scipy.ndimage import binary_dilation, binary_opening, label
 
 from .cave_tab import ImageCanvas, read_cave_mask_image
 from .file_ratings import is_file_rated_up, install_file_rating_menu, set_item_file_path, should_hide_file_in_browser
@@ -446,15 +447,15 @@ class BackgroundTab(QWidget):
         right_controls.addWidget(mask_box, 1)
         right_controls.addWidget(parameters_box, 1)
         right_controls.addWidget(normalization_box, 1)
-        columns_layout.addLayout(left_controls, 1)
-        columns_layout.addLayout(right_controls, 1)
-        controls_layout.addLayout(columns_layout, 1)
         self.batch_progress = QProgressBar()
         self.batch_progress.setRange(0, 1)
         self.batch_progress.setValue(0)
         self.batch_progress.setVisible(False)
-        controls_layout.addWidget(self.batch_progress)
-        controls_layout.addWidget(self.run_button)
+        right_controls.addWidget(self.batch_progress)
+        right_controls.addWidget(self.run_button)
+        columns_layout.addLayout(left_controls, 1)
+        columns_layout.addLayout(right_controls, 1)
+        controls_layout.addLayout(columns_layout, 1)
         controls_panel.setFixedWidth(FILE_BROWSER_WIDTH * 2 + BLOCK_SPACING)
         controls_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         content_layout.addWidget(controls_panel, 0)
@@ -999,6 +1000,7 @@ class BackgroundTab(QWidget):
             try:
                 self.sample_stack = self.open_image_stack(file_path)
                 self.apply_stack_exposure(self.sample_stack, self.sample_exposure_spin)
+                self.auto_select_detector_files(file_path)
                 if self.mask_file_path:
                     self.mask_array = read_cave_mask_image(self.mask_file_path, expected_shape=self.sample_stack.shape)
                 self.contrast_auto_initialized = False
@@ -1071,6 +1073,7 @@ class BackgroundTab(QWidget):
         try:
             self.sample_stack = self.open_image_stack(paths[0])
             self.apply_stack_exposure(self.sample_stack, self.sample_exposure_spin)
+            self.auto_select_detector_files(paths[0])
             if self.mask_file_path:
                 self.mask_array = read_cave_mask_image(self.mask_file_path, expected_shape=self.sample_stack.shape)
             self.contrast_auto_initialized = False
@@ -1103,6 +1106,70 @@ class BackgroundTab(QWidget):
                 self.background_stack = None
                 self.update_result_preview()
                 self.status_label.setText(f"Background loading error: {exc}")
+
+    def auto_select_detector_files(self, sample_path):
+        """Load matching detector mask and capillary/background from the sample folder."""
+        folder = os.path.dirname(sample_path)
+        sample_name = os.path.basename(sample_path)
+        detector_aliases = (
+            "eiger4m", "eiger", "pilatus", "si4m", "udetx", "id13", "id02",
+            "xenocs", "mar300", "mar165", "lambda", "saxs", "waxs",
+        )
+        sample_lower = sample_name.lower()
+        detectors = [alias for alias in detector_aliases if alias in sample_lower]
+        if not detectors:
+            return
+
+        try:
+            candidates = [
+                os.path.join(folder, name)
+                for name in os.listdir(folder)
+                if os.path.isfile(os.path.join(folder, name))
+                and os.path.splitext(name)[1].lower() in {".edf", ".h5", ".hdf5"}
+                and os.path.abspath(os.path.join(folder, name)) != os.path.abspath(sample_path)
+            ]
+        except OSError:
+            return
+
+        def has_word(name, words):
+            lower = os.path.splitext(os.path.basename(name))[0].lower()
+            return any(re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", lower) for word in words)
+
+        def rank(path, words):
+            lower = os.path.basename(path).lower()
+            detector_score = max((len(alias) for alias in detectors if alias in lower), default=0)
+            keyword_score = 10 if has_word(path, words) else 0
+            return keyword_score + detector_score
+
+        mask_candidates = [path for path in candidates if has_word(path, ("mask",)) and any(alias in os.path.basename(path).lower() for alias in detectors)]
+        background_candidates = [
+            path for path in candidates
+            if has_word(path, ("capillaire", "background", "bck", "bg"))
+            and any(alias in os.path.basename(path).lower() for alias in detectors)
+        ]
+
+        if mask_candidates:
+            mask_path = max(sorted(mask_candidates), key=lambda path: rank(path, ("mask",)))
+            try:
+                expected_shape = self.sample_stack.shape if self.sample_stack is not None else None
+                self.mask_array = read_cave_mask_image(mask_path, expected_shape=expected_shape)
+                self.mask_file_path = mask_path
+                self.mask_file_edit.setText(mask_path)
+            except Exception:
+                pass
+
+        if background_candidates:
+            background_path = max(sorted(background_candidates), key=lambda path: rank(path, ("capillaire", "background", "bck", "bg")))
+            try:
+                self.background_stack = self.open_image_stack(background_path)
+                self.apply_stack_exposure(self.background_stack, self.background_exposure_spin)
+                self.background_file_path = background_path
+                self.background_file_edit.setText(background_path)
+            except Exception:
+                pass
+
+        if mask_candidates or background_candidates:
+            self.update_result_preview()
 
     def select_mask_file(self):
         file_path = self.open_data_file_dialog("Select mask file")
@@ -1192,7 +1259,13 @@ class BackgroundTab(QWidget):
         radius = max(0, int(radius))
         if radius == 0:
             return expanded
-        components, count = label(source, structure=np.ones((3, 3), dtype=bool))
+        # Remove small one-pixel appendages before identifying the large
+        # detector-gap rectangles. The original mask is still preserved.
+        rectangle_core = binary_opening(
+            source,
+            structure=np.ones((3, 3), dtype=bool),
+        )
+        components, count = label(rectangle_core, structure=np.ones((3, 3), dtype=bool))
         large_components = np.zeros_like(source, dtype=bool)
         for component_index in range(1, count + 1):
             component = components == component_index

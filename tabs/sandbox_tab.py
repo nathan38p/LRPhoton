@@ -134,8 +134,13 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         self.open_tools_project_button.clicked.connect(self.open_tools_project)
         selector_buttons.addWidget(self.open_tools_project_button, 1, 1)
 
-        self.open_double_detector_project_button = self.make_project_button("🧩 BM02 D2AM")
-        self.open_double_detector_project_button.clicked.connect(self.open_double_detector_project)
+        self.open_double_detector_project_button = self.make_project_button(
+            "🧩 BM02 D2AM — Implemented in Cave tab (think about Pre-treatment)"
+        )
+        self.open_double_detector_project_button.setEnabled(False)
+        self.open_double_detector_project_button.setToolTip(
+            "BM02 D2AM is implemented in the Cave tab. Think about Pre-treatment."
+        )
         selector_buttons.addWidget(self.open_double_detector_project_button, 2, 0, 1, 2)
 
         self.open_mask_project_button = self.make_project_button("🎭 Apply Mask")
@@ -544,7 +549,13 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
 
         self.double_detector_project = DoubleDetectorProject()
         self.double_detector_project.folder_changed.connect(lambda folder: self.folder_changed.emit(Path(folder), self))
-        self.double_detector_project_page = self.wrap_sandbox_project(self.double_detector_project)
+        self.double_detector_back_button = QPushButton("← Sandbox projects")
+        self.double_detector_back_button.setCursor(Qt.PointingHandCursor)
+        self.double_detector_back_button.clicked.connect(self.show_project_selector)
+        self.double_detector_project_page = self.wrap_sandbox_project(
+            self.double_detector_project,
+            back_button=self.double_detector_back_button,
+        )
         self.project_stack.addWidget(self.double_detector_project_page)
 
         self.mask_project = MaskProject()
@@ -575,13 +586,13 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
         """)
         return button
 
-    def wrap_sandbox_project(self, content_widget, show_back_button=True):
+    def wrap_sandbox_project(self, content_widget, show_back_button=True, back_button=None):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         if show_back_button:
-            layout.addWidget(self.make_back_to_projects_button(), 0)
+            layout.addWidget(back_button or self.make_back_to_projects_button(), 0)
         layout.addWidget(content_widget, 1)
         return page
 
@@ -627,8 +638,29 @@ class SandboxTab(PolynomialProjectMixin, ImogoliteProjectMixin, Saxs3DProjectMix
     def open_tools_project(self):
         self.project_stack.setCurrentWidget(self.tools_project_page)
 
-    def open_double_detector_project(self):
+    def open_double_detector_project(self, detector=None, return_to_cave=False):
+        if detector in {"WOS", "Si4M"}:
+            self.double_detector_project.detector_combo.setCurrentText(detector)
+        try:
+            self.double_detector_back_button.clicked.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        if return_to_cave:
+            self.double_detector_back_button.setText("← Cave")
+            self.double_detector_back_button.clicked.connect(self.return_to_cave)
+        else:
+            self.double_detector_back_button.setText("← Sandbox projects")
+            self.double_detector_back_button.clicked.connect(self.show_project_selector)
         self.project_stack.setCurrentWidget(self.double_detector_project_page)
+
+    def return_to_cave(self):
+        window = self.window()
+        cave_index = getattr(window, "cave_tab_index", None)
+        if cave_index is not None:
+            cave_tab = getattr(window, "cave_tab", None)
+            if cave_tab is not None and hasattr(cave_tab, "reset_line_geometry_picker"):
+                cave_tab.reset_line_geometry_picker()
+            window.tab_bar.setCurrentIndex(cave_index)
 
     def open_mask_project(self):
         self.project_stack.setCurrentWidget(self.mask_project_page)
