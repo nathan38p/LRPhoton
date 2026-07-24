@@ -23,8 +23,9 @@ from PySide6.QtWidgets import (
 import os
 import fnmatch
 import numpy as np
+from scipy.ndimage import binary_dilation, label
 
-from .cave_tab import ImageCanvas
+from .cave_tab import ImageCanvas, read_cave_mask_image
 from .file_ratings import is_file_rated_up, install_file_rating_menu, set_item_file_path, should_hide_file_in_browser
 
 try:
@@ -74,7 +75,7 @@ except Exception:
 
 
 class LazyImageStack:
-    def __init__(self, file_path, kind, data=None, dataset_path=None, frame_count=1, shape=None, frame_axis=None):
+    def __init__(self, file_path, kind, data=None, dataset_path=None, frame_count=1, shape=None, frame_axis=None, header=None):
         self.file_path = file_path
         self.kind = kind
         self.data = data
@@ -82,6 +83,7 @@ class LazyImageStack:
         self.frame_count = int(frame_count)
         self.shape = shape
         self.frame_axis = frame_axis
+        self.header = dict(header or {})
 
     def get_frame(self, frame_index):
         frame_index = max(0, min(int(frame_index), self.frame_count - 1))
@@ -116,6 +118,8 @@ class BackgroundTab(QWidget):
         self.sample_file_path = ""
         self.sample_file_paths = []
         self.background_file_path = ""
+        self.mask_file_path = ""
+        self.mask_array = None
         self.output_folder_path = ""
         self.current_folder = ""
         self.sample_stack = None
@@ -123,6 +127,12 @@ class BackgroundTab(QWidget):
         self.result_data = None
         self.contrast_vmin = None
         self.contrast_vmax = None
+        self.contrast_range_min = None
+        self.contrast_range_max = None
+        self.contrast_min_slider_low = None
+        self.contrast_min_slider_high = None
+        self.contrast_max_slider_low = None
+        self.contrast_max_slider_high = None
         self.contrast_auto_initialized = False
         self.build_ui()
 
@@ -156,7 +166,7 @@ class BackgroundTab(QWidget):
         original_layout.addWidget(self.original_canvas, 1)
         original_layout.addWidget(self.original_coordinate_label, 0)
 
-        parameters_box = QGroupBox("Background tools")
+        parameters_box = QGroupBox("Background")
         parameters_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
         parameters_layout = QVBoxLayout(parameters_box)
         parameters_layout.setContentsMargins(*GROUP_BOX_MARGINS)
@@ -205,6 +215,23 @@ class BackgroundTab(QWidget):
         mask_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
         mask_layout = QVBoxLayout(mask_box)
         mask_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        mask_layout.setSpacing(6)
+        self.mask_file_edit = QLineEdit()
+        self.mask_file_edit.setPlaceholderText("Mask file")
+        self.mask_file_edit.setReadOnly(True)
+        mask_layout.addWidget(self.mask_file_edit)
+        mask_button = QPushButton("Open mask")
+        mask_button.clicked.connect(self.select_mask_file)
+        mask_layout.addWidget(mask_button)
+        expand_mask_layout = QHBoxLayout()
+        expand_mask_layout.addWidget(QLabel("Expand NaN by"))
+        self.mask_expand_spin = QSpinBox()
+        self.mask_expand_spin.setRange(0, 10)
+        self.mask_expand_spin.setValue(0)
+        self.mask_expand_spin.setSuffix(" px")
+        self.mask_expand_spin.valueChanged.connect(self.update_result_preview)
+        expand_mask_layout.addWidget(self.mask_expand_spin)
+        mask_layout.addLayout(expand_mask_layout)
         mask_layout.addStretch(1)
 
         self.sample_file_edit = QLineEdit()
@@ -218,7 +245,6 @@ class BackgroundTab(QWidget):
         self.background_file_edit.setReadOnly(True)
         self.background_file_button = QPushButton("Open background")
         self.background_file_button.clicked.connect(self.select_background_file)
-        parameters_layout.addWidget(QLabel("Background"))
         parameters_layout.addWidget(self.background_file_edit)
         parameters_layout.addWidget(self.background_file_button)
 
@@ -327,10 +353,57 @@ class BackgroundTab(QWidget):
         self.log_text.setPlaceholderText("Background processing messages will appear here.")
         self.log_text.hide()
 
-        normalization_box = QGroupBox("Normalization")
+        normalization_box = QGroupBox("🚧 Normalization")
         normalization_box.setStyleSheet(TOOL_GROUP_BOX_STYLE)
         normalization_layout = QVBoxLayout(normalization_box)
         normalization_layout.setContentsMargins(*GROUP_BOX_MARGINS)
+        self.normalization_enabled = QCheckBox("Enable normalization")
+        self.normalization_enabled.stateChanged.connect(self.update_result_preview)
+        normalization_layout.addWidget(self.normalization_enabled)
+        normalization_form = QGridLayout()
+        normalization_form.setHorizontalSpacing(6)
+        normalization_form.setVerticalSpacing(4)
+        normalization_form.addWidget(QLabel("Sample"), 0, 0, 1, 2)
+        normalization_form.addWidget(QLabel("Exposure sample"), 1, 0)
+        self.sample_exposure_spin = QDoubleSpinBox()
+        self.sample_exposure_spin.setRange(1e-12, 1e12)
+        self.sample_exposure_spin.setDecimals(6)
+        self.sample_exposure_spin.setValue(1.0)
+        self.sample_exposure_spin.setSuffix(" s")
+        self.sample_exposure_spin.valueChanged.connect(self.update_result_preview)
+        normalization_form.addWidget(self.sample_exposure_spin, 1, 1)
+        normalization_form.addWidget(QLabel("Sample thickness"), 2, 0)
+        self.sample_thickness_spin = QDoubleSpinBox()
+        self.sample_thickness_spin.setRange(1e-12, 1e12)
+        self.sample_thickness_spin.setDecimals(6)
+        self.sample_thickness_spin.setValue(1.0)
+        self.sample_thickness_spin.setSuffix(" mm")
+        self.sample_thickness_spin.valueChanged.connect(self.update_result_preview)
+        normalization_form.addWidget(self.sample_thickness_spin, 2, 1)
+        normalization_form.addWidget(QLabel("Flux sample"), 3, 0)
+        self.sample_flux_spin = QDoubleSpinBox()
+        self.sample_flux_spin.setRange(1e-12, 1e12)
+        self.sample_flux_spin.setDecimals(6)
+        self.sample_flux_spin.setValue(1.0)
+        self.sample_flux_spin.valueChanged.connect(self.update_result_preview)
+        normalization_form.addWidget(self.sample_flux_spin, 3, 1)
+        normalization_form.addWidget(QLabel("Background"), 4, 0, 1, 2)
+        normalization_form.addWidget(QLabel("Exposure background"), 5, 0)
+        self.background_exposure_spin = QDoubleSpinBox()
+        self.background_exposure_spin.setRange(1e-12, 1e12)
+        self.background_exposure_spin.setDecimals(6)
+        self.background_exposure_spin.setValue(1.0)
+        self.background_exposure_spin.setSuffix(" s")
+        self.background_exposure_spin.valueChanged.connect(self.update_result_preview)
+        normalization_form.addWidget(self.background_exposure_spin, 5, 1)
+        normalization_form.addWidget(QLabel("Flux background"), 6, 0)
+        self.background_flux_spin = QDoubleSpinBox()
+        self.background_flux_spin.setRange(1e-12, 1e12)
+        self.background_flux_spin.setDecimals(6)
+        self.background_flux_spin.setValue(1.0)
+        self.background_flux_spin.valueChanged.connect(self.update_result_preview)
+        normalization_form.addWidget(self.background_flux_spin, 6, 1)
+        normalization_layout.addLayout(normalization_form)
         normalization_layout.addStretch(1)
 
         result_box = QGroupBox("Background-subtracted pattern")
@@ -367,10 +440,10 @@ class BackgroundTab(QWidget):
         left_controls.setContentsMargins(0, 0, 0, 0)
         left_controls.setSpacing(BLOCK_SPACING)
         left_controls.addWidget(file_browser_box, 1)
-        left_controls.addWidget(mask_box, 1)
         right_controls = QVBoxLayout()
         right_controls.setContentsMargins(0, 0, 0, 0)
         right_controls.setSpacing(BLOCK_SPACING)
+        right_controls.addWidget(mask_box, 1)
         right_controls.addWidget(parameters_box, 1)
         right_controls.addWidget(normalization_box, 1)
         columns_layout.addLayout(left_controls, 1)
@@ -383,6 +456,7 @@ class BackgroundTab(QWidget):
         controls_layout.addWidget(self.batch_progress)
         controls_layout.addWidget(self.run_button)
         controls_panel.setFixedWidth(FILE_BROWSER_WIDTH * 2 + BLOCK_SPACING)
+        controls_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         content_layout.addWidget(controls_panel, 0)
 
         content_layout.addWidget(result_box, 2)
@@ -463,11 +537,13 @@ class BackgroundTab(QWidget):
         if lower_path.endswith(".edf"):
             if fabio is None:
                 raise ImportError("fabio is required to read EDF files.")
-            data = np.asarray(fabio.open(file_path).data)
+            edf = fabio.open(file_path)
+            data = np.asarray(edf.data)
+            header = dict(getattr(edf, "header", {}) or {})
             if data.ndim == 2:
-                return LazyImageStack(file_path, "edf", data=data, frame_count=1, shape=data.shape)
+                return LazyImageStack(file_path, "edf", data=data, frame_count=1, shape=data.shape, header=header)
             if data.ndim == 3:
-                return LazyImageStack(file_path, "edf", data=data, frame_count=data.shape[0], shape=data.shape[-2:])
+                return LazyImageStack(file_path, "edf", data=data, frame_count=data.shape[0], shape=data.shape[-2:], header=header)
             raise ValueError("Unsupported EDF data dimensions.")
 
         if lower_path.endswith((".h5", ".hdf5")):
@@ -486,6 +562,14 @@ class BackgroundTab(QWidget):
                     frame_axis, frame_count, shape = self.h5_dataset_image_info(dataset.shape)
                 else:
                     raise ValueError("Unsupported HDF5 data dimensions.")
+                header = {}
+                def collect_exposure(name, obj):
+                    if isinstance(obj, h5py.Dataset) and obj.ndim == 0 and "exposure_time" in name.lower():
+                        try:
+                            header["ExposureTime"] = float(obj[()])
+                        except (TypeError, ValueError):
+                            pass
+                handle.visititems(collect_exposure)
             return LazyImageStack(
                 file_path,
                 "hdf5",
@@ -493,6 +577,7 @@ class BackgroundTab(QWidget):
                 frame_count=frame_count,
                 shape=shape,
                 frame_axis=frame_axis,
+                header=header,
             )
 
         data = np.loadtxt(file_path)
@@ -683,6 +768,17 @@ class BackgroundTab(QWidget):
 
         self.contrast_vmin = float(vmin)
         self.contrast_vmax = float(vmax)
+        span = max(self.contrast_vmax - self.contrast_vmin, 1.0)
+        self.contrast_min_slider_low = self.contrast_vmin - abs(self.contrast_vmin) * 0.2
+        self.contrast_min_slider_high = self.contrast_vmin + abs(self.contrast_vmin) * 0.2
+        self.contrast_max_slider_low = self.contrast_vmax - abs(self.contrast_vmax) * 0.2
+        self.contrast_max_slider_high = self.contrast_vmax + abs(self.contrast_vmax) * 0.2
+        if self.contrast_min_slider_low == self.contrast_min_slider_high:
+            self.contrast_min_slider_low = self.contrast_vmin - span * 0.2
+            self.contrast_min_slider_high = self.contrast_vmin + span * 0.2
+        if self.contrast_max_slider_low == self.contrast_max_slider_high:
+            self.contrast_max_slider_low = self.contrast_vmax - span * 0.2
+            self.contrast_max_slider_high = self.contrast_vmax + span * 0.2
         self.contrast_auto_initialized = True
 
         self.block_contrast_signals(True)
@@ -705,6 +801,17 @@ class BackgroundTab(QWidget):
 
         self.contrast_vmin = vmin
         self.contrast_vmax = vmax
+        span = max(vmax - vmin, 1.0)
+        self.contrast_min_slider_low = vmin - abs(vmin) * 0.2
+        self.contrast_min_slider_high = vmin + abs(vmin) * 0.2
+        self.contrast_max_slider_low = vmax - abs(vmax) * 0.2
+        self.contrast_max_slider_high = vmax + abs(vmax) * 0.2
+        if self.contrast_min_slider_low == self.contrast_min_slider_high:
+            self.contrast_min_slider_low = vmin - span * 0.2
+            self.contrast_min_slider_high = vmin + span * 0.2
+        if self.contrast_max_slider_low == self.contrast_max_slider_high:
+            self.contrast_max_slider_low = vmax - span * 0.2
+            self.contrast_max_slider_high = vmax + span * 0.2
         self.contrast_auto_initialized = True
         self.refresh_displayed_images()
 
@@ -721,14 +828,15 @@ class BackgroundTab(QWidget):
             self.intensity_max_slider.setValue(slider_max)
             self.intensity_max_slider.blockSignals(False)
 
-        current_span = max(self.contrast_vmax - self.contrast_vmin, 1.0)
-        center = (self.contrast_vmin + self.contrast_vmax) / 2.0
-        global_span = max(abs(center), current_span, 1.0) * 4.0
-        range_min = center - global_span
-        range_max = center + global_span
+        if self.contrast_min_slider_low is None or self.contrast_max_slider_high is None:
+            return
 
-        vmin = range_min + (range_max - range_min) * (slider_min / 1000.0)
-        vmax = range_min + (range_max - range_min) * (slider_max / 1000.0)
+        vmin = self.contrast_min_slider_low + (
+            self.contrast_min_slider_high - self.contrast_min_slider_low
+        ) * (slider_min / 1000.0)
+        vmax = self.contrast_max_slider_low + (
+            self.contrast_max_slider_high - self.contrast_max_slider_low
+        ) * (slider_max / 1000.0)
 
         self.block_contrast_signals(True)
         self.intensity_min_spin.setValue(vmin)
@@ -795,6 +903,15 @@ class BackgroundTab(QWidget):
             return
 
         if background_frame is None:
+            if self.mask_array is not None or self.normalization_enabled.isChecked():
+                try:
+                    self.result_data = self.compute_result_frame(frame_index)
+                except Exception:
+                    self.result_data = None
+                    self.display_image(self.result_ax, self.result_canvas, None, "Preview unavailable")
+                    return
+                self.display_image(self.result_ax, self.result_canvas, self.result_data, "Pre-treatment preview")
+                return
             self.result_data = None
             self.display_image(self.result_ax, self.result_canvas, None, "Result")
             return
@@ -862,6 +979,16 @@ class BackgroundTab(QWidget):
             details.append(f"frame axis: {stack.frame_axis}")
         return " (" + ", ".join(details) + ")"
 
+    def apply_stack_exposure(self, stack, spin):
+        try:
+            exposure = float(stack.header.get("ExposureTime"))
+        except (AttributeError, TypeError, ValueError):
+            return
+        if exposure > 0:
+            spin.blockSignals(True)
+            spin.setValue(exposure)
+            spin.blockSignals(False)
+
     def select_sample_file(self):
         file_path = self.open_data_file_dialog("Select sample file")
         if file_path:
@@ -871,6 +998,9 @@ class BackgroundTab(QWidget):
             self.folder_changed.emit(self.current_folder)
             try:
                 self.sample_stack = self.open_image_stack(file_path)
+                self.apply_stack_exposure(self.sample_stack, self.sample_exposure_spin)
+                if self.mask_file_path:
+                    self.mask_array = read_cave_mask_image(self.mask_file_path, expected_shape=self.sample_stack.shape)
                 self.contrast_auto_initialized = False
                 self.contrast_vmin = None
                 self.contrast_vmax = None
@@ -940,6 +1070,9 @@ class BackgroundTab(QWidget):
         self.sample_file_edit.setText("; ".join(paths))
         try:
             self.sample_stack = self.open_image_stack(paths[0])
+            self.apply_stack_exposure(self.sample_stack, self.sample_exposure_spin)
+            if self.mask_file_path:
+                self.mask_array = read_cave_mask_image(self.mask_file_path, expected_shape=self.sample_stack.shape)
             self.contrast_auto_initialized = False
             self.contrast_vmin = None
             self.contrast_vmax = None
@@ -960,6 +1093,7 @@ class BackgroundTab(QWidget):
             self.folder_changed.emit(self.current_folder)
             try:
                 self.background_stack = self.open_image_stack(file_path)
+                self.apply_stack_exposure(self.background_stack, self.background_exposure_spin)
                 self.update_result_preview()
                 self.status_label.setText(
                     f"Background loaded: {self.background_stack.frame_count} frame(s)"
@@ -969,6 +1103,22 @@ class BackgroundTab(QWidget):
                 self.background_stack = None
                 self.update_result_preview()
                 self.status_label.setText(f"Background loading error: {exc}")
+
+    def select_mask_file(self):
+        file_path = self.open_data_file_dialog("Select mask file")
+        if not file_path:
+            return
+        try:
+            expected_shape = self.sample_stack.shape if self.sample_stack is not None else None
+            self.mask_array = read_cave_mask_image(file_path, expected_shape=expected_shape)
+            self.mask_file_path = file_path
+            self.mask_file_edit.setText(file_path)
+            self.update_result_preview()
+        except Exception as exc:
+            self.mask_array = None
+            self.mask_file_path = ""
+            self.mask_file_edit.clear()
+            self.status_label.setText(f"Mask loading error: {exc}")
 
     def select_output_folder(self):
         start_folder = self.current_folder if self.current_folder and os.path.isdir(self.current_folder) else QDir.homePath()
@@ -995,31 +1145,97 @@ class BackgroundTab(QWidget):
             base_name = os.path.splitext(os.path.basename(self.sample_file_path))[0]
         else:
             base_name = "background_subtracted"
-        return f"{base_name}_sub"
+        return f"{base_name}_nrm"
 
     def compute_result_frame(self, frame_index):
         if self.sample_stack is None:
             raise ValueError("No sample file loaded.")
-        if self.background_stack is None:
-            raise ValueError("No background file loaded.")
 
         sample_frame = self.sample_stack.get_frame(frame_index)
-        background_frame = self.background_stack.get_frame(frame_index)
+        background_frame = None
+        if self.background_stack is not None:
+            background_frame = self.background_stack.get_frame(frame_index)
 
-        if sample_frame.shape != background_frame.shape:
+        if background_frame is not None and sample_frame.shape != background_frame.shape:
             raise ValueError("Sample and background frames do not have the same shape.")
 
-        result = sample_frame - self.background_scale_spin.value() * background_frame + self.offset_spin.value()
+        if self.mask_array is not None:
+            if self.mask_array.shape != sample_frame.shape:
+                raise ValueError("Mask shape does not match the current image frame.")
+            mask = self.expanded_mask(self.mask_array, self.mask_expand_spin.value())
+            sample_frame = np.asarray(sample_frame, dtype=np.float64).copy()
+            sample_frame[mask] = np.nan
+            if background_frame is not None:
+                background_frame = np.asarray(background_frame, dtype=np.float64).copy()
+                background_frame[mask] = np.nan
+
+        if self.normalization_enabled.isChecked():
+            sample_factor = self.sample_exposure_spin.value() * self.sample_flux_spin.value()
+            sample_frame = np.asarray(sample_frame, dtype=np.float64) / sample_factor
+            if background_frame is not None:
+                background_factor = self.background_exposure_spin.value() * self.background_flux_spin.value()
+                background_frame = np.asarray(background_frame, dtype=np.float64) / background_factor
+
+        result = np.asarray(sample_frame, dtype=np.float64).copy()
+        if background_frame is not None:
+            result = result - self.background_scale_spin.value() * background_frame + self.offset_spin.value()
+        if self.normalization_enabled.isChecked():
+            result /= self.sample_thickness_spin.value()
         if not self.keep_negative_checkbox.isChecked():
             result = np.maximum(result, 0)
         return result
+
+    @staticmethod
+    def expanded_mask(mask, radius):
+        source = np.asarray(mask, dtype=bool)
+        expanded = source.copy()
+        radius = max(0, int(radius))
+        if radius == 0:
+            return expanded
+        components, count = label(source, structure=np.ones((3, 3), dtype=bool))
+        large_components = np.zeros_like(source, dtype=bool)
+        for component_index in range(1, count + 1):
+            component = components == component_index
+            touches_border = bool(
+                component[0, :].any()
+                or component[-1, :].any()
+                or component[:, 0].any()
+                or component[:, -1].any()
+            )
+            if int(component.sum()) > 20 and touches_border:
+                large_components |= component
+        if not large_components.any():
+            return expanded
+        structure_size = 2 * radius + 1
+        expanded |= binary_dilation(
+            large_components,
+            structure=np.ones((structure_size, structure_size), dtype=bool),
+        )
+        return expanded
+
+    def output_metadata(self):
+        return {
+            "background_subtracted": "True",
+            "background_source": str(self.background_file_path),
+            "background_scale": str(self.background_scale_spin.value()),
+            "background_offset": str(self.offset_spin.value()),
+            "normalization_enabled": str(self.normalization_enabled.isChecked()),
+            "sample_exposure": str(self.sample_exposure_spin.value()),
+            "background_exposure": str(self.background_exposure_spin.value()),
+            "sample_thickness_mm": str(self.sample_thickness_spin.value()),
+            "sample_flux": str(self.sample_flux_spin.value()),
+            "background_flux": str(self.background_flux_spin.value()),
+        }
 
     def save_current_frame(self):
         if not self.output_folder_path:
             self.status_label.setText("Select an output folder first.")
             return
 
-        if EdfImage is None:
+        if self.sample_stack is None:
+            self.status_label.setText("Load a sample first.")
+            return
+        if self.sample_stack.kind != "hdf5" and EdfImage is None:
             self.status_label.setText("fabio EDF support is not available.")
             return
 
@@ -1028,19 +1244,23 @@ class BackgroundTab(QWidget):
             result = self.compute_result_frame(frame_index)
             base_name = self.get_output_base_name()
 
-            edf_path = os.path.join(
-                self.output_folder_path,
-                f"{base_name}_frame_{frame_index:04d}.edf",
-            )
-
-            edf_image = EdfImage(data=np.asarray(result, dtype=np.float32))
-            edf_image.write(edf_path)
             if self.sample_stack.kind == "hdf5":
                 h5_path = os.path.join(
                     self.output_folder_path,
                     f"{base_name}_frame_{frame_index:04d}.h5",
                 )
                 self.write_background_h5(h5_path, result, frame_index)
+                saved_path = h5_path
+            else:
+                edf_path = os.path.join(
+                    self.output_folder_path,
+                    f"{base_name}_frame_{frame_index:04d}.edf",
+                )
+                edf_image = EdfImage(data=np.asarray(result, dtype=np.float32))
+                edf_image.header.update(self.sample_stack.header)
+                edf_image.header.update(self.output_metadata())
+                edf_image.write(edf_path)
+                saved_path = edf_path
 
             if self.save_preview_checkbox.isChecked():
                 png_path = os.path.join(
@@ -1054,8 +1274,8 @@ class BackgroundTab(QWidget):
                 )
                 self.log_text.append(f"Saved preview: {png_path}")
 
-            self.log_text.append(f"Saved EDF: {edf_path}")
-            self.status_label.setText("Current EDF frame saved.")
+            self.log_text.append(f"Saved: {saved_path}")
+            self.status_label.setText("Current frame saved.")
 
         except Exception as exc:
             self.status_label.setText(f"Save error: {exc}")
@@ -1065,19 +1285,18 @@ class BackgroundTab(QWidget):
             self.status_label.setText("Select an output folder first.")
             return
 
-        if self.sample_stack is None or self.background_stack is None:
-            self.status_label.setText("Load both sample and background first.")
+        if self.sample_stack is None:
+            self.status_label.setText("Load a sample first.")
             return
 
-        if EdfImage is None:
+        if self.sample_stack.kind != "hdf5" and EdfImage is None:
             self.status_label.setText("fabio EDF support is not available.")
             return
 
         try:
-            frame_count = min(
-                self.sample_stack.frame_count,
-                self.background_stack.frame_count,
-            )
+            frame_count = self.sample_stack.frame_count
+            if self.background_stack is not None:
+                frame_count = min(frame_count, self.background_stack.frame_count)
             start_frame = max(0, self.frame_start_spin.value() - 1)
             end_frame = min(frame_count, self.frame_end_spin.value())
 
@@ -1086,23 +1305,27 @@ class BackgroundTab(QWidget):
             for frame_index in range(start_frame, end_frame):
                 result = self.compute_result_frame(frame_index)
 
-                edf_path = os.path.join(
-                    self.output_folder_path,
-                    f"{base_name}_frame_{frame_index:04d}.edf",
-                )
-
-                edf_image = EdfImage(data=np.asarray(result, dtype=np.float32))
-                edf_image.write(edf_path)
                 if self.sample_stack.kind == "hdf5":
                     h5_path = os.path.join(
                         self.output_folder_path,
                         f"{base_name}_frame_{frame_index:04d}.h5",
                     )
                     self.write_background_h5(h5_path, result, frame_index)
+                    saved_path = h5_path
+                else:
+                    edf_path = os.path.join(
+                        self.output_folder_path,
+                        f"{base_name}_frame_{frame_index:04d}.edf",
+                    )
+                    edf_image = EdfImage(data=np.asarray(result, dtype=np.float32))
+                    edf_image.header.update(self.sample_stack.header)
+                    edf_image.header.update(self.output_metadata())
+                    edf_image.write(edf_path)
+                    saved_path = edf_path
 
-                self.log_text.append(f"Saved EDF: {edf_path}")
+                self.log_text.append(f"Saved: {saved_path}")
 
-            self.status_label.setText(f"Saved {max(0, end_frame - start_frame)} EDF frame(s).")
+            self.status_label.setText(f"Saved {max(0, end_frame - start_frame)} frame(s).")
 
         except Exception as exc:
             self.status_label.setText(f"Save all error: {exc}")
@@ -1143,6 +1366,12 @@ class BackgroundTab(QWidget):
             out.attrs["background_source"] = str(self.background_file_path)
             out.attrs["background_scale"] = float(self.background_scale_spin.value())
             out.attrs["background_offset"] = float(self.offset_spin.value())
+            out.attrs["normalization_enabled"] = bool(self.normalization_enabled.isChecked())
+            out.attrs["sample_exposure"] = float(self.sample_exposure_spin.value())
+            out.attrs["background_exposure"] = float(self.background_exposure_spin.value())
+            out.attrs["sample_thickness_mm"] = float(self.sample_thickness_spin.value())
+            out.attrs["sample_flux"] = float(self.sample_flux_spin.value())
+            out.attrs["background_flux"] = float(self.background_flux_spin.value())
 
     def run_background_subtraction(self):
         paths = self.sample_file_paths or ([self.sample_file_path] if self.sample_file_path else [])
@@ -1150,8 +1379,8 @@ class BackgroundTab(QWidget):
             self.status_label.setText("Select a sample file first.")
             return
 
-        if not self.background_file_path:
-            self.status_label.setText("Select a background file first.")
+        if not self.background_file_path and self.mask_array is None and not self.normalization_enabled.isChecked():
+            self.status_label.setText("Select a mask, background or normalization first.")
             return
 
         saved_files = 0

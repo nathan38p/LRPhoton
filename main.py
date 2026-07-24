@@ -393,15 +393,15 @@ class ColoredTabBar(QTabBar):
         2: ("#fef3c7", "#d97706"),  # Capture
         3: ("#e5e7eb", "#6b7280"),  # Tools
         4: ("#ffedd5", "#f97316"),  # Center
-        5: ("#ffedd5", "#f97316"),  # Background
+        5: ("#ffedd5", "#f97316"),  # Pre-treatment
         6: ("#ffedd5", "#f97316"),  # Average
         7: ("#ffedd5", "#f97316"),  # Cave
         8: ("#ffedd5", "#f97316"),  # Unfold
-        8: ("#dcfce7", "#16a34a"),  # Radial
-        9: ("#dcfce7", "#16a34a"),  # Azimuthal
-        10: ("#f3e8ff", "#9333ea"),  # Anisotropy
-        11: ("#cffafe", "#0891b2"),  # Distances
-        12: ("#e5e7eb", "#6b7280"),  # Sandbox
+        9: ("#dcfce7", "#16a34a"),  # Radial
+        10: ("#dcfce7", "#16a34a"),  # Azimuthal
+        11: ("#f3e8ff", "#9333ea"),  # Anisotropy
+        12: ("#cffafe", "#0891b2"),  # Distances
+        13: ("#e5e7eb", "#6b7280"),  # Sandbox
     }
 
     def tabSizeHint(self, index):
@@ -779,6 +779,7 @@ class MainWindow(QMainWindow):
         self.capture_sals_tab_index = self.tab_bar.addTab("📷 Capture")
         self.tools_tab_index = self.tab_bar.addTab("🛠️ Tools")
         self.centre_tab_index = self.tab_bar.addTab("🎯 Center")
+        self.tab_bar.addTab("🧪 Pre-treatment")
         self.tab_bar.addTab("🧮 Average")
         self.tab_bar.addTab("🕳️ Cave")
         self.unfold_tab_index = self.tab_bar.addTab("Unfold")
@@ -1032,6 +1033,7 @@ class MainWindow(QMainWindow):
         from tabs.centre_tab import CentreTab
         from tabs.cave_tab import CaveTab
         from tabs.average_tab import AverageTab
+        from tabs.background_tab import BackgroundTab
         from tabs.radial_tab import RadialTab
         from tabs.azimuthal_tab import AzimuthalTab
         from tabs.unfold_tab import UnfoldTab
@@ -1050,6 +1052,7 @@ class MainWindow(QMainWindow):
         self.centre_tab = CentreTab()
         self.cave_tab = CaveTab()
         self.average_tab = AverageTab()
+        self.pre_treatment_tab = BackgroundTab()
         self.radial_tab = RadialTab()
         self.azimuthal_tab = AzimuthalTab()
         self.unfold_tab = UnfoldTab()
@@ -1079,6 +1082,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.capture_sals_tab)
         self.pages.addWidget(self.tools_tab)
         self.pages.addWidget(self.centre_tab)
+        self.pages.addWidget(self.pre_treatment_tab)
         self.pages.addWidget(self.average_tab)
         self.pages.addWidget(self.cave_tab)
         self.pages.addWidget(self.unfold_tab)
@@ -1096,6 +1100,7 @@ class MainWindow(QMainWindow):
             self.datplot_tab,
             self.tools_tab,
             self.centre_tab,
+            self.pre_treatment_tab,
             self.average_tab,
             self.cave_tab,
             self.radial_tab,
