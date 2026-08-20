@@ -1343,11 +1343,15 @@ class MainWindow(QMainWindow):
         layout.addLayout(title_block)
 
         if self.is_development_copy():
-            build_info_html = f"Build: {self.get_build_name()}"
+            build_info_html = (
+                f"Build: {self.get_build_name()}<br>"
+                f"Install ID: {self.get_or_create_install_id()}"
+            )
         else:
             build_info_html = (
                 f"Build: {self.get_build_name()}<br>"
-                f"Last build: {self.get_build_datetime()}"
+                f"Last build: {self.get_build_datetime()}<br>"
+                f"Install ID: {self.get_or_create_install_id()}"
             )
 
         info_label = QLabel(
