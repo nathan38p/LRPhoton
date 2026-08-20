@@ -672,6 +672,8 @@ class VimbaSALSWidget(QWidget):
         self.last_frame_status = ""
         self.is_recording_frames = False
         self.recording_started_at = None
+        self.consecutive_frame_timeouts = 0
+        self.live_active = False
         self.recording_frame_count = 0
         self.recording_output_folder = None
         self.smc = SMC100Device()
@@ -1557,8 +1559,8 @@ class VimbaSALSWidget(QWidget):
     def update_connection_state(self, connected):
         has_frame = self.current_frame is not None
         self.connect_button.setEnabled(not connected)
-        self.start_button.setEnabled(connected and not self.live_timer.isActive())
-        self.stop_button.setEnabled(self.live_timer.isActive())
+        self.start_button.setEnabled(connected and not self.live_active)
+        self.stop_button.setEnabled(connected and self.live_active)
         self.apply_camera_button.setEnabled(connected)
         self.save_button.setEnabled(has_frame)
         set_matplotlib_toolbar_enabled(getattr(self, "toolbar", None), has_frame)
@@ -2489,29 +2491,52 @@ class VimbaSALSWidget(QWidget):
             return
         self.apply_camera_settings()
         interval_ms = max(1, int(1000 / max(1, self.fps_spinbox.value())))
+        self.live_active = True
         self.live_timer.start(interval_ms)
         self.status_label.setText("Live acquisition running.")
         self.update_connection_state(True)
 
     def stop_live(self, update_status=True):
-        if self.is_recording_frames:
-            self.stop_recording_frames(update_status=False)
+        self.live_active = False
         self.live_timer.stop()
         if update_status and not self.is_closing:
             self.status_label.setText("Live acquisition stopped.")
-            self.update_connection_state(self.camera is not None)
+        # Update the controls before touching the camera: stopping a Vimba
+        # stream can briefly block while a pending frame is released.
+        if self.camera is not None:
+            self.update_connection_state(True)
+        if self.is_recording_frames:
+            self.stop_recording_frames(update_status=False)
+        # Stopping the preview timer alone leaves the Vimba acquisition running.
+        # Stop the camera stream as well so "Stop live" really stops the live
+        # acquisition, not just the GUI refresh.
+        self.stop_camera_acquisition()
+        self.current_frame = None
+        self.canvas.setVisible(False)
+        if self.camera is None:
+            self.update_connection_state(False)
 
     def grab_live_frame(self):
-        if self.is_closing:
+        if self.is_closing or not self.live_active:
             return
         if self.camera is None:
             self.stop_live(update_status=False)
             return
         self.is_grabbing_frame = True
         try:
-            frame = self.camera.get_frame(timeout_ms=1000)
+            try:
+                frame = self.camera.get_frame(timeout_ms=1000)
+            except Exception as first_error:
+                # VmbPy can retain a stream handle without an announced frame
+                # after a previous tab/session transition. Releasing that
+                # stream lets the synchronous convenience call recreate it.
+                if "notfound" not in str(first_error).lower() and "not found" not in str(first_error).lower():
+                    raise
+                self.stop_camera_acquisition()
+                frame = self.camera.get_frame(timeout_ms=1000)
             if self.is_closing:
                 return
+            self.consecutive_frame_timeouts = 0
             frame_status = self.frame_status_text(frame)
             frame_is_complete = self.frame_status_is_complete(frame_status)
             self.last_frame_status = frame_status
@@ -2533,8 +2558,25 @@ class VimbaSALSWidget(QWidget):
                     f"{self.incomplete_frame_count} incomplete frame(s)."
                 )
         except Exception as exc:
-            if not self.is_closing:
-                self.status_label.setText(f"Frame grab failed: {exc}")
+            if not self.is_closing and self.live_active:
+                error_text = str(exc)
+                is_timeout = "timed out" in error_text.lower() or "timeout" in error_text.lower()
+                if is_timeout:
+                    self.consecutive_frame_timeouts += 1
+                    if self.consecutive_frame_timeouts >= 3:
+                        # A stale VmbPy stream can keep returning timeouts. Reset
+                        # it so the next get_frame() can establish a fresh stream.
+                        self.stop_camera_acquisition()
+                        self.status_label.setText(
+                            "Vimba stream timeout; stream reset, retrying acquisition..."
+                        )
+                        self.consecutive_frame_timeouts = 0
+                    else:
+                        self.status_label.setText(
+                            f"Vimba frame timeout ({self.consecutive_frame_timeouts}/3); retrying..."
+                        )
+                else:
+                    self.status_label.setText(f"Frame grab failed: {exc}")
         finally:
             self.is_grabbing_frame = False
 
@@ -3314,17 +3356,16 @@ class VimbaSALSWidget(QWidget):
 
     def stop_camera_acquisition(self):
         if self.camera is None:
-            return
+            return False
         try:
             if self.camera.is_streaming():
                 self.camera.stop_streaming()
         except Exception:
             pass
-        try:
-            feature = self.camera.get_feature_by_name("AcquisitionStop")
-            feature.run()
-        except Exception:
-            pass
+        # Do not run AcquisitionStop here. VmbPy's synchronous get_frame()
+        # owns the acquisition lifecycle and recreates its announced buffers
+        # when the next live session starts.
+        return True
 
     def closeEvent(self, event):
         self.shutdown_camera()

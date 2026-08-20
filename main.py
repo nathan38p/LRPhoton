@@ -1149,6 +1149,16 @@ class MainWindow(QMainWindow):
             tab.set_folder_from_external_tab(self.current_synced_folder)
 
     def on_tab_changed(self, index):
+        # Do not leave a synchronous Vimba frame grab running while Capture is
+        # hidden. The camera widget remains alive, so stop its live session
+        # before switching pages; it can be started again when returning.
+        if (
+            index != self.capture_sals_tab_index
+            and getattr(self.pages, "currentIndex", lambda: -1)() == self.capture_sals_tab_index
+        ):
+            capture_tab = getattr(self, "capture_sals_tab", None)
+            if capture_tab is not None and getattr(capture_tab, "live_active", False):
+                capture_tab.stop_live()
         self.initialize_tab_folder(index)
         self.pages.setCurrentIndex(index)
         self.apply_last_line_geometry_to_tab(self.pages.widget(index))
