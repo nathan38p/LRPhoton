@@ -2542,6 +2542,10 @@ class VimbaSALSWidget(QWidget):
             self.last_frame_status = frame_status
             if not frame_is_complete:
                 self.incomplete_frame_count += 1
+                # Never display a partially received GigE frame. On Windows
+                # these buffers can contain black horizontal bands even though
+                # the rest of the image looks valid.
+                return
             image = np.asarray(self.frame_to_numpy(frame))
             if image.ndim == 3 and image.shape[-1] == 1:
                 image = image[:, :, 0]
@@ -2552,11 +2556,6 @@ class VimbaSALSWidget(QWidget):
             self.frame_index += 1
             self.update_preview()
             self.update_connection_state(self.camera is not None)
-            if not frame_is_complete:
-                self.status_label.setText(
-                    f"Saved flagged Vimba frame ({frame_status}); "
-                    f"{self.incomplete_frame_count} incomplete frame(s)."
-                )
         except Exception as exc:
             if not self.is_closing and self.live_active:
                 error_text = str(exc)
