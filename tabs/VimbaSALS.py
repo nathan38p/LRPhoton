@@ -2571,10 +2571,9 @@ class VimbaSALSWidget(QWidget):
                             "Vimba stream timeout; stream reset, retrying acquisition..."
                         )
                         self.consecutive_frame_timeouts = 0
-                    else:
-                        self.status_label.setText(
-                            f"Vimba frame timeout ({self.consecutive_frame_timeouts}/3); retrying..."
-                        )
+                    # Do not surface isolated Windows GigE timeouts: a valid
+                    # frame usually arrives on the next poll and clears the
+                    # counter. Keep the normal live status visible.
                 else:
                     self.status_label.setText(f"Frame grab failed: {exc}")
         finally:
