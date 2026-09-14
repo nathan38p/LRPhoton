@@ -673,6 +673,7 @@ class VimbaSALSWidget(QWidget):
         self.is_recording_frames = False
         self.recording_started_at = None
         self.consecutive_frame_timeouts = 0
+        self.consecutive_frame_internal_faults = 0
         self.live_active = False
         self.recording_frame_count = 0
         self.recording_output_folder = None
@@ -2525,7 +2526,9 @@ class VimbaSALSWidget(QWidget):
         self.is_grabbing_frame = True
         try:
             try:
-                frame = self.camera.get_frame(timeout_ms=1000)
+                # Keep the GUI responsive when a GigE packet is lost. A long
+                # synchronous timeout makes the preview look frozen on Windows.
+                frame = self.camera.get_frame(timeout_ms=250)
             except Exception as first_error:
                 # VmbPy can retain a stream handle without an announced frame
                 # after a previous tab/session transition. Releasing that
@@ -2533,10 +2536,11 @@ class VimbaSALSWidget(QWidget):
                 if "notfound" not in str(first_error).lower() and "not found" not in str(first_error).lower():
                     raise
                 self.stop_camera_acquisition()
-                frame = self.camera.get_frame(timeout_ms=1000)
+                frame = self.camera.get_frame(timeout_ms=250)
             if self.is_closing:
                 return
             self.consecutive_frame_timeouts = 0
+            self.consecutive_frame_internal_faults = 0
             frame_status = self.frame_status_text(frame)
             frame_is_complete = self.frame_status_is_complete(frame_status)
             self.last_frame_status = frame_status
@@ -2560,6 +2564,11 @@ class VimbaSALSWidget(QWidget):
             if not self.is_closing and self.live_active:
                 error_text = str(exc)
                 is_timeout = "timed out" in error_text.lower() or "timeout" in error_text.lower()
+                is_internal_fault = (
+                    "internalfault" in error_text.lower()
+                    or "internal fault" in error_text.lower()
+                    or "vmberror.internalfault" in error_text.lower()
+                )
                 if is_timeout:
                     self.consecutive_frame_timeouts += 1
                     if self.consecutive_frame_timeouts >= 3:
@@ -2573,6 +2582,16 @@ class VimbaSALSWidget(QWidget):
                     # Do not surface isolated Windows GigE timeouts: a valid
                     # frame usually arrives on the next poll and clears the
                     # counter. Keep the normal live status visible.
+                elif is_internal_fault:
+                    self.consecutive_frame_internal_faults += 1
+                    # InternalFault is commonly a transient stale GigE stream
+                    # on Windows. Do not overwrite the live UI on every poll.
+                    if self.consecutive_frame_internal_faults >= 3:
+                        self.stop_camera_acquisition()
+                        self.status_label.setText(
+                            "Vimba stream recovered after a Windows GigE error."
+                        )
+                        self.consecutive_frame_internal_faults = 0
                 else:
                     self.status_label.setText(f"Frame grab failed: {exc}")
         finally:
