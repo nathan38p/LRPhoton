@@ -1,6 +1,7 @@
 import fnmatch
 import json
 import re
+import tempfile
 from pathlib import Path
 
 import h5py
@@ -1854,6 +1855,7 @@ class CustomCaveDialog(QDialog):
         self.source_image = np.asarray(source_image, dtype=np.float64)
         self.caved_image = np.asarray(caved_image, dtype=np.float64)
         self.final_image = self.caved_image.copy()
+        self.custom_fill_operations = []
         self.display_limits = display_limits
         self.display_data_min, self.display_data_max = self.compute_display_range()
         self.selected_region = None
@@ -1880,6 +1882,12 @@ class CustomCaveDialog(QDialog):
         toolbar.addWidget(self.reference_angle_spin)
         self.save_button = QPushButton("💾 Save cave+")
         self.save_button.clicked.connect(self.save_cave_plus)
+        self.save_all_button = QPushButton("💾 Save cave+ for all")
+        self.save_all_button.setVisible(
+            parent.file_type == "H5" and getattr(parent, "h5_n_frames", 1) > 1
+        )
+        self.save_all_button.setToolTip("Apply the custom corrections to every frame and save one cave+ H5 stack.")
+        self.save_all_button.clicked.connect(self.save_cave_plus_for_all)
         self.reset_button = QPushButton("Reset")
         self.reset_button.clicked.connect(self.reset_custom_fills)
         self.close_button = QPushButton("Close")
@@ -1887,6 +1895,7 @@ class CustomCaveDialog(QDialog):
         toolbar.addStretch(1)
         toolbar.addWidget(self.reset_button)
         toolbar.addWidget(self.save_button)
+        toolbar.addWidget(self.save_all_button)
         toolbar.addWidget(self.close_button)
         layout.addLayout(toolbar)
 
@@ -2124,6 +2133,11 @@ class CustomCaveDialog(QDialog):
             parent.yc_spin.value(),
             reference_angle_deg=self.reference_angle_spin.value(),
         )
+        self.custom_fill_operations.append((
+            self.selected_region.copy(), mode,
+            parent.xc_spin.value(), parent.yc_spin.value(),
+            self.reference_angle_spin.value(),
+        ))
         remaining = int(np.count_nonzero(~np.isfinite(self.final_image)))
         self.status_label.setText(f"Applied {mode} symmetry. Remaining NaN pixels: {remaining}.")
         self.selected_region = None
@@ -2131,6 +2145,7 @@ class CustomCaveDialog(QDialog):
 
     def reset_custom_fills(self):
         self.final_image = self.caved_image.copy()
+        self.custom_fill_operations.clear()
         self.selected_region = None
         self.refresh_images()
 
@@ -2144,6 +2159,43 @@ class CustomCaveDialog(QDialog):
         original_nan_view[~np.isfinite(self.caved_image)] = np.nan
         self.original_canvas.show_image(original_nan_view, vmin=vmin, vmax=vmax, region_mask=self.selected_region, xc=xc, yc=yc, reference_angle_deg=angle)
         self.result_canvas.show_image(self.final_image, vmin=vmin, vmax=vmax, region_mask=self.selected_region, xc=xc, yc=yc, reference_angle_deg=angle)
+
+    def save_cave_plus_for_all(self):
+        parent = self.parent()
+        if parent.current_file is None or parent.file_type != "H5" or parent.h5_n_frames <= 1:
+            return
+        temporary_path = None
+        self.save_all_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        try:
+            source_path = parent.current_file
+            dataset_name, _shape, frame_axis, n_frames, _header = inspect_h5_image_dataset(source_path)
+            output_path = source_path.parent / f"{source_path.stem}_cave+.h5"
+            with tempfile.NamedTemporaryFile(dir=output_path.parent, suffix=".h5", delete=False) as temporary:
+                temporary_path = Path(temporary.name)
+            output_h5, output_dataset = create_h5_cave_stack_file(
+                temporary_path, self.final_image.shape, n_frames, frame_axis,
+                source_path, dataset_name,
+            )
+            with output_h5:
+                for frame_index in range(n_frames):
+                    image, _header = read_h5_frame(source_path, dataset_name, frame_index, add_matching_center=False)
+                    filled = parent.cave_filled_image_for(image)
+                    for region, mode, xc, yc, angle in self.custom_fill_operations:
+                        filled = fill_region_by_symmetry(
+                            filled, filled, region, mode, xc, yc, reference_angle_deg=angle,
+                        )
+                    write_h5_stack_frame(output_dataset, frame_axis, frame_index, filled)
+            temporary_path.replace(output_path)
+            parent.status.append(f"\nSaved cave+ for all ({n_frames} frames):\n{output_path}")
+            self.status_label.setText(f"Saved cave+ for all ({n_frames} frames): {output_path}")
+        except Exception as error:
+            QMessageBox.critical(self, "Save cave+ for all error", str(error))
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+            self.save_all_button.setEnabled(True)
+            self.save_button.setEnabled(True)
 
     def save_cave_plus(self):
         parent = self.parent()
