@@ -606,6 +606,7 @@ class PlotCanvas(FigureCanvas):
     def __init__(self):
         self.fig = Figure(dpi=150)
         self.ax = self.fig.add_subplot(111)
+        self.ax_3d = None
         super().__init__(self.fig)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumSize(620, 420)
@@ -1146,6 +1147,11 @@ class DatPlotTab(QWidget):
         self.show_legend.setChecked(True)
         self.show_legend.stateChanged.connect(self.update_plot)
 
+        self.view_3d_button = QPushButton("3D")
+        self.view_3d_button.setCheckable(True)
+        self.view_3d_button.setToolTip("Show each curve on its own numbered depth axis")
+        self.view_3d_button.toggled.connect(self.update_plot)
+
         self.curve_display_stride_spin = QSpinBox()
         self.curve_display_stride_spin.setRange(1, 100000)
         self.curve_display_stride_spin.setValue(1)
@@ -1166,6 +1172,7 @@ class DatPlotTab(QWidget):
                 QLabel("Each:"),
                 self.curve_display_stride_spin,
                 self.show_legend,
+                self.view_3d_button,
                 self.keep_zoom_checkbox,
             ],
             save_callback=self.save_plot_high_quality,
@@ -3448,6 +3455,8 @@ class DatPlotTab(QWidget):
 
     def update_plot(self):
         ax = self.canvas.ax
+        is_3d = self.view_3d_button.isChecked()
+        self.view_3d_button.setText("2D" if is_3d else "3D")
         keep_zoom = (
             getattr(self, "keep_zoom_checkbox", None) is not None
             and self.keep_zoom_checkbox.isChecked()
@@ -3459,7 +3468,14 @@ class DatPlotTab(QWidget):
         for extra_ax in getattr(self, "extra_axes", {}).values():
             extra_ax.remove()
         self.extra_axes = {}
-        ax.clear()
+        if getattr(self.canvas, "ax_3d", None) is not None:
+            old_ax = self.canvas.ax_3d
+            old_ax.remove()
+            self.canvas.ax_3d = None
+            self.canvas.ax = self.canvas.fig.add_subplot(111)
+            ax = self.canvas.ax
+        else:
+            ax.clear()
 
         if not self.curves:
             self.clear_graph_coordinates()
@@ -3474,6 +3490,47 @@ class DatPlotTab(QWidget):
         mode = self.plot_mode.currentText()
         if self.auto_limits.isChecked():
             self.update_limit_fields_from_current_data()
+
+        if is_3d:
+            ax.remove()
+            ax = self.canvas.fig.add_subplot(111, projection="3d")
+            self.canvas.ax = ax
+            self.canvas.ax_3d = ax
+            curves = list(visible_curves.items())
+            x_scale = "log" if mode in PLOT_LOG_X_MODES else "linear"
+            y_scale = "log" if mode in PLOT_LOG_Y_MODES else "linear"
+            for curve_number, (key, curve) in enumerate(curves, start=1):
+                x = np.asarray(self.make_plot_x(curve["x"]), dtype=float)
+                y = np.asarray(self.make_plot_y(curve["x"], curve["y"]), dtype=float)
+                valid = np.isfinite(x) & np.isfinite(y)
+                if x_scale == "log":
+                    valid &= x > 0
+                if y_scale == "log":
+                    valid &= y > 0
+                x, y = x[valid], y[valid]
+                if not len(x):
+                    continue
+                if x_scale == "log":
+                    x = np.log10(x)
+                if y_scale == "log":
+                    y = np.log10(y)
+                z = np.full_like(x, curve_number, dtype=float)
+                ax.plot(x, y, z, linewidth=1.6, color=curve["color"], label=curve["legend"])
+
+            if self.curves_are_really_0_to_360():
+                ax.set_xlabel("ψ / °")
+            else:
+                ax.set_xlabel(self.x_label.text() or "X")
+            ax.set_ylabel(self.y_label.text() or "Y")
+            ax.set_zlabel("Curve number")
+            ax.set_zticks(range(1, len(curves) + 1))
+            ax.set_zlim(0.5, len(curves) + 0.5)
+            ax.set_title(self.title_edit.text())
+            if self.show_legend.isChecked() and curves:
+                ax.legend(loc="best")
+            self.extra_axes = {}
+            finalize_plot_canvas(self.canvas)
+            return
 
         used_axes = {normalize_plot_axis(curve.get("axis", "left")) for curve in visible_curves.values()}
         axis_map = {"left": ax}
