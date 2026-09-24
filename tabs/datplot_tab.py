@@ -3497,9 +3497,14 @@ class DatPlotTab(QWidget):
             self.canvas.ax = ax
             self.canvas.ax_3d = ax
             curves = list(visible_curves.items())
+            curve_numbers = {
+                key: index
+                for index, key in enumerate(self.curves.keys(), start=1)
+            }
             x_scale = "log" if mode in PLOT_LOG_X_MODES else "linear"
             y_scale = "log" if mode in PLOT_LOG_Y_MODES else "linear"
-            for curve_number, (key, curve) in enumerate(curves, start=1):
+            all_plot_y = []
+            for key, curve in reversed(curves):
                 x = np.asarray(self.make_plot_x(curve["x"]), dtype=float)
                 y = np.asarray(self.make_plot_y(curve["x"], curve["y"]), dtype=float)
                 valid = np.isfinite(x) & np.isfinite(y)
@@ -3514,18 +3519,37 @@ class DatPlotTab(QWidget):
                     x = np.log10(x)
                 if y_scale == "log":
                     y = np.log10(y)
-                z = np.full_like(x, curve_number, dtype=float)
-                ax.plot(x, y, z, linewidth=1.6, color=curve["color"], label=curve["legend"])
+                all_plot_y.append(y)
+                depth = np.full_like(x, curve_numbers.get(key, len(curve_numbers)), dtype=float)
+                ax.plot(x, depth, y, linewidth=1.6, color=curve["color"], label=curve["legend"])
 
             if self.curves_are_really_0_to_360():
                 ax.set_xlabel("ψ / °")
             else:
                 ax.set_xlabel(self.x_label.text() or "X")
-            ax.set_ylabel(self.y_label.text() or "Y")
-            ax.set_zlabel("Curve number")
-            ax.set_zticks(range(1, len(curves) + 1))
-            ax.set_zlim(0.5, len(curves) + 0.5)
+            ax.set_ylabel("Curve number")
+            curve_count = max(curve_numbers.values(), default=1)
+            ax.set_yticks(range(1, curve_count + 1))
+            ax.set_ylim(0.5, curve_count + 0.5)
+            ax.set_box_aspect((1.0, 1.0, 1.0))
+            for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+                axis.pane.set_facecolor((0.96, 0.96, 0.96, 1.0))
+                axis.pane.set_edgecolor((0.55, 0.55, 0.55, 1.0))
+                axis.pane.set_alpha(1.0)
+            ax.set_zlabel(self.y_label.text() or "Intensity / a.u.")
+            if all_plot_y:
+                plotted_y = np.concatenate(all_plot_y)
+                ax.set_zlim(float(np.nanmin(plotted_y)), float(np.nanmax(plotted_y)))
             ax.set_title(self.title_edit.text())
+            ax.view_init(elev=24, azim=-35)
+            ax.tick_params(axis="x", labelsize=9, pad=1)
+            ax.tick_params(axis="y", labelsize=7, pad=0)
+            ax.tick_params(axis="z", labelsize=9, pad=1)
+            if curve_count > 12:
+                ax.set_yticklabels([
+                    str(tick) if tick == 1 or tick == curve_count or tick % 2 == 0 else ""
+                    for tick in range(1, curve_count + 1)
+                ])
             if self.show_legend.isChecked() and curves:
                 ax.legend(loc="best")
             self.extra_axes = {}
