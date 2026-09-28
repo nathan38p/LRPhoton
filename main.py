@@ -1059,6 +1059,9 @@ class MainWindow(QMainWindow):
         self.hermans_tab = HermansTab()
         self.distances_tab = DistancesTab()
         self.sandbox_tab = SandboxTab()
+        self.sandbox_tab.double_detector_project.h5_saved.connect(
+            self.reload_saved_double_detector_h5
+        )
         self.cave_tab.open_bm02_sandbox_requested.connect(self.open_bm02_sandbox_from_cave)
         self.header_editor_tab = HeaderEditorTab()
         development_copy = self.is_development_copy()
@@ -1170,6 +1173,13 @@ class MainWindow(QMainWindow):
             detector=detector,
             return_to_cave=True,
         )
+
+    def reload_saved_double_detector_h5(self, output_path):
+        """Refresh View 2D if it still holds the H5 replaced by Cave."""
+        view_tab = self.view_tab
+        current_file = getattr(view_tab, "current_file", None)
+        if current_file is not None and Path(current_file).resolve() == Path(output_path).resolve():
+            view_tab.open_file(output_path)
 
     def apply_last_line_geometry_to_tab(self, tab):
         selector = getattr(tab, "line_geometry_selector", None)

@@ -2,6 +2,7 @@ from pathlib import Path
 import copy
 import fnmatch
 import json
+import os
 import re
 import tempfile
 
@@ -2448,6 +2449,7 @@ class DoubleDetectorCanvas(FigureCanvas):
 
 class DoubleDetectorProject(QWidget):
     folder_changed = Signal(object)
+    h5_saved = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -3318,18 +3320,28 @@ class DoubleDetectorProject(QWidget):
 
     def save_selected_files(self):
         paths = self.selected_file_paths()
-        if not paths:
-            self.status.setText("Sélectionne au moins un fichier.")
-            return
         detector = self.selected_detector()
-        kind = "extended" if detector == "Si4M" else "resized"
+        if not paths:
+            # Refreshing the browser can clear the list selection while the
+            # preview remains loaded. Save that visible file in this case.
+            source_path = self.loaded.get(detector, {}).get("source_path")
+            if source_path is not None:
+                paths = [Path(source_path)]
+        if not paths:
+            self.status.setText("Charge un fichier ou sélectionne des fichiers à enregistrer.")
+            return
+        # The saved Cave result must match the sixth, RESIZED PATTERN panel
+        # for both detector types.
+        kind = "resized"
         zone_template = copy.deepcopy(
             self.loaded.get(detector, {}).get("cave_nan_regions", [])
         )
+        reference_angle = float(self.reference_angle_spin.value())
         self.batch_progress.setVisible(True)
         self.batch_progress.setRange(0, len(paths))
         self.batch_progress.setValue(0)
         self.final_save_button.setEnabled(False)
+        replaced_count = 0
         try:
             for index, path in enumerate(paths, start=1):
                 self.load_test_files(
@@ -3337,16 +3349,26 @@ class DoubleDetectorProject(QWidget):
                     preview_only=True,
                     cave_regions_override=zone_template,
                 )
+                self.loaded[detector]["reference_angle_deg"] = reference_angle
+                self.canvas.draw_detectors(self.loaded, detector)
                 image = self.panel_image_for_save(detector, kind)
                 output_path = path.with_name(f"{path.stem}_cave.h5")
+                already_exists = output_path.exists()
                 self.write_panel_h5(output_path, detector, kind, image)
+                replaced_count += int(already_exists)
                 self.batch_progress.setValue(index)
             self.load_test_files(
                 paths=[paths[0]],
                 preview_only=True,
                 cave_regions_override=zone_template,
             )
-            self.status.setText(f"{len(paths)} fichier(s) enregistré(s).")
+            self.loaded[detector]["reference_angle_deg"] = reference_angle
+            self.canvas.draw_detectors(self.loaded, detector)
+            self.refresh_custom_zones_panel()
+            self.status.setText(
+                f"{len(paths)} fichier(s) Cave enregistré(s), "
+                f"dont {replaced_count} remplacé(s)."
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Save batch error", str(exc))
             self.status.setText(f"Save failed: {exc}")
@@ -3870,51 +3892,78 @@ class DoubleDetectorProject(QWidget):
         rectified_info = save_package["rectified_info"]
 
         output_path = Path(output_path)
-        with h5py.File(output_path, "w") as out:
-            dataset = out.create_dataset(
-                "/entry_0000/instrument/detector/data",
-                data=sanitize_cave_output_image(np.asarray(saved_image, dtype=float)),
-                compression="gzip",
-            )
-            if saved_mask is not None:
-                out.create_dataset(
-                    "/entry_0000/instrument/detector/mask",
-                    data=np.asarray(saved_mask, dtype=np.uint8),
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=output_path.parent, prefix=f".{output_path.stem}.", suffix=output_path.suffix or ".h5", delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+
+            # Copy the source structure into a new file, then put the sixth
+            # panel's image at the original detector dataset path so H5 readers
+            # select the Cave result by default. The source file is read only.
+            with h5py.File(source_path, "r") as source, h5py.File(temporary_path, "w") as out:
+                copy_h5_attrs(source.attrs, out.attrs)
+                for child_name in source:
+                    source.copy(child_name, out, name=child_name)
+                source_dataset_path = str(source_dataset).strip("/")
+                source_dataset_attrs = dict(source[source_dataset_path].attrs.items())
+                del out[source_dataset_path]
+                dataset = out.create_dataset(
+                    source_dataset_path,
+                    data=sanitize_cave_output_image(np.asarray(saved_image, dtype=float)),
                     compression="gzip",
                 )
-            self.write_optional_array(out, "/entry_0000/instrument/detector/q_nm_inverse", saved_q_nm)
-            self.write_optional_array(out, "/entry_0000/instrument/detector/psi_deg", saved_psi_deg)
-            self.write_optional_array(out, "/entry_0000/instrument/detector/x_center_mm", saved_x_centers_mm)
-            self.write_optional_array(out, "/entry_0000/instrument/detector/y_center_mm", saved_y_centers_mm)
+                copy_h5_attrs(source_dataset_attrs, dataset.attrs)
+                set_h5_attr(dataset.attrs, "interpretation", "image")
+                if saved_mask is not None:
+                    out.create_dataset(
+                        "/entry_0000/instrument/detector/cave_mask",
+                        data=np.asarray(saved_mask, dtype=np.uint8),
+                        compression="gzip",
+                    )
+                self.write_optional_array(out, "/entry_0000/instrument/detector/cave_q_nm_inverse", saved_q_nm)
+                self.write_optional_array(out, "/entry_0000/instrument/detector/cave_psi_deg", saved_psi_deg)
+                self.write_optional_array(out, "/entry_0000/instrument/detector/cave_x_center_mm", saved_x_centers_mm)
+                self.write_optional_array(out, "/entry_0000/instrument/detector/cave_y_center_mm", saved_y_centers_mm)
 
-            self.add_panel_h5_metadata(
-                out,
-                dataset,
+                self.add_panel_h5_metadata(
+                    out,
+                    dataset,
+                    detector,
+                    kind,
+                    source_path,
+                    source_dataset,
+                    mask_path,
+                    poni_path,
+                    poni_values,
+                    requested_geometry,
+                    resolved_geometry,
+                    data,
+                    config,
+                    rectified_info,
+                )
+                regions_json = json.dumps(data.get("cave_nan_regions", []), ensure_ascii=False)
+                set_h5_attr(out.attrs, "cave_nan_regions_json", regions_json)
+                set_h5_attr(dataset.attrs, "cave_nan_regions_json", regions_json)
+                set_h5_attr(out.attrs, "cave_reference_angle_deg", float(data.get("reference_angle_deg", 0.0)))
+                set_h5_attr(dataset.attrs, "cave_reference_angle_deg", float(data.get("reference_angle_deg", 0.0)))
+
+            os.replace(temporary_path, output_path)
+            write_cave_regions(
+                output_path,
                 detector,
-                kind,
-                source_path,
-                source_dataset,
-                mask_path,
-                poni_path,
-                poni_values,
-                requested_geometry,
-                resolved_geometry,
-                data,
-                config,
-                rectified_info,
+                data.get("cave_nan_regions", []),
+                data.get("reference_angle_deg", 0.0),
             )
-            regions_json = json.dumps(data.get("cave_nan_regions", []), ensure_ascii=False)
-            set_h5_attr(out.attrs, "cave_nan_regions_json", regions_json)
-            set_h5_attr(dataset.attrs, "cave_nan_regions_json", regions_json)
-            set_h5_attr(out.attrs, "cave_reference_angle_deg", float(data.get("reference_angle_deg", 0.0)))
-            set_h5_attr(dataset.attrs, "cave_reference_angle_deg", float(data.get("reference_angle_deg", 0.0)))
-
-        write_cave_regions(
-            output_path,
-            detector,
-            data.get("cave_nan_regions", []),
-            data.get("reference_angle_deg", 0.0),
-        )
+            self.h5_saved.emit(output_path)
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def prepare_panel_save_package(self, detector, kind, image, mask, data, config):
         base_image = np.asarray(image, dtype=float)
