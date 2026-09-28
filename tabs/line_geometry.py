@@ -80,7 +80,7 @@ def default_line_geometries():
             "center_y": default_center_text(796),
             "pixel_x_m": "5,5e-6",
             "pixel_y_m": "5,5e-6",
-            "distance_m": "0,00477",
+            "distance_m": "0,00483",
             "wavelength_m": "632,8e-9",
         },
         "XENOCS": {
