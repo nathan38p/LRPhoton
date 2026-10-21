@@ -465,6 +465,41 @@ def collect_h5_attrs_json(source):
     return collected
 
 
+def copy_h5_scalar_geometry_datasets(source, target):
+    """Preserve ID02/PyFAI scalar geometry datasets in Cave exports."""
+    geometry_keys = {
+        "center_1", "center_2", "psize_1", "psize_2", "sampledistance", "wavelength",
+    }
+    canonical_keys = {
+        "center_1": "Center_1", "center_2": "Center_2", "psize_1": "PSize_1",
+        "psize_2": "PSize_2", "sampledistance": "SampleDistance", "wavelength": "WaveLength",
+    }
+    values = {}
+
+    def visitor(name, obj):
+        if not isinstance(obj, h5py.Dataset) or obj.shape != ():
+            return
+        key = str(name).rsplit("/", 1)[-1].strip().lower().replace("-", "_").replace(" ", "_")
+        if key not in geometry_keys or "/pyfai/" not in f"/{name.lower()}/":
+            return
+        if name in target:
+            return
+
+        parent_name = str(name).rsplit("/", 1)[0]
+        target.require_group(parent_name)
+        value = obj[()]
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        elif hasattr(value, "item"):
+            value = value.item()
+        copied = target.create_dataset(name, data=value)
+        copy_h5_attrs(obj.attrs, copied.attrs)
+        values[canonical_keys[key]] = value
+
+    source.visititems(visitor)
+    return values
+
+
 def add_h5_output_metadata(out, dataset, source_file: str, source_dataset_name: str):
     source_file = Path(source_file)
 
@@ -478,6 +513,10 @@ def add_h5_output_metadata(out, dataset, source_file: str, source_dataset_name: 
     try:
         with h5py.File(source_file, "r") as source:
             copy_h5_attrs(source.attrs, out.attrs)
+            geometry_values = copy_h5_scalar_geometry_datasets(source, out)
+            for key, value in geometry_values.items():
+                set_h5_attr(out.attrs, key, value)
+                set_h5_attr(dataset.attrs, key, value)
             source_attrs_json = json.dumps(collect_h5_attrs_json(source), ensure_ascii=False)
             set_h5_attr(out.attrs, "source_h5_attrs_json", source_attrs_json)
             set_h5_attr(dataset.attrs, "source_h5_attrs_json", source_attrs_json)
