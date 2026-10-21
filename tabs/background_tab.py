@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, Signal, QDir, QSignalBlocker
+from PySide6.QtCore import Qt, Signal, QDir, QSignalBlocker, QCoreApplication
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -1354,7 +1354,7 @@ class BackgroundTab(QWidget):
         except Exception as exc:
             self.status_label.setText(f"Save error: {exc}")
 
-    def save_all_frames_as_npy(self):
+    def save_all_frames_as_npy(self, progress_callback=None, progress_total=None):
         if not self.output_folder_path:
             self.status_label.setText("Select an output folder first.")
             return
@@ -1369,7 +1369,9 @@ class BackgroundTab(QWidget):
 
         try:
             frame_count = self.sample_stack.frame_count
-            if self.background_stack is not None:
+            # A single averaged background is broadcast over every sample
+            # frame. Only a multi-frame background limits the frame range.
+            if self.background_stack is not None and self.background_stack.frame_count > 1:
                 frame_count = min(frame_count, self.background_stack.frame_count)
             start_frame = max(0, self.frame_start_spin.value() - 1)
             end_frame = min(frame_count, self.frame_end_spin.value())
@@ -1381,8 +1383,23 @@ class BackgroundTab(QWidget):
                     self.output_folder_path,
                     f"{base_name}.h5",
                 )
-                self.write_background_h5_all_frames(h5_path, start_frame, end_frame)
+                frame_total = max(0, end_frame - start_frame)
+                if progress_total is None:
+                    self.batch_progress.setVisible(frame_total > 0)
+                    self.batch_progress.setRange(0, max(1, frame_total))
+                    self.batch_progress.setValue(0)
+                    self.batch_progress.setFormat(f"0 / {frame_total} frames")
+                QCoreApplication.processEvents()
+                self.write_background_h5_all_frames(
+                    h5_path,
+                    start_frame,
+                    end_frame,
+                    progress_callback=progress_callback,
+                )
                 self.log_text.append(f"Saved: {h5_path}")
+                if progress_callback is None:
+                    self.batch_progress.setValue(frame_total)
+                    self.batch_progress.setFormat(f"{frame_total} / {frame_total} frames")
                 self.status_label.setText(f"Saved {max(0, end_frame - start_frame)} frame(s): {h5_path}")
                 return
 
@@ -1398,6 +1415,8 @@ class BackgroundTab(QWidget):
                 edf_image.header.update(self.output_metadata())
                 edf_image.write(edf_path)
                 saved_path = edf_path
+                if progress_callback is not None:
+                    progress_callback(frame_index - start_frame + 1)
 
                 self.log_text.append(f"Saved: {saved_path}")
 
@@ -1406,7 +1425,7 @@ class BackgroundTab(QWidget):
         except Exception as exc:
             self.status_label.setText(f"Save all error: {exc}")
 
-    def write_background_h5_all_frames(self, output_path, start_frame, end_frame):
+    def write_background_h5_all_frames(self, output_path, start_frame, end_frame, progress_callback=None):
         """Copy one source H5 once, then background-subtract its selected frames."""
         if h5py is None:
             raise RuntimeError("h5py is required to write HDF5 output.")
@@ -1439,6 +1458,15 @@ class BackgroundTab(QWidget):
                         index = [slice(None)] * dataset.ndim
                         index[int(frame_axis)] = int(frame_index)
                         dataset[tuple(index)] = result
+
+                    processed = frame_index - int(start_frame) + 1
+                    total = max(0, int(end_frame) - int(start_frame))
+                    if progress_callback is None:
+                        self.batch_progress.setValue(processed)
+                        self.batch_progress.setFormat(f"{processed} / {total} frames")
+                    else:
+                        progress_callback(processed)
+                    QCoreApplication.processEvents()
 
                 metadata = self.output_metadata()
                 for key, value in metadata.items():
@@ -1513,20 +1541,37 @@ class BackgroundTab(QWidget):
 
         saved_files = 0
         try:
-            self.batch_progress.setVisible(len(paths) > 1)
-            self.batch_progress.setRange(0, len(paths))
+            frame_totals = []
+            for path in paths:
+                stack = self.open_image_stack(path)
+                frame_totals.append(max(1, int(stack.frame_count)))
+            total_frames = sum(frame_totals)
+
+            self.batch_progress.setVisible(total_frames > 0)
+            self.batch_progress.setRange(0, max(1, total_frames))
             self.batch_progress.setValue(0)
-            self.batch_progress.setFormat("%v / %m files")
+            self.batch_progress.setFormat(f"0 / {total_frames} frames")
             self.run_button.setEnabled(False)
+            processed_frames = 0
             for path in paths:
                 self.sample_file_path = path
                 self.sample_stack = self.open_image_stack(path)
                 self.output_folder_path = os.path.dirname(path)
                 self.update_frame_controls()
-                self.save_all_frames_as_npy()
+
+                frame_count = max(1, int(self.sample_stack.frame_count))
+                self.save_all_frames_as_npy(
+                    progress_callback=lambda local_count, base=processed_frames: (
+                        self.batch_progress.setValue(base + local_count),
+                        self.batch_progress.setFormat(f"{base + local_count} / {total_frames} frames"),
+                    ),
+                    progress_total=total_frames,
+                )
+                processed_frames += frame_count
                 saved_files += 1
-                self.batch_progress.setValue(saved_files)
-            self.status_label.setText(f"Run and Save complete: {saved_files} file(s).")
+            self.batch_progress.setValue(total_frames)
+            self.batch_progress.setFormat(f"{total_frames} / {total_frames} frames")
+            self.status_label.setText(f"Run and Save complete: {saved_files} file(s), {total_frames} frame(s).")
         except Exception as exc:
             self.status_label.setText(f"Run and Save error: {exc}")
         finally:
