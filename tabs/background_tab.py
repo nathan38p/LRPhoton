@@ -1445,10 +1445,50 @@ class BackgroundTab(QWidget):
             with h5py.File(source_path, "r") as source, h5py.File(temporary_path, "w") as out:
                 for key, value in source.attrs.items():
                     out.attrs[key] = value
-                for key in source.keys():
-                    source.copy(key, out, name=key)
 
-                dataset = out[dataset_path]
+                deferred_datasets = {}
+
+                def copy_structure(source_group, target_group):
+                    for key, value in source_group.attrs.items():
+                        target_group.attrs[key] = value
+                    for name, item in source_group.items():
+                        if isinstance(item, h5py.Group):
+                            child = target_group.create_group(name)
+                            copy_structure(item, child)
+                            continue
+
+                        item_path = item.name
+                        is_main = item_path == dataset_path
+                        is_error_stack = (
+                            item_path.lower().endswith("data_errors")
+                            and item.shape == source[dataset_path].shape
+                        )
+                        if not (is_main or is_error_stack):
+                            source_group.copy(name, target_group, name=name)
+                            continue
+
+                        options = {}
+                        if item.chunks is not None:
+                            options["chunks"] = item.chunks
+                            options["compression"] = "gzip"
+                            options["compression_opts"] = 4
+                        created = target_group.create_dataset(
+                            name,
+                            shape=item.shape,
+                            dtype=item.dtype,
+                            **options,
+                        )
+                        for attr_key, attr_value in item.attrs.items():
+                            created.attrs[attr_key] = attr_value
+                        deferred_datasets[item_path] = created
+
+                copy_structure(source, out)
+                dataset = deferred_datasets[dataset_path]
+                error_datasets = {
+                    path: source[path]
+                    for path in deferred_datasets
+                    if path != dataset_path
+                }
                 frame_axis = self.sample_stack.frame_axis
                 for frame_index in range(int(start_frame), int(end_frame)):
                     result = np.asarray(self.compute_result_frame(frame_index), dtype=np.float32)
@@ -1458,6 +1498,8 @@ class BackgroundTab(QWidget):
                         index = [slice(None)] * dataset.ndim
                         index[int(frame_axis)] = int(frame_index)
                         dataset[tuple(index)] = result
+                        for error_path, source_error in error_datasets.items():
+                            deferred_datasets[error_path][tuple(index)] = source_error[tuple(index)]
 
                     processed = frame_index - int(start_frame) + 1
                     total = max(0, int(end_frame) - int(start_frame))
@@ -1541,6 +1583,11 @@ class BackgroundTab(QWidget):
 
         saved_files = 0
         try:
+            self.batch_progress.setVisible(True)
+            self.batch_progress.setRange(0, 0)
+            self.batch_progress.setFormat("Préparation des fichiers H5…")
+            QCoreApplication.processEvents()
+
             frame_totals = []
             for path in paths:
                 stack = self.open_image_stack(path)
