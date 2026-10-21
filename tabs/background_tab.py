@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 import os
 import re
 import fnmatch
+import tempfile
 import numpy as np
 from scipy.ndimage import binary_dilation, binary_opening, label
 
@@ -1375,26 +1376,28 @@ class BackgroundTab(QWidget):
 
             base_name = self.get_output_base_name()
 
+            if self.sample_stack.kind == "hdf5":
+                h5_path = os.path.join(
+                    self.output_folder_path,
+                    f"{base_name}.h5",
+                )
+                self.write_background_h5_all_frames(h5_path, start_frame, end_frame)
+                self.log_text.append(f"Saved: {h5_path}")
+                self.status_label.setText(f"Saved {max(0, end_frame - start_frame)} frame(s): {h5_path}")
+                return
+
             for frame_index in range(start_frame, end_frame):
                 result = self.compute_result_frame(frame_index)
 
-                if self.sample_stack.kind == "hdf5":
-                    h5_path = os.path.join(
-                        self.output_folder_path,
-                        f"{base_name}_frame_{frame_index:04d}.h5",
-                    )
-                    self.write_background_h5(h5_path, result, frame_index)
-                    saved_path = h5_path
-                else:
-                    edf_path = os.path.join(
-                        self.output_folder_path,
-                        f"{base_name}_frame_{frame_index:04d}.edf",
-                    )
-                    edf_image = EdfImage(data=np.asarray(result, dtype=np.float32))
-                    edf_image.header.update(self.sample_stack.header)
-                    edf_image.header.update(self.output_metadata())
-                    edf_image.write(edf_path)
-                    saved_path = edf_path
+                edf_path = os.path.join(
+                    self.output_folder_path,
+                    f"{base_name}_frame_{frame_index:04d}.edf",
+                )
+                edf_image = EdfImage(data=np.asarray(result, dtype=np.float32))
+                edf_image.header.update(self.sample_stack.header)
+                edf_image.header.update(self.output_metadata())
+                edf_image.write(edf_path)
+                saved_path = edf_path
 
                 self.log_text.append(f"Saved: {saved_path}")
 
@@ -1402,6 +1405,58 @@ class BackgroundTab(QWidget):
 
         except Exception as exc:
             self.status_label.setText(f"Save all error: {exc}")
+
+    def write_background_h5_all_frames(self, output_path, start_frame, end_frame):
+        """Copy one source H5 once, then background-subtract its selected frames."""
+        if h5py is None:
+            raise RuntimeError("h5py is required to write HDF5 output.")
+
+        source_path = self.sample_file_path
+        dataset_path = self.sample_stack.dataset_path
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=self.output_folder_path,
+                prefix=".lrphoton-background-",
+                suffix=".h5",
+                delete=False,
+            ) as temporary:
+                temporary_path = temporary.name
+
+            with h5py.File(source_path, "r") as source, h5py.File(temporary_path, "w") as out:
+                for key, value in source.attrs.items():
+                    out.attrs[key] = value
+                for key in source.keys():
+                    source.copy(key, out, name=key)
+
+                dataset = out[dataset_path]
+                frame_axis = self.sample_stack.frame_axis
+                for frame_index in range(int(start_frame), int(end_frame)):
+                    result = np.asarray(self.compute_result_frame(frame_index), dtype=np.float32)
+                    if frame_axis is None:
+                        dataset[...] = result
+                    else:
+                        index = [slice(None)] * dataset.ndim
+                        index[int(frame_axis)] = int(frame_index)
+                        dataset[tuple(index)] = result
+
+                metadata = self.output_metadata()
+                for key, value in metadata.items():
+                    dataset.attrs[key] = value
+                    out.attrs[key] = value
+                dataset.attrs["processed_frame_start"] = int(start_frame)
+                dataset.attrs["processed_frame_end"] = int(end_frame - 1)
+                out.attrs["processed_frame_start"] = int(start_frame)
+                out.attrs["processed_frame_end"] = int(end_frame - 1)
+
+            os.replace(temporary_path, output_path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
 
     def write_background_h5(self, output_path, result, frame_index):
         """Copy the complete source H5/header and replace only the selected frame."""
