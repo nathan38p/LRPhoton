@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 import h5py
+import hdf5plugin  # noqa: F401
 import numpy as np
 
 from PySide6.QtCore import Qt, Signal, QEvent, QCoreApplication
@@ -44,7 +45,7 @@ from .instrument_presets import (
     ID13_DEFAULT_WAVELENGTH_A,
 )
 from .file_ratings import file_path_from_item, install_file_rating_menu, is_file_rated_up, set_item_file_path, should_hide_file_in_browser
-from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
+from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton, read_h5_scalar_geometry
 from .q_map_io import is_real_geometry_h5, read_h5_q_map
 from .ui_style import (
     BLOCK_SPACING,
@@ -290,6 +291,8 @@ def inspect_h5_image_dataset(filename: str):
                 if key not in header:
                     header[key] = str(value)
 
+        header.update({key: str(value) for key, value in read_h5_scalar_geometry(filename).items()})
+
         add_matching_edf_center(header, filename)
 
         if dataset.ndim == 2:
@@ -332,6 +335,8 @@ def read_h5_frame(filename: str, dataset_name: str = None, frame_index: int = 0)
             for key, value in obj.attrs.items():
                 if key not in header:
                     header[key] = str(value)
+
+        header.update({key: str(value) for key, value in read_h5_scalar_geometry(filename).items()})
 
         add_matching_edf_center(header, filename)
 
@@ -3501,6 +3506,13 @@ class RadialTab(QWidget):
                 file_path = task["path"]
                 try:
                     image, header = read_image_file(file_path, task["dataset_name"], task["frame_index"])
+                    header_values, _missing = header_q_geometry_values(header)
+                    center_x_value = header_values["cx"] if header_values["cx"] is not None else self.center_x.value()
+                    center_y_value = header_values["cy"] if header_values["cy"] is not None else self.center_y.value()
+                    distance_value = header_values["dist"] if header_values["dist"] is not None else self.distance.value()
+                    pixel_x_value = header_pixel_to_mm(header_values["px"]) if header_values["px"] is not None else self.pixel_x.value()
+                    pixel_y_value = header_pixel_to_mm(header_values["py"]) if header_values["py"] is not None else self.pixel_y.value()
+                    wavelength_value = header_wavelength_to_a(header_values["wav"]) if header_values["wav"] is not None else self.wavelength.value()
                     q_min = q_min_filter
                     q_max = q_max_filter
                     reference_angle = float(self.reference_angle.value())
@@ -3510,12 +3522,12 @@ class RadialTab(QWidget):
 
                     diagnostics = q_geometry_diagnostics(
                         image,
-                        self.center_x.value(),
-                        self.center_y.value(),
-                        self.distance.value(),
-                        self.pixel_x.value(),
-                        self.pixel_y.value(),
-                        self.wavelength.value(),
+                        center_x_value,
+                        center_y_value,
+                        distance_value,
+                        pixel_x_value,
+                        pixel_y_value,
+                        wavelength_value,
                     )
 
                     suppress_q = is_real_geometry_h5(file_path)
@@ -3523,14 +3535,14 @@ class RadialTab(QWidget):
                     if q_map is None and not suppress_q:
                         yy, xx = np.indices(image.shape)
 
-                        dx_px = (xx + 1.0) - float(self.center_x.value())
-                        dy_px = (yy + 1.0) - float(self.center_y.value())
+                        dx_px = (xx + 1.0) - float(center_x_value)
+                        dy_px = (yy + 1.0) - float(center_y_value)
 
-                        dx_m = dx_px * float(self.pixel_x.value()) * 1e-3
-                        dy_m = dy_px * float(self.pixel_y.value()) * 1e-3
+                        dx_m = dx_px * float(pixel_x_value) * 1e-3
+                        dy_m = dy_px * float(pixel_y_value) * 1e-3
 
                         r_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
-                        q_map = q_from_detector_geometry(r_m, float(self.distance.value()), float(self.wavelength.value()))
+                        q_map = q_from_detector_geometry(r_m, float(distance_value), float(wavelength_value))
 
                     try:
                         matched_poni = self.poni_file_for_image(file_path)
@@ -3539,13 +3551,13 @@ class RadialTab(QWidget):
                             q, intensity, counts, mask = radial_average_from_q_map(
                                 image, q_map, q_min, q_max, self.n_bins.value(),
                                 sector_min, sector_max, self.min_pixels_per_bin.value(),
-                                self.center_x.value(), self.center_y.value(),
+                                center_x_value, center_y_value,
                             )
                         else:
                             q, intensity, counts, mask = pyfai_radial_average(
-                                image, self.center_x.value(), self.center_y.value(),
-                                self.distance.value(), self.pixel_x.value(), self.pixel_y.value(),
-                                self.wavelength.value(), q_min, q_max, self.n_bins.value(),
+                                image, center_x_value, center_y_value,
+                                distance_value, pixel_x_value, pixel_y_value,
+                                wavelength_value, q_min, q_max, self.n_bins.value(),
                                 sector_min, sector_max, self.min_pixels_per_bin.value(),
                                 poni_path=matched_poni,
                             )

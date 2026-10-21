@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 
 import h5py
+import hdf5plugin  # noqa: F401
 import numpy as np
 
 from PySide6.QtCore import Qt, Signal, QTimer, QEvent
@@ -41,7 +42,7 @@ from .instrument_presets import (
     ID13_DEFAULT_WAVELENGTH_A,
 )
 from .file_ratings import file_path_from_item, install_file_rating_menu, is_file_rated_up, set_item_file_path, should_hide_file_in_browser
-from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
+from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton, read_h5_scalar_geometry
 from .q_map_io import is_real_geometry_h5, read_h5_q_map
 from .ui_style import (
     BLOCK_SPACING,
@@ -208,6 +209,8 @@ def read_h5_first_image(filename: str, frame_index: int = 0):
             for key, value in obj.attrs.items():
                 if key not in header:
                     header[key] = str(value)
+
+        header.update({key: str(value) for key, value in read_h5_scalar_geometry(filename).items()})
 
         add_matching_edf_center(header, filename)
 
@@ -2753,6 +2756,20 @@ class AzimuthalTab(QWidget):
         for file_path in files:
             try:
                 image, header = read_image_file(file_path, frame_index=self.current_frame - 1)
+                header_values = {
+                    "cx": get_header_float(header, "Center_1", "center_1", "CenterX", "center_x"),
+                    "cy": get_header_float(header, "Center_2", "center_2", "CenterY", "center_y"),
+                    "dist": get_header_float(header, "SampleDistance", "sampledistance", "sample_distance", "Distance", "DetectorDistance"),
+                    "px": get_header_float(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX", "pixel_size_x", "x_pixel_size"),
+                    "py": get_header_float(header, "PSize_2", "psize_2", "PSize_Y", "PixelSizeY", "pixel_size_y", "y_pixel_size"),
+                    "wav": get_header_float(header, "WaveLength", "Wavelength", "wavelength", "Lambda", "lambda"),
+                }
+                center_x_value = header_values["cx"] if header_values["cx"] is not None else self.center_x.value()
+                center_y_value = header_values["cy"] if header_values["cy"] is not None else self.center_y.value()
+                distance_value = header_values["dist"] if header_values["dist"] is not None else self.distance.value()
+                pixel_x_value = header_values["px"] * 1000.0 if header_values["px"] is not None and header_values["px"] < 1e-3 else (header_values["px"] if header_values["px"] is not None else self.pixel_x.value())
+                pixel_y_value = header_values["py"] * 1000.0 if header_values["py"] is not None and header_values["py"] < 1e-3 else (header_values["py"] if header_values["py"] is not None else self.pixel_y.value())
+                wavelength_value = header_values["wav"] * 1e10 if header_values["wav"] is not None and header_values["wav"] < 1e-6 else (header_values["wav"] if header_values["wav"] is not None else self.wavelength.value())
                 if is_azimuthal_processed_image(file_path, header):
                     q_values_full = self.azimuthal_image_q_axis(image.shape, header)
                     q_step = float(np.nanmedian(np.diff(q_values_full))) if q_values_full.size > 1 else np.nan
@@ -2832,12 +2849,12 @@ class AzimuthalTab(QWidget):
                 if q_override is not None:
                     psi, intensity, counts, mask, q_map = azimuthal_average(
                         image,
-                        self.center_x.value(),
-                        self.center_y.value(),
-                        self.distance.value(),
-                        self.pixel_x.value(),
-                        self.pixel_y.value(),
-                        self.wavelength.value(),
+                        center_x_value,
+                        center_y_value,
+                        distance_value,
+                        pixel_x_value,
+                        pixel_y_value,
+                        wavelength_value,
                         q_min,
                         q_max,
                         self.n_points.value(),
@@ -2850,12 +2867,12 @@ class AzimuthalTab(QWidget):
                     try:
                         psi, intensity, counts, mask, q_map = pyfai_azimuthal_average(
                             image,
-                            self.center_x.value(),
-                            self.center_y.value(),
-                            self.distance.value(),
-                            self.pixel_x.value(),
-                            self.pixel_y.value(),
-                            self.wavelength.value(),
+                            center_x_value,
+                            center_y_value,
+                            distance_value,
+                            pixel_x_value,
+                            pixel_y_value,
+                            wavelength_value,
                             q_min,
                             q_max,
                             self.n_points.value(),
@@ -2865,12 +2882,12 @@ class AzimuthalTab(QWidget):
                     except Exception as pyfai_error:
                         psi, intensity, counts, mask, q_map = azimuthal_average(
                             image,
-                            self.center_x.value(),
-                            self.center_y.value(),
-                            self.distance.value(),
-                            self.pixel_x.value(),
-                            self.pixel_y.value(),
-                            self.wavelength.value(),
+                            center_x_value,
+                            center_y_value,
+                            distance_value,
+                            pixel_x_value,
+                            pixel_y_value,
+                            wavelength_value,
                             q_min,
                             q_max,
                             self.n_points.value(),
@@ -2881,12 +2898,12 @@ class AzimuthalTab(QWidget):
                 else:
                     psi, intensity, counts, mask, q_map = azimuthal_average(
                         image,
-                        self.center_x.value(),
-                        self.center_y.value(),
-                        self.distance.value(),
-                        self.pixel_x.value(),
-                        self.pixel_y.value(),
-                        self.wavelength.value(),
+                        center_x_value,
+                        center_y_value,
+                        distance_value,
+                        pixel_x_value,
+                        pixel_y_value,
+                        wavelength_value,
                         q_min,
                         q_max,
                         self.n_points.value(),
@@ -3075,6 +3092,12 @@ class AzimuthalTab(QWidget):
         try:
             header_xc = get_header_float(header, "Center_1", "center_1", "CenterX", "center_x")
             header_yc = get_header_float(header, "Center_2", "center_2", "CenterY", "center_y")
+            header_values = {
+                "dist": get_header_float(header, "SampleDistance", "sampledistance", "sample_distance", "Distance", "DetectorDistance"),
+                "px": get_header_float(header, "PSize_1", "psize_1", "PSize_X", "PixelSizeX", "pixel_size_x", "x_pixel_size"),
+                "py": get_header_float(header, "PSize_2", "psize_2", "PSize_Y", "PixelSizeY", "pixel_size_y", "y_pixel_size"),
+                "wav": get_header_float(header, "WaveLength", "Wavelength", "wavelength", "Lambda", "lambda"),
+            }
             center_source = "Center_1/Center_2"
 
             if header_xc is None or header_yc is None:
@@ -3086,10 +3109,10 @@ class AzimuthalTab(QWidget):
                 "xc": float(header_xc) if header_xc is not None else float(self.center_x.value()),
                 "yc": float(header_yc) if header_yc is not None else float(self.center_y.value()),
                 "center_source": center_source,
-                "distance_m": float(self.distance.value()),
-                "pixel_x_mm": float(self.pixel_x.value()),
-                "pixel_y_mm": float(self.pixel_y.value()),
-                "wavelength_a": float(self.wavelength.value()),
+                "distance_m": float(header_values["dist"]) if header_values["dist"] is not None else float(self.distance.value()),
+                "pixel_x_mm": float(header_values["px"] * 1000.0) if header_values["px"] is not None and header_values["px"] < 1e-3 else (float(header_values["px"]) if header_values["px"] is not None else float(self.pixel_x.value())),
+                "pixel_y_mm": float(header_values["py"] * 1000.0) if header_values["py"] is not None and header_values["py"] < 1e-3 else (float(header_values["py"]) if header_values["py"] is not None else float(self.pixel_y.value())),
+                "wavelength_a": float(header_values["wav"] * 1e10) if header_values["wav"] is not None and header_values["wav"] < 1e-6 else (float(header_values["wav"]) if header_values["wav"] is not None else float(self.wavelength.value())),
                 "q_min": float(self.q_min.value()) if self.use_q_range.isChecked() else 0.0,
                 "q_max": float(self.q_max.value()) if self.use_q_range.isChecked() else 1.0,
                 "psi_points": int(self.n_points.value()),

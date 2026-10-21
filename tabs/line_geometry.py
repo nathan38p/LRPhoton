@@ -389,6 +389,64 @@ def parse_header_text(header_text):
     return mapping
 
 
+def read_h5_scalar_geometry(path):
+    """Read detector geometry stored as scalar datasets in an HDF5 file.
+
+    ID02/ewoksid02 stores the PyFAI geometry below ``PyFAI/parameters`` and
+    ``PyFAI/.../header``.  This helper is shared by the tabs that load files
+    independently, so line selection and integration use the same per-file
+    values everywhere.
+    """
+    try:
+        import h5py
+    except ImportError:
+        return {}
+
+    aliases = {
+        "center_1": "Center_1", "center1": "Center_1", "beamcenter_1": "Center_1",
+        "beamcenterx": "Center_1", "center_x": "Center_1", "centerx": "Center_1",
+        "beam_x": "Center_1", "beamx": "Center_1", "poni1": "Center_1",
+        "center_2": "Center_2", "center2": "Center_2", "beamcenter_2": "Center_2",
+        "beamcentery": "Center_2", "center_y": "Center_2", "centery": "Center_2",
+        "beam_y": "Center_2", "beamy": "Center_2", "poni2": "Center_2",
+        "psize_1": "PSize_1", "psize_x": "PSize_1", "pixelsizex": "PSize_1",
+        "pixel_size_x": "PSize_1", "x_pixel_size": "PSize_1", "pixelx": "PSize_1",
+        "psize_2": "PSize_2", "psize_y": "PSize_2", "pixelsizey": "PSize_2",
+        "pixel_size_y": "PSize_2", "y_pixel_size": "PSize_2", "pixely": "PSize_2",
+        "sampledistance": "SampleDistance", "sample_distance": "SampleDistance",
+        "distance": "SampleDistance", "detectordistance": "SampleDistance",
+        "detector_distance": "SampleDistance",
+        "wavelength": "WaveLength", "wavelength_a": "WaveLength", "wavelength_m": "WaveLength",
+        "lambda": "WaveLength",
+    }
+
+    def normalized(key):
+        return str(key).strip().lower().replace("-", "_").replace(" ", "_")
+
+    found = {}
+    with h5py.File(path, "r") as handle:
+        def visitor(name, obj):
+            if not isinstance(obj, h5py.Dataset) or obj.shape != ():
+                return
+            canonical = aliases.get(normalized(str(name).rsplit("/", 1)[-1]))
+            if canonical is None:
+                return
+            priority = 0 if "/PyFAI/parameters/" in f"/{name}/" else 1
+            previous = found.get(canonical)
+            if previous is not None and previous[0] <= priority:
+                return
+            value = obj[()]
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            elif hasattr(value, "item"):
+                value = value.item()
+            found[canonical] = (priority, value)
+
+        handle.visititems(visitor)
+
+    return {key: value for key, (_priority, value) in found.items()}
+
+
 def header_number(header, *keys):
     if header is None:
         return None

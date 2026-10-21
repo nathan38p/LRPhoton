@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import h5py
+import hdf5plugin  # noqa: F401
 import numpy as np
 
 from PySide6.QtCore import Qt, QEvent, QPoint, QSize, QCoreApplication, Signal, QTimer
@@ -73,7 +74,7 @@ from .ui_style import (
     style_q_geometry_buttons,
 )
 from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path, should_hide_file_in_browser
-from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
+from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton, read_h5_scalar_geometry
 
 
 CAVE_MASK_PRESET_VERSION = 1
@@ -654,6 +655,8 @@ def read_h5_frame(filename: str, dataset_name: str, frame_index: int = 0, add_ma
             for key, value in obj.attrs.items():
                 if key not in header:
                     header[key] = str(value)
+
+        header.update({key: str(value) for key, value in read_h5_scalar_geometry(filename).items()})
 
         if add_matching_center:
             add_matching_edf_center(header, filename)

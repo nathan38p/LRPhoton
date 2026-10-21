@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 
 import h5py
+import hdf5plugin  # noqa: F401
 import numpy as np
 
 from PySide6.QtCore import Qt, Signal, QTimer
@@ -46,7 +47,7 @@ from .instrument_presets import (
     ID13_DEFAULT_WAVELENGTH_A,
 )
 from .file_ratings import file_path_from_item, install_file_rating_menu, is_file_rated_up, set_item_file_path, should_hide_file_in_browser
-from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton
+from .line_geometry import LineGeometrySelector, line_geometry_to_lrphoton, read_h5_scalar_geometry
 from .q_map_io import is_real_geometry_h5, read_h5_q_map
 from .ui_style import (
     BLOCK_SPACING,
@@ -242,6 +243,8 @@ def read_h5_image(file_path, frame_index=0):
         header = {"Dataset": dataset_name, "Shape": str(dataset.shape)}
         for key, value in dataset.attrs.items():
             header[key] = str(value)
+
+        header.update({key: str(value) for key, value in read_h5_scalar_geometry(file_path).items()})
 
         if dataset.ndim == 2:
             image = np.asarray(dataset[...], dtype=np.float64)
