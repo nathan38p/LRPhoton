@@ -3161,6 +3161,48 @@ class ViewTab(QWidget):
 
         return score
 
+    def h5_scalar_geometry_metadata(self, handle):
+        """Read scalar geometry values stored as HDF5 datasets.
+
+        ID02/ewoksid02 files commonly store PyFAI values below
+        ``/entry_0000/PyFAI/parameters`` or ``.../header``.  Those values are
+        datasets, not HDF5 attributes, so reading only ``obj.attrs`` misses
+        the detector centre and the other geometry parameters.
+        """
+        aliases = {}
+        for canonical, group_aliases in self.geometry_header_groups():
+            for alias in group_aliases:
+                aliases[self.normalized_header_key(alias)] = canonical
+
+        found = {}
+
+        def visitor(name, obj):
+            if not isinstance(obj, h5py.Dataset) or obj.shape != ():
+                return
+
+            raw_key = str(name).rsplit("/", 1)[-1]
+            canonical = aliases.get(self.normalized_header_key(raw_key))
+            if canonical is None:
+                return
+
+            priority = 0 if "/PyFAI/parameters/" in f"/{name}/" else 1
+            previous = found.get(canonical)
+            if previous is not None and previous[0] <= priority:
+                return
+
+            try:
+                value = obj[()]
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8", errors="replace")
+                elif hasattr(value, "item"):
+                    value = value.item()
+                found[canonical] = (priority, value)
+            except Exception:
+                return
+
+        handle.visititems(visitor)
+        return {key: value for key, (_priority, value) in found.items()}
+
     def open_selected_dataset(self):
         row = self.dataset_list.currentRow()
 
@@ -3198,6 +3240,17 @@ class ViewTab(QWidget):
 
             for key, value in self.h5_file.attrs.items():
                 self.headers[f"File attribute - {key}"] = str(value)
+
+            # ID02 HDF5 metadata stores Center_1/Center_2 and the associated
+            # geometry as scalar datasets in the PyFAI groups, rather than as
+            # attributes.  Promote those values to the same header mapping
+            # used by EDF so the geometry selector can consume them.
+            self.headers.update(
+                {
+                    key: str(value)
+                    for key, value in self.h5_scalar_geometry_metadata(self.h5_file).items()
+                }
+            )
 
             self.add_matching_geometry_to_headers()
             self.q_map_current = read_h5_q_map(self.current_file, image_shape)
