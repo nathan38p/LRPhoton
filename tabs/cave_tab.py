@@ -4608,7 +4608,9 @@ class CaveTab(QWidget):
         self.file_list.clear()
 
         extension_patterns = self.extension_filter.text().split()
-        name_pattern = self.name_filter.text().strip() or "*"
+        typed_name_pattern = self.name_filter.text().strip()
+        name_pattern = typed_name_pattern or "*"
+        show_matching_cave_outputs = bool(typed_name_pattern)
         iterator = folder.rglob("*") if self.show_subfolders_checkbox.isChecked() else folder.glob("*")
 
         files = []
@@ -4632,7 +4634,7 @@ class CaveTab(QWidget):
             if not (match_extension and match_name):
                 continue
 
-            if "_cave" in lower_stem:
+            if "_cave" in lower_stem and not show_matching_cave_outputs:
                 base_stem = re.sub(r"_cave.*$", "", path.stem, flags=re.IGNORECASE)
                 cave_outputs_by_base.add((path.parent.resolve(), base_stem))
                 continue
