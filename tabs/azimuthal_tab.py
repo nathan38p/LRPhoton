@@ -5,7 +5,7 @@ import h5py
 import hdf5plugin  # noqa: F401
 import numpy as np
 
-from PySide6.QtCore import Qt, Signal, QTimer, QEvent
+from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QCoreApplication
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QProgressBar,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -1510,6 +1511,7 @@ class AzimuthalTab(QWidget):
         self.last_results = {}
         self.last_result_paths = {}
         self.last_result_frame_counts = {}
+        self.last_result_frame_indices = {}
         self._syncing_folder = False
         self.current_frame = 1
         self.total_frames = 1
@@ -1732,12 +1734,22 @@ class AzimuthalTab(QWidget):
         integrate_buttons_layout = QHBoxLayout()
         self.integrate_button = QPushButton("Integrate I(ψ)")
         self.integrate_button.clicked.connect(self.integrate_selected_files)
+        self.integrate_all_button = QPushButton("Integrate all")
+        self.integrate_all_button.setToolTip("Integrate every frame of each selected H5 file")
+        self.integrate_all_button.clicked.connect(self.integrate_all_files)
         self.azimuthal_test_button = QPushButton("Test")
         self.azimuthal_test_button.setToolTip("Open an interactive pyFAI azimuthal integration test window")
         self.azimuthal_test_button.clicked.connect(self.open_azimuthal_test_dialog)
         integrate_buttons_layout.addWidget(self.integrate_button, stretch=1)
+        integrate_buttons_layout.addWidget(self.integrate_all_button, stretch=0)
         integrate_buttons_layout.addWidget(self.azimuthal_test_button, stretch=0)
         params_layout.addLayout(integrate_buttons_layout)
+
+        self.integration_progress = QProgressBar()
+        self.integration_progress.setRange(0, 1)
+        self.integration_progress.setValue(0)
+        self.integration_progress.setVisible(False)
+        params_layout.addWidget(self.integration_progress)
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
@@ -1911,6 +1923,7 @@ class AzimuthalTab(QWidget):
         self.last_results = {}
         self.last_result_paths = {}
         self.last_result_frame_counts = {}
+        self.last_result_frame_indices = {}
         self.clear_graph_coordinates()
         clear_plot_canvas(self.canvas)
 
@@ -1966,11 +1979,12 @@ class AzimuthalTab(QWidget):
             self.wavelength, self.use_q_range, self.q_min, self.q_max, self.n_points,
             self.integration_engine, self.min_pixels_per_bin, self.axis_mask_pixels,
             self.normalization_mode, self.intensity_scale,
-            self.integrate_button, self.azimuthal_test_button, self.show_legend,
+            self.integrate_button, self.integrate_all_button, self.azimuthal_test_button, self.show_legend,
             self.frame_start_spin, self.frame_end_spin, self.prev_frame_button,
             self.next_frame_button, self.frame_slider,
             self.image_vmin_label, self.image_vmax_label,
             self.image_vmin_slider, self.image_vmax_slider, self.image_lock_contrast_checkbox, self.image_auto_contrast_button,
+            self.integration_progress,
         ]:
             widget.setEnabled(enabled)
 
@@ -2157,6 +2171,7 @@ class AzimuthalTab(QWidget):
             self.last_results = {}
             self.last_result_paths = {}
             self.last_result_frame_counts = {}
+            self.last_result_frame_indices = {}
             self.clear_graph_coordinates()
             clear_plot_canvas(self.canvas)
 
@@ -2180,6 +2195,7 @@ class AzimuthalTab(QWidget):
         self.last_results = {}
         self.last_result_paths = {}
         self.last_result_frame_counts = {}
+        self.last_result_frame_indices = {}
         self.clear_graph_coordinates()
         self.image_canvas.raw_image = None
         self.image_canvas.set_q_map(None)
@@ -2729,12 +2745,45 @@ class AzimuthalTab(QWidget):
             self.image_canvas.show_image(image, self.center_x.value(), self.center_y.value(), mask=None)
             self.sync_image_intensity_sliders()
 
-    def integrate_selected_files(self):
+    def integrate_all_files(self):
+        self.integrate_selected_files(all_frames=True)
+
+    def azimuthal_integration_tasks(self, files, all_frames=False):
+        tasks = []
+        for file_path in files:
+            frame_count = 1
+            if file_path.suffix.lower() in [".h5", ".hdf5"]:
+                try:
+                    _image, header = read_h5_first_image(file_path, frame_index=0)
+                    frame_count = max(1, int(header.get("Number of frames", 1) or 1))
+                except Exception:
+                    frame_count = 1
+
+            if all_frames and frame_count > 1:
+                frame_indices = range(frame_count)
+            elif file_path.suffix.lower() in [".h5", ".hdf5"]:
+                frame_indices = [max(0, min(self.current_frame - 1, frame_count - 1))]
+            else:
+                frame_indices = [0]
+
+            for frame_index in frame_indices:
+                frame_suffix = f"_frame{frame_index + 1:04d}" if frame_count > 1 else ""
+                tasks.append({
+                    "path": file_path,
+                    "frame_index": frame_index,
+                    "frame_count": frame_count,
+                    "result_key": f"{file_path.stem}{frame_suffix}",
+                    "plot_label": f"{file_path.stem} frame {frame_index + 1}" if frame_count > 1 else file_path.stem,
+                })
+        return tasks
+
+    def integrate_selected_files(self, all_frames=False):
         files = self.selected_files()
         if not files:
             self.last_results = {}
             self.last_result_paths = {}
             self.last_result_frame_counts = {}
+            self.last_result_frame_indices = {}
             self.clear_graph_coordinates()
             clear_plot_canvas(self.canvas)
             return
@@ -2748,14 +2797,26 @@ class AzimuthalTab(QWidget):
         self.last_results = {}
         self.last_result_paths = {}
         self.last_result_frame_counts = {}
+        self.last_result_frame_indices = {}
         ax = self.canvas.ax
         ax.clear()
         ax.set_axis_on()
 
         messages = []
-        for file_path in files:
+        tasks = self.azimuthal_integration_tasks(files, all_frames=all_frames)
+        self.integration_progress.setVisible(all_frames and len(tasks) > 1)
+        if all_frames and len(tasks) > 1:
+            self.integration_progress.setRange(0, len(tasks))
+            self.integration_progress.setValue(0)
+            self.integration_progress.setFormat(f"0 / {len(tasks)}")
+
+        for task_index, task in enumerate(tasks, 1):
+            file_path = task["path"]
+            frame_index = task["frame_index"]
+            result_key = task["result_key"]
+            plot_label = task["plot_label"]
             try:
-                image, header = read_image_file(file_path, frame_index=self.current_frame - 1)
+                image, header = read_image_file(file_path, frame_index=frame_index)
                 header_values = {
                     "cx": get_header_float(header, "Center_1", "center_1", "CenterX", "center_x"),
                     "cy": get_header_float(header, "Center_2", "center_2", "CenterY", "center_y"),
@@ -2810,12 +2871,13 @@ class AzimuthalTab(QWidget):
                     )
                     intensity = intensity * normalization_factor * self.intensity_scale.value()
 
-                    ax.plot(psi, intensity, linewidth=1.2, label=file_path.stem)
-                    self.last_results[file_path.stem] = (psi, intensity, counts)
-                    self.last_result_paths[file_path.stem] = file_path
-                    self.last_result_frame_counts[file_path.stem] = int(header.get("Number of frames", 1) or 1)
+                    ax.plot(psi, intensity, linewidth=1.2, label=plot_label)
+                    self.last_results[result_key] = (psi, intensity, counts)
+                    self.last_result_paths[result_key] = file_path
+                    self.last_result_frame_counts[result_key] = task["frame_count"]
+                    self.last_result_frame_indices[result_key] = frame_index
 
-                    if file_path == files[0]:
+                    if task_index == 1:
                         self.image_canvas.set_coordinate_mode("azimuthal_image")
                         self.image_canvas.set_q_map(q_map)
                         selected_q_mask = azimuthal_processed_q_mask(
@@ -2923,12 +2985,13 @@ class AzimuthalTab(QWidget):
                 )
                 intensity = intensity * normalization_factor * self.intensity_scale.value()
 
-                ax.plot(psi, intensity, linewidth=1.2, label=file_path.stem)
-                self.last_results[file_path.stem] = (psi, intensity, counts)
-                self.last_result_paths[file_path.stem] = file_path
-                self.last_result_frame_counts[file_path.stem] = int(header.get("Number of frames", 1) or 1)
+                ax.plot(psi, intensity, linewidth=1.2, label=plot_label)
+                self.last_results[result_key] = (psi, intensity, counts)
+                self.last_result_paths[result_key] = file_path
+                self.last_result_frame_counts[result_key] = task["frame_count"]
+                self.last_result_frame_indices[result_key] = frame_index
 
-                if file_path == files[0]:
+                if task_index == 1:
                     suppress_q = is_real_geometry_h5(file_path)
                     embedded_q_map = read_h5_q_map(file_path, image.shape)
                     self.image_canvas.set_q_map(embedded_q_map if embedded_q_map is not None else q_map)
@@ -2943,12 +3006,23 @@ class AzimuthalTab(QWidget):
                 )
 
             except Exception as error:
-                messages.append(f"Error: {file_path.name}: {error}")
+                frame_text = f" frame {frame_index + 1}" if task["frame_count"] > 1 else ""
+                messages.append(f"Error: {file_path.name}{frame_text}: {error}")
+
+            if all_frames and len(tasks) > 1:
+                self.integration_progress.setValue(task_index)
+                self.integration_progress.setFormat(f"{task_index} / {len(tasks)}")
+                self.log_box.setPlainText("\n".join(messages))
+                QCoreApplication.processEvents()
+
+        self.integration_progress.setVisible(False)
 
         first_result_path = next(iter(self.last_result_paths.values()), None)
         if first_result_path is not None:
             try:
-                first_image, first_header = read_image_file(first_result_path, frame_index=self.current_frame - 1)
+                first_result_key = next(iter(self.last_result_paths))
+                first_frame_index = self.last_result_frame_indices.get(first_result_key, self.current_frame - 1)
+                first_image, first_header = read_image_file(first_result_path, frame_index=first_frame_index)
                 if is_azimuthal_processed_image(first_result_path, first_header):
                     self.apply_plot_axes()
                 else:
@@ -3052,10 +3126,7 @@ class AzimuthalTab(QWidget):
 
         for source_stem, (psi, intensity, counts) in self.last_results.items():
             source_path = self.last_result_paths.get(source_stem)
-            frame_count = self.last_result_frame_counts.get(source_stem, 1)
-            is_h5 = source_path is not None and source_path.suffix.lower() in [".h5", ".hdf5"]
-            frame_suffix = f"_frame{self.current_frame:04d}" if is_h5 and frame_count > 1 else ""
-            out_file = self.current_folder / f"{source_stem}{frame_suffix}{range_suffix}_azimProf.dat"
+            out_file = self.current_folder / f"{source_stem}{range_suffix}_azimProf.dat"
             data = np.column_stack([psi, intensity, counts])
             with open(out_file, "w", encoding="utf-8") as file:
                 file.write(f"# integration_engine {self.integration_engine.currentText()}\n")
@@ -3067,7 +3138,8 @@ class AzimuthalTab(QWidget):
                 file.write(f"# intensity_scale {self.intensity_scale.value():.8g}\n")
                 source_path = self.last_result_paths.get(source_stem)
                 try:
-                    _image, source_header = read_image_file(source_path, frame_index=self.current_frame - 1) if source_path is not None else (None, {})
+                    frame_index = self.last_result_frame_indices.get(source_stem, self.current_frame - 1)
+                    _image, source_header = read_image_file(source_path, frame_index=frame_index) if source_path is not None else (None, {})
                     if source_path is not None and is_azimuthal_processed_image(source_path, source_header):
                         file.write("# For *_azim input images, saved I_psi is the average intensity of each ψ row over selected q columns, not a sum.\n")
                         file.write("# psi_deg I_psi pixel_count\n")
