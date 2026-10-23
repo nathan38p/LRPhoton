@@ -2119,6 +2119,7 @@ class ViewTab(QWidget):
         self.h5_file = None
         self.h5_dataset = None
         self.h5_frame_axis = None
+        self.h5_frame_metadata = {}
         self.n_frames = 0
         self.image_shape = None
 
@@ -2933,6 +2934,7 @@ class ViewTab(QWidget):
         self.edf_path = None
         self.h5_dataset = None
         self.h5_frame_axis = None
+        self.h5_frame_metadata = {}
         self.is_azimuthal_image = False
 
         if self.h5_file is not None:
@@ -3227,6 +3229,11 @@ class ViewTab(QWidget):
             shape = tuple(self.h5_dataset.shape)
             dtype = self.h5_dataset.dtype
             frame_axis, n_frames, image_shape = self.h5_dataset_image_info(shape)
+            self.h5_frame_metadata = self.read_h5_frame_metadata(
+                self.h5_file,
+                dataset_name,
+                n_frames,
+            )
 
             self.complementary_geometry_metadata = []
             self.headers = {
@@ -3290,6 +3297,119 @@ class ViewTab(QWidget):
     # INFORMATION
     # ============================================================
 
+    def read_h5_frame_metadata(self, handle, image_dataset_name, n_frames):
+        """Find scalar values recorded once per image in a multi-frame H5.
+
+        Beamline HDF5 files do not use one universal metadata path.  A motor
+        or timestamp can be a one-dimensional dataset beside the image data,
+        or one axis of a small two-dimensional dataset.  We therefore inspect
+        datasets whose shape contains the image-frame count and retain only
+        likely acquisition metadata, never the image array itself.
+        """
+        if n_frames <= 1:
+            return {}
+
+        metadata = {}
+        image_path = str(image_dataset_name).strip("/")
+        keywords = (
+            "time", "timestamp", "date", "epoch", "motor", "position",
+            "translation", "rotation", "angle", "scan", "step", "omega",
+            "phi", "chi", "x", "y", "z",
+        )
+        excluded = (
+            "image", "detector", "data", "mask", "pixel", "qmap", "q_map",
+            "spectrum", "monitor", "error", "uncertainty",
+        )
+
+        def visit(name, obj):
+            if not isinstance(obj, h5py.Dataset) or name.strip("/") == image_path:
+                return
+            if obj.ndim not in (1, 2) or not obj.shape:
+                return
+
+            lower_name = name.lower()
+            leaf_name = lower_name.rsplit("/", 1)[-1]
+            if any(token in leaf_name for token in excluded):
+                return
+            if not any(token in lower_name for token in keywords):
+                return
+
+            matching_axes = [axis for axis, size in enumerate(obj.shape) if int(size) == n_frames]
+            if not matching_axes:
+                return
+
+            axis = matching_axes[0]
+            try:
+                values = np.asarray(obj[()])
+                if values.ndim == 1:
+                    values = values.reshape(n_frames)
+                elif axis == 0:
+                    values = values.reshape(n_frames, -1)
+                    if values.shape[1] > 4:
+                        return
+                else:
+                    values = np.moveaxis(values, axis, 0).reshape(n_frames, -1)
+                    if values.shape[1] > 4:
+                        return
+            except Exception:
+                return
+
+            label = name.strip("/")
+            if label in metadata:
+                return
+            metadata[label] = values
+
+        handle.visititems(visit)
+        return dict(sorted(metadata.items()))
+
+    def format_h5_frame_metadata_value(self, dataset_name, value):
+        """Format one per-frame HDF5 value while preserving acquisition precision."""
+        value = np.asarray(value)
+        if value.ndim == 0:
+            value = value.item()
+        elif value.size == 1:
+            value = value.reshape(-1)[0]
+        else:
+            return "[" + ", ".join(self.format_h5_frame_metadata_value(dataset_name, item) for item in value) + "]"
+
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        if isinstance(value, np.generic):
+            value = value.item()
+
+        name = dataset_name.lower()
+        if isinstance(value, (float, np.floating)):
+            if ("time" in name or "epoch" in name) and np.isfinite(value):
+                try:
+                    from datetime import datetime, timezone
+                    # Unix seconds are common; milliseconds and microseconds
+                    # are also emitted by several acquisition formats.
+                    scale = 1.0
+                    if abs(float(value)) > 1e14:
+                        scale = 1e6
+                    elif abs(float(value)) > 1e11:
+                        scale = 1e3
+                    if 1e8 < abs(float(value) / scale) < 1e11:
+                        return datetime.fromtimestamp(float(value) / scale, tz=timezone.utc).astimezone().isoformat(timespec="microseconds")
+                except (OverflowError, OSError, ValueError):
+                    pass
+            return f"{float(value):.12g}"
+        return str(value)
+
+    def current_h5_frame_metadata_lines(self):
+        if not self.h5_frame_metadata or self.total_frame_count() <= 1:
+            return []
+
+        index = min(max(int(self.current_index), 0), self.total_frame_count() - 1)
+        lines = ["", f"Image {index + 1} metadata:"]
+        for dataset_name, values in self.h5_frame_metadata.items():
+            try:
+                value = values[index]
+            except (IndexError, TypeError):
+                continue
+            lines.append(f"{dataset_name}: {self.format_h5_frame_metadata_value(dataset_name, value)}")
+        return lines
+
     def update_file_information(self, file_type, dataset_name, n_frames, image_shape):
         self.set_toolbar_options_enabled(True)
         self.current_file_type = file_type
@@ -3307,6 +3427,8 @@ class ViewTab(QWidget):
             f"Frames: {n_frames}",
             f"Image size: {width} x {height}",
         ]
+
+        lines.extend(self.current_h5_frame_metadata_lines())
 
         if self.headers:
             lines.extend(["", "Header / Metadata:"])
@@ -4259,6 +4381,7 @@ class ViewTab(QWidget):
     def slider_changed(self, value):
         self.current_index = value
         self.update_image()
+        self.refresh_file_information()
         self.update_frame_navigation_state()
 
 
