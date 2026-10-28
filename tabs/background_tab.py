@@ -590,9 +590,11 @@ class BackgroundTab(QWidget):
     def find_first_image_dataset(self, h5_group):
         best_dataset = None
         best_score = None
+        best_non_error_dataset = None
+        best_non_error_score = None
 
         def visitor(name, obj):
-            nonlocal best_dataset, best_score
+            nonlocal best_dataset, best_score, best_non_error_dataset, best_non_error_score
             if not isinstance(obj, h5py.Dataset) or obj.ndim not in (2, 3):
                 return
             if not np.issubdtype(obj.dtype, np.number):
@@ -606,12 +608,22 @@ class BackgroundTab(QWidget):
                 return
 
             score = self.h5_dataset_image_score(name, obj, frame_axis, frame_count, image_shape)
+            is_error_dataset = str(name).lower().rsplit("/", 1)[-1] in {
+                "data_errors",
+                "error",
+                "errors",
+            }
             if best_score is None or score > best_score:
                 best_dataset = obj
                 best_score = score
+            if not is_error_dataset and (best_non_error_score is None or score > best_non_error_score):
+                best_non_error_dataset = obj
+                best_non_error_score = score
 
         h5_group.visititems(visitor)
-        return best_dataset
+        # Error stacks are often 3-D and can otherwise outrank the actual
+        # image dataset (for example result_norm/data_errors vs result_norm/data).
+        return best_non_error_dataset or best_dataset
 
     def h5_dataset_image_info(self, shape):
         shape = tuple(int(size) for size in shape)

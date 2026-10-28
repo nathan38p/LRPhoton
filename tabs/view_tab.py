@@ -87,7 +87,7 @@ def emoji_icon(emoji, size=16):
     pix.fill(Qt.transparent)
     painter = QPainter(pix)
     try:
-        font = QFont("Segoe UI Emoji", max(1, int(size * 0.8)))
+        font = QFont("Segoe UI Emoji", max(1, int(size * 0.8))) if platform.system() == "Windows" else QFont()
     except Exception:
         font = QFont()
     painter.setFont(font)
@@ -199,6 +199,10 @@ class ViewImageCanvas(FigureCanvas):
             self.grabGesture(Qt.PinchGesture)
         except Exception:
             pass
+
+    def setCursor(self, cursor):
+        """Avoid a Qt/macOS native-cursor crash while panning an image."""
+        return None
 
     def event(self, event):
         view_tab = getattr(self, "view_tab", None)
@@ -3137,6 +3141,7 @@ class ViewTab(QWidget):
 
     def h5_dataset_image_score(self, name, dataset, frame_axis, n_frames, image_shape):
         lower_name = str(name).lower()
+        basename = lower_name.rsplit("/", 1)[-1]
         score = float(image_shape[0]) * float(image_shape[1])
 
         if len(tuple(dataset.shape)) == 3:
@@ -3149,6 +3154,12 @@ class ViewTab(QWidget):
 
         if any(token in lower_name for token in ["data", "image", "eiger", "detector", "pilatus"]):
             score *= 3.0
+        if basename in {"data", "image", "images"}:
+            score *= 20.0
+        if "result_norm/data" in lower_name:
+            score *= 2.0
+        if basename in {"data_errors", "errors", "error", "mask"} or basename.endswith("_errors"):
+            score *= 0.01
         if any(token in lower_name for token in ["mcs", "spectrum", "spectra", "counter", "monitor"]):
             score *= 0.05
 

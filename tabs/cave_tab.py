@@ -634,12 +634,21 @@ def inspect_h5_image_dataset(filename: str):
         if not datasets:
             raise ValueError("No 2D or 3D dataset found in this H5 file.")
 
-        preferred = None
-        for name in datasets:
-            lower = name.lower()
-            if "data" in lower or "eiger" in lower or "detector" in lower:
-                preferred = name
-                break
+        def dataset_score(name):
+            lower = name.lower().strip("/")
+            basename = lower.rsplit("/", 1)[-1]
+            score = 0
+            if basename in {"data", "image", "images"}:
+                score += 100
+            if "result_norm/data" in lower:
+                score += 30
+            if "eiger" in lower or "detector" in lower:
+                score += 10
+            if basename in {"data_errors", "errors", "error", "mask"} or basename.endswith("_errors"):
+                score -= 100
+            return score
+
+        preferred = max(datasets, key=dataset_score)
 
         dataset_name = preferred or datasets[0]
         dataset = h5[dataset_name]

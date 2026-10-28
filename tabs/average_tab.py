@@ -50,14 +50,50 @@ from .ui_style import (
 from .file_ratings import install_file_rating_menu, is_file_rated_up, set_item_file_path, should_hide_file_in_browser
 
 
-def write_average_h5_file(filename: str, image: np.ndarray, source_files, start_frame: int, end_frame: int):
+def _copy_h5_tree_with_average(source_group, target_group, image, image_dataset_path, source_files, start_frame, end_frame):
+    """Copy an H5 file while replacing only its image dataset."""
+    for key, value in source_group.attrs.items():
+        target_group.attrs[key] = value
+
+    for name, source_object in source_group.items():
+        source_path = source_object.name
+        if source_path == image_dataset_path:
+            dataset = target_group.create_dataset(name, data=image.astype(np.float32), compression="gzip")
+            for key, value in source_object.attrs.items():
+                dataset.attrs[key] = value
+            dataset.attrs["processing"] = "frame average"
+            dataset.attrs["source_files"] = ", ".join(Path(path).name for path in source_files)
+            dataset.attrs["start_frame"] = int(start_frame)
+            dataset.attrs["end_frame"] = int(end_frame)
+        elif isinstance(source_object, h5py.Group):
+            child = target_group.create_group(name)
+            _copy_h5_tree_with_average(
+                source_object,
+                child,
+                image,
+                image_dataset_path,
+                source_files,
+                start_frame,
+                end_frame,
+            )
+        else:
+            source_group.file.copy(source_object, target_group, name=name)
+
+
+def write_average_h5_file(filename: str, image: np.ndarray, source_entry, source_files, start_frame: int, end_frame: int):
     filename = Path(filename)
-    with h5py.File(filename, "w") as out:
-        dataset = out.create_dataset("/entry_0000/instrument/eiger/data", data=image.astype(np.float32), compression="gzip")
-        dataset.attrs["processing"] = "frame average"
-        dataset.attrs["source_files"] = ", ".join(Path(path).name for path in source_files)
-        dataset.attrs["start_frame"] = int(start_frame)
-        dataset.attrs["end_frame"] = int(end_frame)
+    source_path = Path(source_entry["path"])
+    image_dataset_path = "/" + str(source_entry["dataset_name"]).strip("/")
+    with h5py.File(source_path, "r") as source, h5py.File(filename, "w") as out:
+        _copy_h5_tree_with_average(
+            source,
+            out,
+            image,
+            image_dataset_path,
+            source_files,
+            start_frame,
+            end_frame,
+        )
 
 
 class AverageTab(QWidget):
@@ -860,7 +896,14 @@ class AverageTab(QWidget):
                 write_edf_file(output_path, self.average_image, self.first_edf_header_text, self.first_edf_byte_order)
                 self.status.append(f"\nSaved average EDF:\n{output_path}")
             else:
-                write_average_h5_file(output_path, self.average_image, [source["path"] for source in self.sources], start, end)
+                write_average_h5_file(
+                    output_path,
+                    self.average_image,
+                    self.sources[0],
+                    [source["path"] for source in self.sources],
+                    start,
+                    end,
+                )
                 self.status.append(f"\nSaved average H5:\n{output_path}")
         except Exception as error:
             QMessageBox.critical(self, "Save error", str(error))

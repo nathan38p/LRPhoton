@@ -617,6 +617,18 @@ class PlotCanvas(FigureCanvas):
         except Exception:
             pass
 
+    def set_cursor(self, cursor):
+        """Keep Matplotlib from changing the native cursor on macOS.
+
+        Qt 6.11 on recent macOS builds can crash while converting the
+        Matplotlib cursor to a native ``CGImage`` (the crash occurs in
+        ``QWidget::setCursor`` / ``QImage::toCGImage``).  This is especially
+        reproducible when a spin box redraws a plot while a navigation tool
+        is active.  Cursor changes are only a visual aid, so ignoring them
+        keeps zoom/pan and manual axis-limit editing functional.
+        """
+        return None
+
     def event(self, event):
         try:
             if event.type() == QEvent.NativeGesture:
@@ -3154,6 +3166,11 @@ class DatPlotTab(QWidget):
                 return
             if self.add_axis_label_button.isChecked():
                 self.add_peak_label_at(event)
+                return
+
+            curve_key = self.nearest_curve_key_at(event)
+            if curve_key is not None:
+                self.set_curve_visible(curve_key, False)
             return
 
         if event.button != 3:

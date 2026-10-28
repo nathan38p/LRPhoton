@@ -1,9 +1,19 @@
 import re
+import platform
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QValidator
 from PySide6.QtWidgets import QDoubleSpinBox, QGraphicsOpacityEffect, QGroupBox, QVBoxLayout, QHBoxLayout, QToolButton
+
+# Qt's WaitCursor crashes in the Cocoa image conversion on affected macOS
+# versions. Matplotlib requests it during slow draws (including Manual mask).
+# Use the native arrow instead; preserve all interactive plotting cursors.
+if platform.system() == "Darwin":
+    from matplotlib.backend_bases import cursors
+    from matplotlib.backends.backend_qt import cursord
+
+    cursord[cursors.WAIT] = Qt.ArrowCursor
 
 
 GROUP_BOX_STYLE = """
@@ -86,7 +96,7 @@ def emoji_icon(emoji, size=MATPLOTLIB_TOOLBAR_EMOJI_SIZE):
 
     painter = QPainter(pixmap)
     try:
-        font = QFont("Segoe UI Emoji", max(1, int(size * 0.82)))
+        font = QFont("Segoe UI Emoji", max(1, int(size * 0.82))) if platform.system() == "Windows" else QFont()
     except Exception:
         font = QFont()
     painter.setFont(font)
